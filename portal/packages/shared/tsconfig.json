@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    // T-057 (D-1) — the base/typecheck/test module system. `npm run typecheck` (`tsc --noEmit`)
+    // and `npm test` (ts-jest, which needs a CommonJS-shaped module graph to run under Jest's
+    // own CJS runtime) both use *this* file directly, unmodified by either build config below.
+    // Emission itself never happens from this file — see tsconfig.build.json /
+    // tsconfig.build.esm.json for why there are two separate build outputs rather than one.
+    "module": "commonjs",
+    "lib": ["ES2022"],
+    "declaration": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "outDir": "./dist",
+    "rootDir": "./src"
+  },
+  "include": ["src"]
+}

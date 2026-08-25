@@ -1,0 +1,3 @@
+cd portal
+npm run lint -- --max-warnings=0
+npm run scan:secrets

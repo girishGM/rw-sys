@@ -1,0 +1,36 @@
+# T-052 — build context for both back-end/Dockerfile and front-end/Dockerfile (context: portal/,
+# see docker-compose.yml). Keeps the context small and, more importantly, keeps stray
+# uncommitted artefacts from a working tree (a scratch file, a local `dist/`) out of a
+# reproducible image build — `tsc`'s inferred `rootDir` is sensitive to exactly this kind of
+# stray file at a workspace root (an uncommitted `tmp-*` script sitting next to `src/` widens
+# `rootDir` to include it, and the build output nests under `dist/src/...` instead of
+# `dist/...` for everyone, not just the image build). None of this is git-related the way the
+# root `.gitignore` is; a Docker build has no `.git` in scope by default and does not read it.
+
+**/node_modules
+**/dist
+**/coverage
+**/.turbo
+.git
+.github
+
+# Local env files — never baked into an image (R4). docker-compose.yml supplies configuration
+# via its own `environment`/`env_file`, never a file copied into the build context.
+.env
+.env.*
+!.env.example
+
+# Editor/OS noise
+.DS_Store
+*.log
+
+# Uncommitted scratch files some agents' verification sessions leave at a workspace root
+# (e.g. `back-end/tmp-*`) — never intended to ship, and never intended to be a build input.
+**/tmp-*
+
+# Not needed inside either image — both Dockerfiles copy only the package.json + src they need.
+**/*.md
+front-end/coverage
+front-end/.storybook
+front-end/storybook-static
+e2e

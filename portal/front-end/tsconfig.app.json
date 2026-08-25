@@ -1,0 +1,35 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "useDefineForClassFields": true,
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./src/*"]
+    }
+  },
+  "include": ["src"],
+  // T-021: `*.stories.tsx` files import `@storybook/react` types. Storybook itself has its
+  // own (separate, Vite-based) build/typecheck pipeline once installed — excluding stories
+  // here is standard practice, not a workaround, and specifically matters right now because
+  // `storybook`/`@storybook/*` could not be installed in the sandboxed environment T-021 was
+  // implemented in (see its completion report, "Deviations from spec"): without this
+  // exclude, the app's own `npm run typecheck` would fail on a dependency that doesn't
+  // exist yet, for files the app itself never imports.
+  "exclude": ["src/**/*.stories.tsx"]
+}

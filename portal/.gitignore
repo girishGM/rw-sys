@@ -1,0 +1,19 @@
+# Portal-specific additions. The repo root .gitignore already covers .env*, node_modules/,
+# dist/, build/, coverage/ and secrets — this file adds what's specific to this workspace.
+
+.env
+.env.*
+!.env.example
+
+# Vite
+front-end/.vite/
+front-end/dist/
+
+# NestJS
+back-end/dist/
+
+# Umzug migration lock artefacts (local dev only)
+back-end/.migrations-lock
+
+# Sequelize CLI (unused — Umzug is programmatic) config, in case anyone runs it by habit
+.sequelizerc

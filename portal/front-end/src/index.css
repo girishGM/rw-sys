@@ -1,0 +1,20 @@
+@import './styles/tokens.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-base);
+  line-height: var(--line-height-base);
+  color: var(--color-slate-900);
+}
+
+/* Design-system-wide focus ring (T-021 DoD: every interactive element gets a visible
+   focus ring). Individual components may layer `focus-visible:ring-*` on top of this for
+   emphasis, but this is the floor every native control gets for free. */
+:focus-visible {
+  outline: 2px solid var(--color-primary-500);
+  outline-offset: 2px;
+}

@@ -1,0 +1,106 @@
+# T-052 — brings up Postgres + API + web for local use and CI (task file, implementation
+# note 6). `docker compose up --build` from a clean checkout, after copying `.env.example` to
+# `.env` and filling it in (see `docs/DEPLOYMENT.md`'s Docker section), should need no other
+# step to reach four healthy services.
+#
+# No real credentials live in this file (TC-16) — every secret comes from `.env` (git-ignored;
+# `.env.example` is the committed template) via `env_file:`, never a literal `environment:`
+# value here.
+#
+# `reward_config` is not this portal's schema to create (`01-DATABASE.md` — the portal only
+# ever runs the two authorised `ALTER`s against it), but a from-scratch compose environment has
+# no pre-existing corporate database to point at either. `postgres`'s own init mechanism loads
+# the same schema-only DDL `database/reward_config_postgres.sql` (repo root, one level above
+# `portal/`) documents as a *port* of the real system, purely so this file is genuinely
+# self-contained on a clean checkout — never a second source of truth for that schema, and
+# never used against any environment that already has a real `reward_config`.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    env_file: .env
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_DB: ${DB_NAME:-reward_system}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./docker/postgres-init/01-create-app-role.sh:/docker-entrypoint-initdb.d/01-create-app-role.sh:ro
+      - ../database/reward_config_postgres.sql:/docker-entrypoint-initdb.d/02-reward-config-schema.sql:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    # Not published to the host by default (least exposure, and this machine's own real
+    # Postgres — see the repo root CLAUDE.md — already listens on the host's 5432; publishing
+    # this one there too would collide). Reach it from the host with
+    # `docker compose exec postgres psql -U postgres` if you need to, or uncomment a `ports:`
+    # mapping to a *different* host port for a GUI client.
+
+  migrate:
+    build:
+      context: .
+      dockerfile: back-end/Dockerfile
+      # Not the shipped `runtime` target — see back-end/Dockerfile's own `migrator` stage
+      # header for why (a real, filed defect in `umzug.ts`'s migration glob, outside this
+      # task's file scope, that the compiled `runtime` image's CLI hits and this one avoids).
+      target: migrator
+    env_file: .env
+    environment:
+      DB_HOST: postgres
+      DB_PORT: '5432'
+      DB_NAME: ${DB_NAME:-reward_system}
+      DB_SSL: 'false'
+      # Postgres inside this compose network has no TLS listener configured at all (a plain
+      # `postgres:16-alpine`, no certificates) — 02-SECURITY.md's "DB_SSL must be true outside
+      # development/test" is a real production requirement this local/CI stack is not the
+      # place to satisfy; see docs/DEPLOYMENT.md's Docker section for the explicit statement
+      # that this compose file is not a template for a production deployment.
+      NODE_ENV: development
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: 'no'
+
+  api:
+    build:
+      context: .
+      dockerfile: back-end/Dockerfile
+    env_file: .env
+    environment:
+      DB_HOST: postgres
+      DB_PORT: '5432'
+      DB_NAME: ${DB_NAME:-reward_system}
+      DB_SSL: 'false'
+      NODE_ENV: development
+      METRICS_HOST: '0.0.0.0'
+    ports:
+      - '${API_PORT:-3000}:3000'
+    # METRICS_PORT (default 9464, back-end/src/config/env.schema.ts) is deliberately absent
+    # from `ports:` — TC-11. `expose` documents that it is reachable from other containers on
+    # this compose network (e.g. a Prometheus service someone adds later) without publishing
+    # it to the host or any reverse proxy in front of this file's own `web` service.
+    expose:
+      - '9464'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    # The image's own HEALTHCHECK (back-end/Dockerfile) is inherited unchanged — this file
+    # does not repeat or override it, so "docker compose up: all services healthy" (TC-12)
+    # and this file's HEALTHCHECK are provably the same check, not two that could drift apart.
+
+  web:
+    build:
+      context: .
+      dockerfile: front-end/Dockerfile
+    ports:
+      - '${WEB_PORT:-8080}:8080'
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  postgres-data:

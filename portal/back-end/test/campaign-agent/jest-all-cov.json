@@ -1,0 +1,47 @@
+{
+  "//": "T-048's real coverage figure: the unit specs and the e2e suite in one run, so the report is the union rather than two halves that each understate it. The containment gates are exhaustively reachable only in isolation (a stubbed model can be made to say a specific wrong thing), while the session store, the tool scoping and the whole Zone 3 path are only truthfully reachable against the real database through the real guard chain — neither half alone is the truth. Run: `npm run test:cov -- --config test/campaign-agent/jest-all-cov.json --forceExit`.",
+  "rootDir": "../..",
+  "collectCoverageFrom": ["src/modules/campaign-agent/**/*.ts"],
+  "coverageDirectory": "coverage-t048-all",
+  "coverageThreshold": {
+    "global": { "lines": 80, "statements": 80, "branches": 70, "functions": 80 },
+    "//": "`option-resolver.service.ts` is this module's authorisation boundary — it is what makes a hallucinated or injected option id unusable (10-AI-CAMPAIGN-AGENT.md §3.1, TC-7/TC-8/TC-9/TC-10). AGENT-PROTOCOL §4 puts scope code at 100% rather than 80%, and an untested branch here is a branch of the containment nobody has ever exercised. `plan-hash.service.ts` gets the same bar for the same reason on the §3.2 half: it is the whole of the confirmation gate.",
+    "./src/modules/campaign-agent/option-resolver.service.ts": {
+      "lines": 100,
+      "statements": 100,
+      "branches": 100,
+      "functions": 100
+    },
+    "./src/modules/campaign-agent/plan-hash.service.ts": {
+      "lines": 100,
+      "statements": 100,
+      "branches": 100,
+      "functions": 100
+    }
+  },
+  "projects": [
+    {
+      "displayName": "t048-unit",
+      "rootDir": ".",
+      "roots": ["<rootDir>/test/campaign-agent"],
+      "testRegex": ".*\\.spec\\.ts$",
+      "testPathIgnorePatterns": ["\\.e2e-spec\\.ts$"],
+      "transform": { "^.+\\.(t|j)s$": "ts-jest" },
+      "testEnvironment": "node",
+      "moduleFileExtensions": ["js", "json", "ts"],
+      "moduleNameMapper": { "^@/(.*)$": "<rootDir>/src/$1" }
+    },
+    {
+      "displayName": "t048-e2e",
+      "rootDir": ".",
+      "roots": ["<rootDir>/test/campaign-agent"],
+      "testRegex": "campaign-agent\\.e2e-spec\\.ts$",
+      "transform": { "^.+\\.(t|j)s$": "ts-jest" },
+      "testEnvironment": "node",
+      "moduleFileExtensions": ["js", "json", "ts"],
+      "moduleNameMapper": { "^@/(.*)$": "<rootDir>/src/$1" },
+      "setupFiles": ["<rootDir>/test/jest-e2e.setup.ts"],
+      "maxWorkers": 1
+    }
+  ]
+}

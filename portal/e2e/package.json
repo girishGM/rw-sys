@@ -1,0 +1,27 @@
+{
+  "name": "@reward-portal/e2e",
+  "private": true,
+  "version": "0.1.0",
+  "description": "T-050 — Playwright end-to-end suite: the six-role delegation chain against a real, ephemeral Postgres and the real Nest/React apps. Deliberately its own npm project, not a workspace of portal/package.json (T-050's file scope is e2e/** only, and the root workspaces list is another task's owned file) — see README section in AGENT-PROTOCOL for the reasoning.",
+  "engines": {
+    "node": ">=20 <21"
+  },
+  "scripts": {
+    "e2e": "playwright test",
+    "e2e:a11y": "playwright test --grep @a11y",
+    "e2e:report": "playwright show-report",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "playwright:install": "playwright install --with-deps chromium",
+    "perf:dashboard-fcp": "node -r ts-node/register/transpile-only perf/dashboard-fcp.ts",
+    "perf:dashboard-lighthouse": "node -r ts-node/register/transpile-only perf/dashboard-lighthouse.ts"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.47.0",
+    "@axe-core/playwright": "^4.10.0",
+    "@types/node": "^20.14.0",
+    "@types/pg": "^8.11.0",
+    "pg": "^8.16.0",
+    "testcontainers": "^10.13.0",
+    "typescript": "^5.4.5"
+  }
+}

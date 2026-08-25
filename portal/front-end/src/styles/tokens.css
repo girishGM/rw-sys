@@ -1,0 +1,133 @@
+/**
+ * T-021 — design tokens (04-FRONTEND.md §7).
+ *
+ * Single source of truth for every colour, radius, shadow and typography value used by
+ * `src/components/**`. Components must never hard-code a hex value (T-021 TC-16 / DoD) —
+ * they consume these via `tailwind.config.ts`, which maps Tailwind utility names
+ * (`bg-primary-600`, `rounded-control`, ...) straight back to the custom properties below.
+ *
+ * Spacing deliberately has no token layer of its own: Tailwind's default spacing scale
+ * (1=4px, 2=8px, 3=12px, 4=16px, 6=24px, 8=32px, 12=48px) already *is* the 4px scale
+ * §7 asks for, so re-declaring it here would just be a second place for it to drift.
+ */
+:root {
+  /* ---- Typography ------------------------------------------------------------------ */
+  --font-sans: 'Inter', system-ui, sans-serif;
+  --font-size-base: 14px;
+  --line-height-base: 1.5;
+
+  /* ---- Radius ------------------------------------------------------------------------ */
+  --radius-control: 6px;
+  --radius-card: 10px;
+
+  /* ---- Elevation ----------------------------------------------------------------------
+     Exactly one shadow for cards, one for popovers — §7 is explicit that decorative
+     shadows are out of scope for a "clean and simple" system. */
+  --shadow-card: 0 1px 2px 0 rgb(15 23 42 / 0.06), 0 1px 3px 0 rgb(15 23 42 / 0.1);
+  --shadow-popover: 0 4px 6px -1px rgb(15 23 42 / 0.1), 0 10px 15px -3px rgb(15 23 42 / 0.1);
+
+  /* ---- Neutral: slate 50 -> 900 -------------------------------------------------------- */
+  --color-slate-50: #f8fafc;
+  --color-slate-100: #f1f5f9;
+  --color-slate-200: #e2e8f0;
+  --color-slate-300: #cbd5e1;
+  --color-slate-400: #94a3b8;
+  --color-slate-500: #64748b;
+  --color-slate-600: #475569;
+  --color-slate-700: #334155;
+  --color-slate-800: #1e293b;
+  --color-slate-900: #0f172a;
+  --color-white: #ffffff;
+
+  /* ---- Primary: indigo ------------------------------------------------------------- */
+  --color-primary-50: #eef2ff;
+  --color-primary-100: #e0e7ff;
+  --color-primary-200: #c7d2fe;
+  --color-primary-300: #a5b4fc;
+  --color-primary-400: #818cf8;
+  --color-primary-500: #6366f1;
+  --color-primary-600: #4f46e5;
+  --color-primary-700: #4338ca;
+  --color-primary-800: #3730a3;
+
+  /* ---- Success: emerald ------------------------------------------------------------- */
+  --color-success-50: #ecfdf5;
+  --color-success-100: #d1fae5;
+  --color-success-200: #a7f3d0;
+  --color-success-500: #10b981;
+  --color-success-600: #059669;
+  --color-success-700: #047857;
+
+  /* ---- Warning: amber ---------------------------------------------------------------- */
+  --color-warning-50: #fffbeb;
+  --color-warning-100: #fef3c7;
+  --color-warning-200: #fde68a;
+  --color-warning-500: #f59e0b;
+  --color-warning-600: #d97706;
+  --color-warning-700: #b45309;
+
+  /* ---- Danger: rose -------------------------------------------------------------------- */
+  --color-danger-50: #fff1f2;
+  --color-danger-100: #ffe4e6;
+  --color-danger-200: #fecdd3;
+  --color-danger-500: #f43f5e;
+  --color-danger-600: #e11d48;
+  --color-danger-700: #be123c;
+
+  /* ---- Info / "paused" status: sky ------------------------------------------------------
+     §7 pins `paused` to sky specifically (distinct from primary/indigo), so it gets its
+     own small scale rather than reusing primary. */
+  --color-sky-50: #f0f9ff;
+  --color-sky-100: #e0f2fe;
+  --color-sky-200: #bae6fd;
+  --color-sky-500: #0ea5e9;
+  --color-sky-600: #0284c7;
+  --color-sky-700: #0369a1;
+}
+
+/**
+ * T-063 — accessible override for the pre-existing "muted micro-text" convention.
+ *
+ * `text-slate-400` (2.56:1 on white) was used, inline, for genuine text content across many
+ * super_admin/tenant-scoped screens — not only the `<dt>` this task was filed against
+ * (`text-xs uppercase tracking-wide text-slate-400` on merchant/tenant/country/user detail
+ * screens), but the identical failure on `<span>`/`<p>`/`<td>`/`<tr>` elements too (e.g. a
+ * "(COUNTRYCODE)" suffix, a table's `<thead>` row, a "Connector config" sub-heading) —
+ * confirmed by actually running `npm run e2e:a11y` (T-063 TC-1) rather than assumed from the
+ * `<dt>` case alone: the first run surfaced the reward-detail `<p>` sub-heading, and after that
+ * was covered, the next run surfaced a country-detail `<span>`, both against a 4.5:1 WCAG AA
+ * requirement (T-050 `accessibility.spec.ts` TC-6, `serious` impact each time).
+ *
+ * Those screens live under `src/features/**`, each owned by its own (already-`done`) Wave 3
+ * task — T-063 (`agent-frontend-core`) owns only `src/components/**` and `src/styles/**`, so it
+ * cannot edit them directly (AGENT-PROTOCOL R9). New call sites should use the
+ * `DescriptionList`/`DescriptionItem` components (`src/components/DescriptionList.tsx`) for the
+ * `<dt>`/`<dd>` case, which already render at the accessible colour below and need no override.
+ * This rule exists purely to fix every *pre-existing* inline usage without touching the files
+ * that contain it.
+ *
+ * Redefining `--color-slate-400` itself was rejected: that token is also used, correctly, for
+ * genuinely-exempt low-contrast cases elsewhere (decorative icons — not text nodes at all;
+ * native `disabled:`/`placeholder:` variants, both WCAG- and axe-exempt; a disabled radio
+ * option's `<label>`, deliberately left out of the tag list below so a disabled option still
+ * *looks* disabled) — silently darkening what "400" means for all of those, for no reason tied
+ * to this bug, was rejected in favour of targeting only the tags actually confirmed (by the
+ * token-contrast test below, and by the elements axe flagged) to carry real text content in
+ * this pattern. `slate-600` measures ~7.58:1 on a white card, comfortably clear of 4.5:1
+ * (uppercase micro-labels in particular read as harder to see than their raw ratio suggests, so
+ * this deliberately does not stop at the ~4.76:1 `slate-500` border case). Each attribute
+ * selector's specificity (0,1,1) is exactly enough to beat the single-class utility (0,1,0) it
+ * overrides — no `!important`, and no effect on any element still legitimately using
+ * `text-slate-400` (icons, `disabled:text-slate-400`, `placeholder:text-slate-400`, or the
+ * disabled-option `<label>` above).
+ */
+dt[class~='text-slate-400'],
+dd[class~='text-slate-400'],
+p[class~='text-slate-400'],
+span[class~='text-slate-400'],
+li[class~='text-slate-400'],
+tr[class~='text-slate-400'],
+th[class~='text-slate-400'],
+td[class~='text-slate-400'] {
+  color: var(--color-slate-600);
+}

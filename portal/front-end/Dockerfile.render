@@ -1,0 +1,59 @@
+# syntax=docker/dockerfile:1
+#
+# Render-specific variant of `front-end/Dockerfile`. Identical build stages (Vite build of the
+# SPA, served by nginx, non-root) — the only difference is the final stage, which uses
+# `nginx.render.conf` (a backend hostname placeholder instead of Docker Compose's `api:3000`)
+# and a small entrypoint that fills in that placeholder from `API_UPSTREAM_HOST` at container
+# start. See `nginx.render.conf` and `docker-entrypoint.render.sh` for why. The original
+# `front-end/Dockerfile` is untouched — this file exists alongside it, for Render only.
+#
+# Built from the WORKSPACE ROOT (`portal/`), same as the original.
+
+ARG NODE_IMAGE=node:20-bookworm-slim
+
+# ---------------------------------------------------------------------------------------------
+# Stage 1 & 2: identical to front-end/Dockerfile — install, then build packages/shared + the SPA.
+# ---------------------------------------------------------------------------------------------
+FROM ${NODE_IMAGE} AS deps
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+COPY packages/shared/package.json packages/shared/package.json
+COPY back-end/package.json back-end/package.json
+COPY front-end/package.json front-end/package.json
+
+RUN npm ci --ignore-scripts
+
+FROM deps AS build
+WORKDIR /app
+
+COPY packages/shared packages/shared
+COPY front-end front-end
+
+RUN npm run build -w packages/shared \
+ && npm run build -w front-end
+
+# ---------------------------------------------------------------------------------------------
+# Stage 3: nginx, serving the built static output, with the Render-specific config + entrypoint.
+# ---------------------------------------------------------------------------------------------
+FROM nginx:1.27-alpine AS runtime
+
+COPY front-end/nginx.main.conf /etc/nginx/nginx.conf
+COPY front-end/nginx.render.conf /etc/nginx/conf.d/default.conf
+COPY front-end/docker-entrypoint.render.sh /docker-entrypoint.render.sh
+COPY --from=build /app/front-end/dist /usr/share/nginx/html
+
+# The entrypoint runs `sed -i` on default.conf as the `nginx` user (see front-end/Dockerfile's
+# own note on why this image never runs as root) — it needs write access to that one file, not
+# just read.
+RUN chown -R nginx:nginx /var/cache/nginx /usr/share/nginx/html /etc/nginx/conf.d/default.conf \
+ && chmod +x /docker-entrypoint.render.sh
+
+USER nginx
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
+  CMD wget -q -O /dev/null http://127.0.0.1:8080/nginx-health || exit 1
+
+ENTRYPOINT ["/docker-entrypoint.render.sh"]

@@ -1,0 +1,100 @@
+# Render Blueprint for a DEMO deployment of the Reward Campaign Portal — not a production
+# topology. See portal/architect-review/render-deployment-guide.html for the full walkthrough,
+# including the one-time manual steps this file cannot express (loading the reward_config
+# schema, running migrations, provisioning encryption keys, bootstrapping the first Super
+# Admin — all one-off CLI operations, not declarative service config).
+#
+# This file is a best-effort convenience, not a guaranteed one-click deploy: Render's Blueprint
+# field names shift between versions, and this was written without a live Render account to
+# verify against. If "New +  Blueprint" rejects a field here, Render's own error names exactly
+# which one — delete or fix that line and re-sync; everything else in the file is unaffected.
+# The HTML guide's manual, dashboard-driven steps are the guaranteed-correct fallback and don't
+# depend on this file parsing cleanly at all.
+#
+# Known simplification versus the project's real security design (02-SECURITY.md, T-002 note
+# 6): DB_MIGRATION_* below is Render's own auto-created database user, which also ends up as
+# the practical owner of the whole database — the "migration role is privileged, app role is
+# least-privilege, never merged" separation the codebase itself requires is only genuinely
+# achieved once you create the `reward_app` role by hand (the HTML guide's Step 3) and use it
+# for DB_APP_* instead of leaving it equal to the migration user. Fine for a demo; do the
+# manual step before treating this as anything longer-lived.
+
+databases:
+  - name: reward-portal-db
+    plan: free
+    databaseName: reward_system
+    user: reward_portal_admin
+
+services:
+  - type: web
+    name: reward-portal-api
+    runtime: docker
+    plan: free
+    dockerfilePath: back-end/Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/v1/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "3000"
+      - key: DB_HOST
+        fromDatabase:
+          name: reward-portal-db
+          property: host
+      - key: DB_PORT
+        fromDatabase:
+          name: reward-portal-db
+          property: port
+      - key: DB_NAME
+        fromDatabase:
+          name: reward-portal-db
+          property: database
+      - key: DB_SSL
+        value: "true"
+      # DB_APP_* — fill these in yourself after creating the least-privilege `reward_app` role
+      # by hand (HTML guide, Step 3). Left blank on purpose: a real value here would be a
+      # placeholder that looks like it works, which is exactly what R4 forbids.
+      - key: DB_APP_USERNAME
+        value: reward_app
+      - key: DB_APP_PASSWORD
+        sync: false
+      # DB_MIGRATION_* — Render's own database user, used only by the one-off migration CLI you
+      # run from your own machine (HTML guide, Step 4). Never read by this running service.
+      - key: DB_MIGRATION_USERNAME
+        fromDatabase:
+          name: reward-portal-db
+          property: user
+      - key: DB_MIGRATION_PASSWORD
+        fromDatabase:
+          name: reward-portal-db
+          property: password
+      # Generate locally (HTML guide, Step 2) and paste in via the Render dashboard — never
+      # committed. sync: false marks these as "set me manually, don't expect a value here".
+      - key: JWT_PRIVATE_KEY
+        sync: false
+      - key: JWT_PUBLIC_KEY
+        sync: false
+      # A single Render instance sits behind exactly one hop of Render's own edge proxy.
+      - key: TRUST_PROXY
+        value: "1"
+      # Encryption key material (HTML guide, Step 6) — the CLI prints the exact NAME to use;
+      # add it here yourself with that name once you have it. Nothing to fill in yet.
+
+  - type: web
+    name: reward-portal-web
+    runtime: docker
+    plan: free
+    dockerfilePath: front-end/Dockerfile.render
+    dockerContext: .
+    healthCheckPath: /nginx-health
+    envVars:
+      # Bare hostname only — no https://, no trailing slash. Render assigns this the moment the
+      # API service above is first created; if this cross-service reference doesn't resolve
+      # automatically on your Render version, set it by hand to that hostname instead (HTML
+      # guide, Step 7).
+      - key: API_UPSTREAM_HOST
+        fromService:
+          type: web
+          name: reward-portal-api
+          property: host

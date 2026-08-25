@@ -1,0 +1,404 @@
+// T-047 — the cross-team contract between this portal and the transaction microservice.
+//
+// 09-INTEGRATION.md §3 gives the authoritative shape of the service, `ConfigSection`,
+// `GetCampaignConfigRequest`, `CampaignConfig`, `BoundRule`, `BoundReward`, `CampaignCap` and
+// `RuleVersionDetail`. Those seven are reproduced here **field number for field number** — a
+// renumbering is a silent wire break for a consumer we do not build, so the design doc is
+// treated as the numbering authority and this file adds only what it left implicit (the
+// request/response envelopes §3 names in the `service` block but does not spell out).
+//
+// ## Rules for anyone editing this file
+//
+//  1. **Never renumber or reuse a field number.** Delete a field by `reserved`-ing its number
+//     and its name. The runtime team generates from this file independently; a reused number
+//     deserialises as the wrong type with no error anywhere.
+//  2. **No mutating RPC, ever.** 09-INTEGRATION.md §7: *"the gRPC service is read-only … A
+//     configuration portal that can be written to by a high-volume runtime service is a
+//     configuration portal that will be corrupted by a bug in that service."* The one narrow
+//     exception — the budget-breach callback — is deliberately **not** here; it is an internal
+//     REST route in the same mTLS trust domain (§7a). Verification step 6 greps this file for
+//     `rpc ` and every line must be a read.
+//  3. **Money is a string, never a float or a double.** §4b: binary floating point cannot
+//     represent monetary decimals exactly, and a budget drifting by fractions of a cent over
+//     millions of transactions is a reconciliation problem nobody wants to debug.
+//  4. **`connector_config` must never appear.** §6: third-party credentials. The runtime
+//     delivers through its own connectors. `back-end/test/grpc/proto-contract.spec.ts` asserts
+//     the absence of the token in this file, so adding it fails the build rather than review.
+//
+// ## Statuses that cross this boundary
+//
+// Only `active` and `paused` are ever served (§6). `draft` and `pending_approval` are
+// unapproved configuration and must not reach a runtime that pays real money; `completed` and
+// `archived` are not live. `paused` **is** served, flagged, so the runtime stops accruing
+// rather than erroring on a campaign that vanished from its cache.
+
+syntax = "proto3";
+
+package rewardportal.config.v1;
+
+option java_multiple_files = true;
+option java_package = "com.rewardportal.config.v1";
+option go_package = "rewardportal/config/v1;configv1";
+
+// -------------------------------------------------------------------------------------------
+// Service
+// -------------------------------------------------------------------------------------------
+
+// Read-only campaign configuration. See rule 2 above before adding anything.
+service CampaignConfigService {
+  // Full configuration for one campaign, with every version pinned.
+  //
+  // Complete or an error — never partial (09-INTEGRATION.md §10). The runtime's correct
+  // behaviour on a miss is to fail closed, and it can only do that if a response is either
+  // whole or an error.
+  rpc GetCampaignConfig (GetCampaignConfigRequest) returns (CampaignConfig);
+
+  // Every active campaign for a tenant — used to warm the runtime cache at boot and to
+  // re-warm after a dropped `WatchCampaignConfig` stream.
+  rpc ListActiveCampaigns (ListActiveCampaignsRequest) returns (CampaignConfigList);
+
+  // Server-streaming invalidation. The runtime holds a warm cache and is told when to drop an
+  // entry, rather than polling.
+  //
+  // **The stream is an optimisation, never a guarantee** (§8). Every cache entry must carry a
+  // TTL — 5 minutes is the documented default — because a design where a dropped stream
+  // silently freezes configuration forever is one dropped connection away from paying rewards
+  // on last month's rules.
+  rpc WatchCampaignConfig (WatchRequest) returns (stream ConfigChangeEvent);
+
+  // Resolve (rule_id, version_no) -> human-readable explanation. This is how a rejection
+  // recorded months ago is explained to a customer (§5). A **retired** version still resolves;
+  // an unknown one returns `exists = false`, not a `NOT_FOUND` status.
+  rpc ResolveRuleVersion (ResolveRuleVersionRequest) returns (RuleVersionDetail);
+
+  // The reward-side mirror of ResolveRuleVersion, for a granted reward entry.
+  rpc ResolveRewardVersion (ResolveRewardVersionRequest) returns (RewardVersionDetail);
+
+  // The runtime OWNS the budget counters; the portal only displays consumption. This RPC
+  // returns what the portal has been told, never an authoritative balance.
+  rpc GetBudgetStatus (BudgetStatusRequest) returns (BudgetStatusResponse);
+}
+
+// -------------------------------------------------------------------------------------------
+// Sections — 09-INTEGRATION.md §4c
+// -------------------------------------------------------------------------------------------
+
+// Which parts of the configuration a caller wants.
+//
+// **This is an authorisation boundary, not a bandwidth optimisation**, which is why it is a
+// coarse named enum and not a `google.protobuf.FieldMask`. A reward-delivery service should not
+// merely *choose* to omit rule expressions — it must be incapable of retrieving them, and you
+// cannot write or audit a legible grant over `trackers.*.components.*.rules.*.expression`.
+// `reward_portal.grpc_service_grants.allowed_sections` binds these names to a certificate SAN.
+enum ConfigSection {
+  CONFIG_SECTION_UNSPECIFIED = 0;
+  BASIC     = 1;   // campaign header, dates, status, budget summary — ALWAYS included
+  MERCHANTS = 2;   // participating merchants and their activities
+  TRACKERS  = 3;   // tracker + component structure, sequence, completion logic
+  RULES     = 4;   // bound rules with pinned versions and dynamic values
+  REWARDS   = 5;   // bound rewards with pinned versions and units
+  CAPS      = 6;   // budgets and customer limits
+}
+
+// -------------------------------------------------------------------------------------------
+// GetCampaignConfig
+// -------------------------------------------------------------------------------------------
+
+message GetCampaignConfigRequest {
+  int32  tenant_id     = 1;
+  string campaign_code = 2;
+
+  // The `etag` of the copy the caller already holds. When it matches, the response carries
+  // `not_modified = true` and no payload.
+  //
+  // An etag covers **the config and the section set it was built from** — a client that cached
+  // a BASIC-only response and then asks for everything must not receive a 304.
+  string etag = 3;
+
+  // Empty = every section this identity is GRANTED, with `sections_omitted` listing the rest.
+  // A non-empty list containing a section the identity is not granted is PERMISSION_DENIED
+  // naming that section: an explicit ask is caller misconfiguration and must fail loudly.
+  repeated ConfigSection sections = 4;
+}
+
+message CampaignConfig {
+  int32  campaign_id      = 1;
+  string campaign_code    = 2;
+  int32  tenant_id        = 3;
+  int32  country_id       = 4;
+  string status           = 5;   // only 'active' or 'paused' is ever served
+
+  // A campaign's start and end are CALENDAR DATES, not instants (T-065). Both are served as
+  // RFC3339 at exactly UTC midnight of that date — `2027-02-15T00:00:00.000Z` — so the wire type
+  // is unchanged for consumers already parsing it as a timestamp.
+  //
+  // BOTH BOUNDS ARE INCLUSIVE. A campaign with end_date `2027-02-15T00:00:00.000Z` is live
+  // THROUGH the whole of 15 February; it does not expire at the start of that day. A consumer
+  // deciding "is this campaign live now?" must therefore compare against `end_date + 1 day`, or
+  // compare calendar dates directly — `now <= end_date` cuts the last day off the campaign.
+  //
+  // Stated here rather than left to the reader because the portal cannot renegotiate this
+  // contract later: the portal itself renders and stores the same inclusive calendar date, and
+  // the two must agree about which days a campaign pays out on.
+  string start_date       = 6;   // RFC3339, UTC midnight of the first active date (inclusive)
+  string end_date         = 7;   // RFC3339, UTC midnight of the last active date (inclusive)
+  Money  budget           = 8;
+  int32  max_participants = 9;
+
+  repeated Merchant    merchants = 10;  // section MERCHANTS
+  repeated Tracker     trackers  = 11;  // section TRACKERS
+  repeated BoundRule   rules     = 12;  // section RULES
+  repeated BoundReward rewards   = 13;  // section REWARDS
+
+  string etag         = 14;  // hash(config_hash + sorted(sections_returned))
+  string config_hash  = 15;  // sha256 of the canonical payload — stable and comparable (§11)
+  bool   not_modified = 16;
+  string served_at    = 17;  // RFC3339
+
+  repeated CampaignCap caps = 18;  // section CAPS (11-BUDGETS-AND-LIMITS.md §5)
+
+  repeated ConfigSection sections_returned = 19;
+  // Granted-but-not-returned is impossible; this lists sections **withheld for lack of a
+  // grant**, and only when `sections` was empty. A non-empty request that named an ungranted
+  // section never gets a response at all.
+  repeated ConfigSection sections_omitted = 20;
+}
+
+// -------------------------------------------------------------------------------------------
+// The central message — 09-INTEGRATION.md §4
+// -------------------------------------------------------------------------------------------
+
+// A rule as bound to one campaign component, with its version pinned.
+//
+// It carries **both** `parameters_json` (the version's declared parameter SCHEMA) and
+// `bound_values_json` (the values the maker supplied for THIS campaign). Sending only the
+// values would force the engine to assume the portal validated correctly; sending both lets it
+// verify.
+message BoundRule {
+  int32  rule_id             = 1;
+  int32  rule_version_id     = 2;
+  int32  version_no          = 3;  // <- the runtime records THIS on every decision
+  string rule_code           = 4;
+  string expression          = 5;  // opaque to the portal; meaningful to the engine
+  string parameters_json     = 6;  // the rule's declared parameter SCHEMA
+  string bound_values_json   = 7;  // the DYNAMIC VALUES the maker supplied for THIS campaign
+  int32  tracker_component_id = 8;
+  string status              = 9;
+}
+
+// A reward as attached to a campaign, tracker or component, with its version pinned.
+//
+// `connector_config` is deliberately ABSENT and must stay absent (§6, rule 4 above).
+message BoundReward {
+  int32  reward_id         = 1;
+  int32  reward_version_id = 2;
+  int32  version_no        = 3;  // <- recorded on every reward entry
+  string system_code       = 4;
+  string reward_type       = 5;
+  string delivery_mode     = 6;
+  string policies_json     = 7;  // caps, rates — frozen at this version
+  string unit_type         = 8;  // 'currency' | 'points' | 'voucher'
+  string unit_code         = 9;  // 'MYR' | 'PTS' | ...  <- budgets match on THIS
+
+  // Which level the reward hangs off, and the id of that level's row. Added by T-047: the
+  // design doc's `BoundReward` had no way to say *where* a reward attaches, and a runtime
+  // cannot decide when to grant a tracker-level reward without it (12-CAMPAIGN-STRUCTURE.md).
+  string level   = 10;  // 'campaign' | 'tracker' | 'component'
+  int32  ref_id  = 11;  // tracker id or component id; 0 at campaign level
+  string status  = 12;
+}
+
+// A budget (pooled) or a customer limit (per customer) — 11-BUDGETS-AND-LIMITS.md §5.
+//
+// **A grant consumes a cap only when their units match** (§4b): `BoundReward.unit_type`/
+// `unit_code` against `CampaignCap.unit_type`/`unit_code`. A points grant can never consume a
+// MYR budget in either direction, because no conversion rate exists anywhere in this design.
+message CampaignCap {
+  string cap_class         = 1;   // 'budget' (pooled) | 'limit' (per customer)
+  string scope_level       = 2;   // campaign | tracker | component
+  int32  scope_ref_id      = 3;
+  string period_type       = 4;   // lifetime|daily|monthly|rolling_hours|time_of_day
+  int32  period_value      = 5;
+  string window_start_time = 6;
+  string window_end_time   = 7;
+  string period_timezone   = 8;
+  string unit_type         = 9;
+  string unit_code         = 10;
+  string reward_type       = 11;  // optional narrowing; empty = all types in this unit
+  string max_total_amount  = 12;  // decimal as STRING — never a float for money
+  int32  max_occurrences   = 13;
+  int32  max_customers     = 14;
+  string on_breach         = 15;  // reject | pause_campaign | alert_only
+  int32  warn_at_percent   = 16;
+}
+
+// -------------------------------------------------------------------------------------------
+// Supporting structure
+// -------------------------------------------------------------------------------------------
+
+message Money {
+  string amount   = 1;  // decimal as STRING (§4b)
+  string currency = 2;
+}
+
+message Merchant {
+  int32  merchant_id   = 1;
+  string merchant_code = 2;
+  string name          = 3;
+  string status        = 4;
+  repeated Activity activities = 5;
+}
+
+message Activity {
+  int32  activity_id   = 1;
+  string activity_code = 2;
+  string name          = 3;
+}
+
+message Tracker {
+  int32  tracker_id           = 1;
+  string tracker_code         = 2;
+  string name                 = 3;
+  string completion_logic     = 4;  // all | any | n_of | sequence
+  int32  completion_threshold = 5;
+  string status               = 6;
+  repeated TrackerComponent components = 7;
+}
+
+message TrackerComponent {
+  int32  component_id   = 1;
+  string component_code = 2;
+  string name           = 3;
+  int32  activity_id    = 4;
+  int32  sequence_order = 5;
+  bool   is_mandatory   = 6;
+  string status         = 7;
+}
+
+// -------------------------------------------------------------------------------------------
+// ListActiveCampaigns
+// -------------------------------------------------------------------------------------------
+
+message ListActiveCampaignsRequest {
+  int32 tenant_id = 1;
+
+  // Same section semantics as GetCampaignConfigRequest. A cache-warming caller normally sends
+  // an empty list (or `[BASIC]`, which is enough to enumerate) and fetches full configuration
+  // lazily per campaign.
+  repeated ConfigSection sections = 2;
+}
+
+message CampaignConfigList {
+  repeated CampaignConfig campaigns = 1;
+  string served_at = 2;  // RFC3339
+  repeated ConfigSection sections_returned = 3;
+  repeated ConfigSection sections_omitted  = 4;
+}
+
+// -------------------------------------------------------------------------------------------
+// WatchCampaignConfig
+// -------------------------------------------------------------------------------------------
+
+message WatchRequest {
+  int32 tenant_id = 1;
+}
+
+// Emitted **only after** the portal's own governance has completed (§9).
+//
+// A blast must NOT emit an event for a running campaign: those campaigns are pinned to their
+// existing version and their configuration has not changed. Emitting there would cause a
+// refetch and — if the pin were ever mishandled — silently move a live campaign to a new rule
+// version.
+message ConfigChangeEvent {
+  enum ChangeType {
+    CHANGE_TYPE_UNSPECIFIED = 0;
+    UPDATED = 1;  // checker approved -> active
+    PAUSED  = 2;  // tenant_admin paused, or a budget breach paused it (§7a)
+    ENDED   = 3;  // completed or archived
+  }
+
+  int32      campaign_id   = 1;
+  string     campaign_code = 2;
+  int32      tenant_id     = 3;
+  ChangeType change_type   = 4;
+  string     etag          = 5;  // the BASIC-section etag of the new state, as a cheap probe
+  string     occurred_at   = 6;  // RFC3339
+}
+
+// -------------------------------------------------------------------------------------------
+// Version resolution — 09-INTEGRATION.md §5
+// -------------------------------------------------------------------------------------------
+
+message ResolveRuleVersionRequest {
+  int32 tenant_id  = 1;  // scoping only — the version itself is global configuration
+  int32 rule_id    = 2;
+  int32 version_no = 3;
+}
+
+message RuleVersionDetail {
+  int32  rule_id         = 1;
+  string rule_code       = 2;
+  string name            = 3;
+  int32  version_no      = 4;
+  string expression      = 5;
+  string parameters_json = 6;
+  string status          = 7;  // published | deprecated | retired
+  string published_at    = 8;  // RFC3339
+  string change_summary  = 9;
+  bool   exists          = 10; // false rather than an error — see §5
+  int32  rule_version_id = 11;
+}
+
+message ResolveRewardVersionRequest {
+  int32 tenant_id  = 1;
+  int32 reward_id  = 2;
+  int32 version_no = 3;
+}
+
+message RewardVersionDetail {
+  int32  reward_id         = 1;
+  string system_code       = 2;
+  string name              = 3;
+  int32  version_no        = 4;
+  string reward_type       = 5;
+  string delivery_mode     = 6;
+  string policies_json     = 7;
+  string unit_type         = 8;
+  string unit_code         = 9;
+  string status            = 10;
+  string published_at      = 11;
+  string change_summary    = 12;
+  bool   exists            = 13;
+  int32  reward_version_id = 14;
+  // connector_config is deliberately ABSENT here too (§6) — resolution explains a decision, it
+  // does not hand out delivery credentials.
+}
+
+// -------------------------------------------------------------------------------------------
+// Budget status — the portal displays, the runtime owns
+// -------------------------------------------------------------------------------------------
+
+message BudgetStatusRequest {
+  int32  tenant_id     = 1;
+  string campaign_code = 2;
+}
+
+message BudgetStatusResponse {
+  int32  campaign_id = 1;
+  string served_at   = 2;
+  repeated BudgetStatusEntry entries = 3;
+}
+
+message BudgetStatusEntry {
+  int32  cap_id            = 1;
+  string cap_class         = 2;
+  string scope_level       = 3;
+  int32  scope_ref_id      = 4;
+  string period_type       = 5;
+  string unit_type         = 6;
+  string unit_code         = 7;
+  string max_total_amount  = 8;  // configured ceiling, decimal as STRING
+  int32  max_occurrences   = 9;
+  string on_breach         = 10;
+  int32  warn_at_percent   = 11;
+}

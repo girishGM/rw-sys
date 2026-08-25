@@ -1,0 +1,40 @@
+{
+  "name": "reward-system-portal",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Multi-country, multi-tenant, multi-merchant reward campaign portal — workspace root.",
+  "engines": {
+    "node": ">=20 <21"
+  },
+  "workspaces": [
+    "packages/shared",
+    "back-end",
+    "front-end"
+  ],
+  "scripts": {
+    "preinstall": "node scripts/check-node-version.js",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "test:cov": "npm run test:cov --workspaces --if-present",
+    "build": "npm run build --workspaces --if-present",
+    "scan:secrets": "bash scripts/scan-secrets.sh",
+    "start:dev": "npm run start:dev -w back-end",
+    "start:dev:front": "npm run dev -w front-end",
+    "db:migrate": "npm run db:migrate -w back-end",
+    "db:rollback": "npm run db:rollback -w back-end",
+    "db:status": "npm run db:status -w back-end",
+    "bootstrap:superadmin": "npm run bootstrap:superadmin -w back-end",
+    "test:perf": "cd back-end && npx jest --config ./test/jest-e2e.json test/performance --runInBand",
+    "size-limit": "npm run build -w front-end && npm exec -w front-end -- size-limit",
+    "load-test": "node scripts/load-test.js",
+    "prepare": "npm run build -w packages/shared && cd .. && husky portal/.husky"
+  },
+  "devDependencies": {
+    "husky": "^9.0.11"
+  },
+  "overrides": {
+    "js-yaml": "^4.3.1",
+    "uuid": "^11.1.1"
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "//": [
+    "T-037 — the same e2e suite as `test/jest-e2e.json`, run with coverage collection over",
+    "`src/modules/campaigns/**`.",
+    "",
+    "It exists because `test/jest-e2e.json` sets `rootDir: '.'` (the `test/` directory), and Jest",
+    "resolves `collectCoverageFrom` globs relative to `rootDir` — a `../src/...` glob from there",
+    "matches nothing, so `--coverage` on that config reports 0% for code that 73 passing tests",
+    "demonstrably execute. This config sets `rootDir` to the workspace root instead and adjusts",
+    "the two paths that depended on the old one, changing nothing else about how the suite runs.",
+    "",
+    "It lives under `test/campaigns/` rather than beside `jest-e2e.json` because that file is not",
+    "this task's to edit (AGENT-PROTOCOL R9); `test/campaigns/**` is. AGENT-PROTOCOL §4's",
+    "coverage gate is what it is for: the service layer of this module is exercised end to end",
+    "against the real database, and this is how that shows up as a number."
+  ],
+  "moduleFileExtensions": ["js", "json", "ts"],
+  "rootDir": "../..",
+  "testEnvironment": "node",
+  "testRegex": "campaigns/.*\\.e2e-spec\\.ts$",
+  "transform": {
+    "^.+\\.(t|j)s$": "ts-jest"
+  },
+  "moduleNameMapper": {
+    "^@/(.*)$": "<rootDir>/src/$1"
+  },
+  "setupFiles": ["<rootDir>/test/jest-e2e.setup.ts"],
+  "maxWorkers": 1,
+  "collectCoverageFrom": ["src/modules/campaigns/**/*.ts"],
+  "coverageDirectory": "coverage/campaigns-e2e"
+}

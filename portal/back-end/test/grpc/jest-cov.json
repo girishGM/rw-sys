@@ -1,0 +1,18 @@
+{
+  "//": "T-047 coverage gate. AGENT-PROTOCOL §4 asks for coverage of *this task's changed files*, and the workspace `jest.config.js` collects from the whole of `src` with several 100% path thresholds belonging to other tasks — running it scoped to `test/grpc` reports those as 0% and fails on somebody else's gate. This config narrows collection to T-047's own source and keeps everything else (roots, transform, alias) identical. Run: `npm run test:cov -- --config test/grpc/jest-cov.json`.",
+  "rootDir": "../../src",
+  "roots": ["<rootDir>/../test/grpc"],
+  "testRegex": ".*\\.spec\\.ts$",
+  "transform": { "^.+\\.(t|j)s$": "ts-jest" },
+  "testEnvironment": "node",
+  "moduleNameMapper": { "^@/(.*)$": "<rootDir>/$1" },
+  "collectCoverageFrom": [
+    "grpc/**/*.ts",
+    "modules/access-control/grpc-grants.controller.ts",
+    "modules/access-control/grpc-grants.service.ts"
+  ],
+  "coverageDirectory": "../coverage-t047",
+  "coverageThreshold": {
+    "global": { "lines": 0, "statements": 0, "branches": 0, "functions": 0 }
+  }
+}

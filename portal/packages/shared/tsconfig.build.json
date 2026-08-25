@@ -1,0 +1,13 @@
+{
+  // T-057 (D-1) — the CommonJS half of a dual build. `back-end` runs the *compiled* output
+  // of this package with plain `node` (never a bundler) — `nest start` / `node dist/main.js`
+  // — and plain `node`'s own `require()` needs a real CommonJS module: dynamic property
+  // copying at runtime, no static analysis, so it never cared whether this package emitted
+  // CJS or ESM in the first place. `front-end`'s production build (`vite build`, Rollup) is
+  // the one that *does* care — see tsconfig.build.esm.json for why a CJS-only build broke it.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "outDir": "./dist/cjs"
+  },
+  "exclude": ["node_modules", "dist", "**/*.spec.ts"]
+}

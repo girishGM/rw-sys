@@ -1,0 +1,41 @@
+{
+  "//": "T-047's real coverage figure: unit specs and the e2e suite in one run, so the report is the union rather than two halves that each understate it. Most of `src/grpc` is only reachable over a real mTLS socket against the real database, and most of the guards are only exhaustively reachable in isolation — neither half alone is the truth. Run: `npm run test:cov -- --config test/grpc/jest-all-cov.json --forceExit`.",
+  "rootDir": "../..",
+  "collectCoverageFrom": [
+    "src/grpc/**/*.ts",
+    "src/modules/access-control/grpc-grants.controller.ts",
+    "src/modules/access-control/grpc-grants.service.ts"
+  ],
+  "coverageDirectory": "coverage-t047-all",
+  "coverageThreshold": {
+    "global": { "lines": 80, "statements": 80, "branches": 70, "functions": 80 },
+    "./src/grpc/mtls.guard.ts": { "lines": 100, "statements": 100, "branches": 100, "functions": 100 },
+    "./src/grpc/service-scope.guard.ts": { "lines": 100, "statements": 100, "branches": 100, "functions": 100 },
+    "./src/grpc/section-grant.guard.ts": { "lines": 100, "statements": 100, "branches": 100, "functions": 100 }
+  },
+  "projects": [
+    {
+      "displayName": "t047-unit",
+      "rootDir": ".",
+      "roots": ["<rootDir>/test/grpc"],
+      "testRegex": ".*\\.spec\\.ts$",
+      "testPathIgnorePatterns": ["\\.e2e-spec\\.ts$"],
+      "transform": { "^.+\\.(t|j)s$": "ts-jest" },
+      "testEnvironment": "node",
+      "moduleFileExtensions": ["js", "json", "ts"],
+      "moduleNameMapper": { "^@/(.*)$": "<rootDir>/src/$1" }
+    },
+    {
+      "displayName": "t047-e2e",
+      "rootDir": ".",
+      "roots": ["<rootDir>/test/grpc"],
+      "testRegex": "grpc\\.e2e-spec\\.ts$",
+      "transform": { "^.+\\.(t|j)s$": "ts-jest" },
+      "testEnvironment": "node",
+      "moduleFileExtensions": ["js", "json", "ts"],
+      "moduleNameMapper": { "^@/(.*)$": "<rootDir>/src/$1" },
+      "setupFiles": ["<rootDir>/test/jest-e2e.setup.ts"],
+      "maxWorkers": 1
+    }
+  ]
+}

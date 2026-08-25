@@ -1,0 +1,6 @@
+# T-050 — e2e-specific artefacts. node_modules/, dist/ and coverage/ are already covered by the
+# repo-root and portal/.gitignore patterns; this file adds what is specific to this project.
+
+.tmp/
+playwright-report/
+test-results/

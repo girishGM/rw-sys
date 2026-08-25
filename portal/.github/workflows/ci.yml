@@ -1,0 +1,72 @@
+name: portal-ci
+
+# NOTE: GitHub Actions only discovers workflows under <repo-root>/.github/workflows/.
+# This file lives at portal/.github/workflows/ci.yml per T-001's file list, on the
+# assumption that `portal/` becomes its own repository root. If `reward-system/` is
+# git-initialised as the repo instead, copy or symlink this file to
+# reward-system/.github/workflows/ci.yml (with paths below adjusted to `portal/...`).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+defaults:
+  run:
+    working-directory: portal
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [20.x]
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: reward_app
+          POSTGRES_PASSWORD: ci_local_only
+          POSTGRES_DB: reward_system
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+          cache-dependency-path: portal/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint -- --max-warnings=0
+
+      - name: Secret scan
+        run: npm run scan:secrets
+
+      - name: Test
+        run: npm run test:cov
+        env:
+          DB_HOST: localhost
+          DB_PORT: 5432
+          DB_USERNAME: reward_app
+          DB_PASSWORD: ci_local_only
+          DB_NAME: reward_system
+
+      - name: Build
+        run: npm run build

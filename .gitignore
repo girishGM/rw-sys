@@ -1,0 +1,66 @@
+# Secrets — MUST stay ahead of any `git init` in this directory.
+# agents/create-campaign-v2/.env.development currently holds a live DB password
+# in plaintext. See portal/project-plan/BACKLOG.md B-11 for the rotation plan.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+secrets.json
+credentials.json
+
+# All Claude Code tooling/config, root- and portal-level (per-user request 2026-08-24) — not
+# part of the deployable application. Note: this also drops portal/.claude/settings.json (the
+# team-wide, conservative allow-list) and the implement-task/review-task skills from what gets
+# pushed — fine for "just get Render building the app", worth knowing if anyone else picks this
+# repo up later and wonders why those skills aren't there.
+.claude/
+
+# Not part of the deployable application — working/reference material, not code Render needs
+# to build or run the portal. (gitignore has no inline "# comment" syntax — a trailing comment
+# on the same line as a pattern becomes part of the pattern itself, so each note is its own line.)
+
+# The separate create-campaign agent services — also holds a real (throwaway) DB password in
+# agents/create-campaign-v2/.env.development.
+agents/
+
+# Repo orientation doc for AI agents/developers — not read by any build step (confirmed: only
+# referenced in code comments in portal/back-end/Dockerfile and portal/docker-compose.yml,
+# pointing a human reader at it, never COPYed or parsed). Also somewhat tailored to this local
+# machine (nvm paths, a macOS Keychain lookup command) rather than portable across clones.
+CLAUDE.md
+
+# The capabilities deck, business user guide, and this deploy guide.
+portal/architect-review/
+
+# Generated task-progress / architecture dashboards.
+portal/project-plan/index.html
+portal/project-plan/architecture.html
+
+*.pdf
+
+# Dependencies and build output.
+# coverage* (not just coverage/) — this repo's back-end has many run-specific report dirs
+# (coverage-e2e, coverage-crypto, coverage-t047-all, ...) that a bare `coverage/` rule misses,
+# since gitignore does no partial/prefix matching without an explicit wildcard.
+node_modules/
+dist/
+build/
+coverage*/
+.next/
+.turbo/
+
+# Local tooling
+.DS_Store
+*.log
+npm-debug.log*
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Test artefacts
+playwright-report/
+test-results/
+*.lcov

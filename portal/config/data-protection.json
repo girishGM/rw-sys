@@ -1,0 +1,59 @@
+{
+  "_comment": [
+    "T-017 — the data-protection engine's runtime configuration (07-DATA-PROTECTION.md §10).",
+    "",
+    "Every value here is read through back-end/src/common/data-protection/data-protection.config.ts,",
+    "which validates it and falls back to the SAME defaults written below if the file is missing or",
+    "malformed. The defaults are deliberately the restrictive ones: logging.defaultTreatment is",
+    "'omit' and response.defaultVisibility is 'masked', because 'someone will notice a missing field",
+    "in the UI immediately; nobody notices a leaked field for months' (§10).",
+    "",
+    "This file contains NO key material and no credentials (AGENT-PROTOCOL R4). Keys are named by",
+    "reward_portal.encryption_keys.key_ref, which points at an env var or a KMS ARN — see T-016.",
+    "",
+    "Rollback for T-017 is 'enabled: false' here, then remove the module. Rows already encrypted",
+    "stay encrypted: turning the engine off stops the afterFind hook decrypting them, so those",
+    "columns read back as 'v1.…' ciphertext rather than reverting to plaintext."
+  ],
+
+  "enabled": true,
+
+  "failClosed": true,
+
+  "transport": {
+    "mode": "fields",
+    "routeOverrides": {
+      "POST /auth/change-password": "full",
+      "POST /users": "full",
+      "GET /health": "off"
+    }
+  },
+
+  "atRest": {
+    "defaultAlgorithm": "aes_256_gcm",
+    "bindRecordIdAsAAD": true
+  },
+
+  "logging": {
+    "defaultTreatment": "omit",
+    "finalRegexSweep": true
+  },
+
+  "response": {
+    "defaultVisibility": "masked"
+  },
+
+  "reveal": {
+    "enabled": true,
+    "rateLimitPerHour": 30,
+    "requireReason": false
+  },
+
+  "keys": {
+    "rotationWarningDays": 30
+  },
+
+  "cache": {
+    "ttlSeconds": 300
+  }
+}

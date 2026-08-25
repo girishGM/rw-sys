@@ -1,0 +1,21 @@
+{
+  "//": "T-047 coverage gate, e2e half. Identical to `test/jest-e2e.json` except that it runs only this task's e2e spec and collects coverage from this task's own source. Most of `src/grpc` is reachable only through a real mTLS socket and a real database — `config-snapshot.builder.ts` in particular is nothing but SQL — so the unit half (`jest-cov.json`) cannot speak for it, and reporting one without the other would understate or overstate the real figure. Run: `npm run test:cov -- --config test/grpc/jest-e2e-cov.json`.",
+  "moduleFileExtensions": ["js", "json", "ts"],
+  "rootDir": "../..",
+  "roots": ["<rootDir>/test/grpc"],
+  "testRegex": "grpc\\.e2e-spec\\.ts$",
+  "transform": { "^.+\\.(t|j)s$": "ts-jest" },
+  "testEnvironment": "node",
+  "moduleNameMapper": { "^@/(.*)$": "<rootDir>/src/$1" },
+  "setupFiles": ["<rootDir>/test/jest-e2e.setup.ts"],
+  "maxWorkers": 1,
+  "collectCoverageFrom": [
+    "src/grpc/**/*.ts",
+    "src/modules/access-control/grpc-grants.controller.ts",
+    "src/modules/access-control/grpc-grants.service.ts"
+  ],
+  "coverageDirectory": "coverage-t047-e2e",
+  "coverageThreshold": {
+    "global": { "lines": 0, "statements": 0, "branches": 0, "functions": 0 }
+  }
+}

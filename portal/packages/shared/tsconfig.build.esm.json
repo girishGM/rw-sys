@@ -1,0 +1,29 @@
+{
+  // T-057 (D-1) — the ESM half of a dual build, added after the CJS-only build (a single
+  // `dist/index.js`, `"main"`/`"types"` both pointing at it) broke `front-end`'s **production**
+  // build (`npm run build`, Rollup, not `vite`'s dev server — the dev server never hit this):
+  //
+  //   "traceResponseSchema" is not exported by "../packages/shared/dist/index.js"
+  //
+  // `index.ts` is one `export * from './domain-file'` per task (05-EXECUTION-PLAN.md §3).
+  // TypeScript compiles that, under `"module": "commonjs"`, to a `__exportStar(require(...))`
+  // helper — a runtime loop copying properties onto `exports`, exactly as Node's own dynamic
+  // `require()` expects and handles fine. Rollup's CommonJS interop, by contrast, determines
+  // *named* exports via **static analysis** of the source text (it does not execute the
+  // module first) precisely so unused named exports can be tree-shaken — and a property added
+  // by a runtime loop is invisible to that analysis. A directly-`export`ed name works even in
+  // the CJS build (TC-5 passed on those); only names arriving through this barrel's re-export
+  // pattern were affected, which is most of what this package exports.
+  //
+  // Declarations (`.d.ts`) are turned off here on purpose: they do not differ by module
+  // target, `tsconfig.build.json`'s CJS pass already emits them once, and `"types"` in
+  // `package.json` points only at that one copy — emitting a second, identical set here would
+  // be pure duplication.
+  "extends": "./tsconfig.build.json",
+  "compilerOptions": {
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "outDir": "./dist/esm",
+    "declaration": false
+  }
+}
