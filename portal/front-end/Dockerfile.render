@@ -44,9 +44,13 @@ COPY front-end/docker-entrypoint.render.sh /docker-entrypoint.render.sh
 COPY --from=build /app/front-end/dist /usr/share/nginx/html
 
 # The entrypoint runs `sed -i` on default.conf as the `nginx` user (see front-end/Dockerfile's
-# own note on why this image never runs as root) — it needs write access to that one file, not
-# just read.
-RUN chown -R nginx:nginx /var/cache/nginx /usr/share/nginx/html /etc/nginx/conf.d/default.conf \
+# own note on why this image never runs as root) — `sed -i` writes a new temp file into the
+# *containing directory* and renames it over the original (not an in-place byte overwrite), so
+# the directory itself needs write access, not just the file. Chowning only default.conf (an
+# earlier version of this line) let the entrypoint read/open the file fine but still failed at
+# `sed -i` with "Permission denied" creating that temp file — confirmed live on a real Render
+# deploy, not a hypothetical.
+RUN chown -R nginx:nginx /var/cache/nginx /usr/share/nginx/html /etc/nginx/conf.d \
  && chmod +x /docker-entrypoint.render.sh
 
 USER nginx
