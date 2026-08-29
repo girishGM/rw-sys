@@ -36,12 +36,31 @@ export const RULE_ERROR_CODE = Object.freeze({
   RULE_HAS_COUNTRY_ASSIGNMENTS: 'RULE_HAS_COUNTRY_ASSIGNMENTS',
   /** Unassigning a rule a campaign is actively bound to (implementation note 6, TC-12). */
   RULE_IN_USE_BY_CAMPAIGN: 'RULE_IN_USE_BY_CAMPAIGN',
+  /** T-106 — `uq_rc_tenant_code` — a category code is already in use. */
+  RULE_CATEGORY_CODE_EXISTS: 'RULE_CATEGORY_CODE_EXISTS',
+  /** T-106 — `uq_rsc_category_code` — a sub-category code is already in use under that category. */
+  RULE_SUB_CATEGORY_CODE_EXISTS: 'RULE_SUB_CATEGORY_CODE_EXISTS',
 });
 
 /** 409 — `POST /rules` with a `ruleCode` already in use by another global rule (TC-18). */
 export class RuleCodeExistsError extends ConflictError {
   constructor(options: AppErrorOptions = {}) {
     super(RULE_ERROR_CODE.RULE_CODE_EXISTS, options);
+  }
+}
+
+/** T-106 — 409 — `POST /rule-categories` with a `categoryCode` already in use. */
+export class RuleCategoryCodeExistsError extends ConflictError {
+  constructor(options: AppErrorOptions = {}) {
+    super(RULE_ERROR_CODE.RULE_CATEGORY_CODE_EXISTS, options);
+  }
+}
+
+/** T-106 — 409 — `POST /rule-sub-categories` with a `subCategoryCode` already in use under
+ * that category. */
+export class RuleSubCategoryCodeExistsError extends ConflictError {
+  constructor(options: AppErrorOptions = {}) {
+    super(RULE_ERROR_CODE.RULE_SUB_CATEGORY_CODE_EXISTS, options);
   }
 }
 

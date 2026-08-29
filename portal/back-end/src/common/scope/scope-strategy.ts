@@ -94,6 +94,8 @@ import {
   RuleCategory,
   RuleCountryAssignment,
   RuleMaster,
+  RuleOperator,
+  RuleResolver,
   RuleSubCategory,
   RuleVersion,
   RuleVersionCountryAssignment,
@@ -308,6 +310,28 @@ const STRATEGIES = new Map<ModelStatic<Model>, ScopeStrategy>([
     RuleSubCategory,
     {
       note: 'Reference data; no tenant column at all.',
+      country: unrestricted(),
+      tenant: unrestricted(),
+      merchant: unrestricted(),
+    },
+  ],
+  [
+    RuleResolver,
+    {
+      note:
+        'T-102 registry — pluggable fact resolvers. Seed-managed reference data, no tenant ' +
+        'column at all; every role needs it to render a resolver picker (T-108).',
+      country: unrestricted(),
+      tenant: unrestricted(),
+      merchant: unrestricted(),
+    },
+  ],
+  [
+    RuleOperator,
+    {
+      note:
+        'T-102 registry — comparison operators. Seed-managed reference data, no tenant column ' +
+        'at all; every role needs it to render an operator picker (T-108).',
       country: unrestricted(),
       tenant: unrestricted(),
       merchant: unrestricted(),

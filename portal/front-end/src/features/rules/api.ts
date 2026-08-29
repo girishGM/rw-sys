@@ -8,23 +8,37 @@
 import { useMutation, useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query';
 import {
   assignRuleCountryRequestSchema,
+  createRuleCategoryRequestSchema,
   createRuleRequestSchema,
+  createRuleSubCategoryRequestSchema,
+  ruleCategoryEnvelopeSchema,
   ruleCategoryListEnvelopeSchema,
   ruleCountryAssignmentEnvelopeSchema,
   ruleCountryAssignmentListEnvelopeSchema,
   ruleEnvelopeSchema,
   ruleListEnvelopeSchema,
+  ruleOperatorListEnvelopeSchema,
   ruleParametersEnvelopeSchema,
+  ruleResolverListEnvelopeSchema,
+  ruleSubCategoryEnvelopeSchema,
   ruleSubCategoryListEnvelopeSchema,
+  updateRuleCategoryRequestSchema,
   updateRuleRequestSchema,
+  updateRuleSubCategoryRequestSchema,
   type AssignRuleCountryRequest,
+  type CreateRuleCategoryRequest,
   type CreateRuleRequest,
+  type CreateRuleSubCategoryRequest,
   type Rule,
   type RuleCategory,
   type RuleCountryAssignment,
+  type RuleOperator,
   type RuleParameters,
+  type RuleResolver,
   type RuleSubCategory,
+  type UpdateRuleCategoryRequest,
   type UpdateRuleRequest,
+  type UpdateRuleSubCategoryRequest,
 } from '@reward-portal/shared';
 import { api } from '../../lib/apiClient';
 import { toApiError } from '../../lib/apiError';
@@ -305,4 +319,160 @@ export function useRuleSubCategoriesQuery(categoryId?: number) {
     queryKey: ['rule-sub-categories', categoryId ?? null],
     queryFn: () => fetchRuleSubCategories(categoryId),
   });
+}
+
+// --- T-106: category / sub-category CRUD -----------------------------------------------------
+
+export async function createRuleCategory(input: CreateRuleCategoryRequest): Promise<RuleCategory> {
+  try {
+    const payload = createRuleCategoryRequestSchema.parse(input);
+    const response = await api.post<unknown>('/rule-categories', payload);
+    const parsed = ruleCategoryEnvelopeSchema.safeParse(response.data);
+    if (!parsed.success) {
+      throw new Error(
+        `Create-rule-category response did not match the expected shape: ${parsed.error.message}`,
+      );
+    }
+    return parsed.data.data;
+  } catch (error) {
+    throw toApiError(error);
+  }
+}
+
+export function useCreateRuleCategoryMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: createRuleCategory,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['rule-categories'] });
+    },
+  });
+}
+
+export async function updateRuleCategory(
+  id: number,
+  input: UpdateRuleCategoryRequest,
+): Promise<RuleCategory> {
+  try {
+    const payload = updateRuleCategoryRequestSchema.parse(input);
+    const response = await api.patch<unknown>(`/rule-categories/${String(id)}`, payload);
+    const parsed = ruleCategoryEnvelopeSchema.safeParse(response.data);
+    if (!parsed.success) {
+      throw new Error(
+        `Update-rule-category response did not match the expected shape: ${parsed.error.message}`,
+      );
+    }
+    return parsed.data.data;
+  } catch (error) {
+    throw toApiError(error);
+  }
+}
+
+export function useUpdateRuleCategoryMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, input }: { id: number; input: UpdateRuleCategoryRequest }) =>
+      updateRuleCategory(id, input),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['rule-categories'] });
+    },
+  });
+}
+
+export async function createRuleSubCategory(
+  input: CreateRuleSubCategoryRequest,
+): Promise<RuleSubCategory> {
+  try {
+    const payload = createRuleSubCategoryRequestSchema.parse(input);
+    const response = await api.post<unknown>('/rule-sub-categories', payload);
+    const parsed = ruleSubCategoryEnvelopeSchema.safeParse(response.data);
+    if (!parsed.success) {
+      throw new Error(
+        `Create-rule-sub-category response did not match the expected shape: ${parsed.error.message}`,
+      );
+    }
+    return parsed.data.data;
+  } catch (error) {
+    throw toApiError(error);
+  }
+}
+
+export function useCreateRuleSubCategoryMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: createRuleSubCategory,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['rule-sub-categories'] });
+    },
+  });
+}
+
+export async function updateRuleSubCategory(
+  id: number,
+  input: UpdateRuleSubCategoryRequest,
+): Promise<RuleSubCategory> {
+  try {
+    const payload = updateRuleSubCategoryRequestSchema.parse(input);
+    const response = await api.patch<unknown>(`/rule-sub-categories/${String(id)}`, payload);
+    const parsed = ruleSubCategoryEnvelopeSchema.safeParse(response.data);
+    if (!parsed.success) {
+      throw new Error(
+        `Update-rule-sub-category response did not match the expected shape: ${parsed.error.message}`,
+      );
+    }
+    return parsed.data.data;
+  } catch (error) {
+    throw toApiError(error);
+  }
+}
+
+export function useUpdateRuleSubCategoryMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, input }: { id: number; input: UpdateRuleSubCategoryRequest }) =>
+      updateRuleSubCategory(id, input),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['rule-sub-categories'] });
+    },
+  });
+}
+
+// --- T-108: registries (read-only) ------------------------------------------------------------
+
+export async function fetchRuleResolvers(): Promise<readonly RuleResolver[]> {
+  try {
+    const response = await api.get<unknown>('/rule-resolvers');
+    const parsed = ruleResolverListEnvelopeSchema.safeParse(response.data);
+    if (!parsed.success) {
+      throw new Error(
+        `Rule resolvers response did not match the expected shape: ${parsed.error.message}`,
+      );
+    }
+    return parsed.data.data;
+  } catch (error) {
+    throw toApiError(error);
+  }
+}
+
+export function useRuleResolversQuery() {
+  return useQuery({ queryKey: ['rule-resolvers'], queryFn: fetchRuleResolvers });
+}
+
+export async function fetchRuleOperators(): Promise<readonly RuleOperator[]> {
+  try {
+    const response = await api.get<unknown>('/rule-operators');
+    const parsed = ruleOperatorListEnvelopeSchema.safeParse(response.data);
+    if (!parsed.success) {
+      throw new Error(
+        `Rule operators response did not match the expected shape: ${parsed.error.message}`,
+      );
+    }
+    return parsed.data.data;
+  } catch (error) {
+    throw toApiError(error);
+  }
+}
+
+export function useRuleOperatorsQuery() {
+  return useQuery({ queryKey: ['rule-operators'], queryFn: fetchRuleOperators });
 }

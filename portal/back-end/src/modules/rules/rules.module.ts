@@ -13,13 +13,15 @@ import { AuditModule } from '@/common/audit/audit.module';
 import { RbacModule } from '@/common/rbac/rbac.module';
 import { DatabaseModule } from '@/database/database.module';
 import { RuleCategoriesController } from './rule-categories.controller';
+import { RuleRegistriesController } from './rule-registries.controller';
+import { RuleRegistriesService } from './rule-registries.service';
 import { RulesController } from './rules.controller';
 import { RulesService } from './rules.service';
 
 @Module({
   imports: [RbacModule, AuditModule, DatabaseModule],
-  controllers: [RulesController, RuleCategoriesController],
-  providers: [RulesService],
+  controllers: [RulesController, RuleCategoriesController, RuleRegistriesController],
+  providers: [RulesService, RuleRegistriesService],
   exports: [RulesService],
 })
 export class RulesModule {}

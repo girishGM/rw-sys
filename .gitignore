@@ -26,6 +26,9 @@ credentials.json
 # agents/create-campaign-v2/.env.development.
 agents/
 
+project-plan/
+
+database/
 # Repo orientation doc for AI agents/developers — not read by any build step (confirmed: only
 # referenced in code comments in portal/back-end/Dockerfile and portal/docker-compose.yml,
 # pointing a human reader at it, never COPYed or parsed). Also somewhat tailored to this local

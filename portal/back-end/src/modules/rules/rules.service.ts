@@ -53,14 +53,20 @@ import type { AuthenticatedUser } from '@/modules/auth/decorators/current-user.d
 import { findActiveCampaignsUsingRuleInCountry } from './campaign-usage.query';
 import { DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE } from './rules.constants';
 import {
+  RuleCategoryCodeExistsError,
   RuleCodeExistsError,
   RuleHasCountryAssignmentsError,
   RuleInUseByCampaignError,
+  RuleSubCategoryCodeExistsError,
 } from './rules.errors';
 import type { AssignRuleCountryDto } from './dto/assign-rule-country.dto';
 import type { CreateRuleDto } from './dto/create-rule.dto';
+import type { CreateRuleCategoryDto } from './dto/create-rule-category.dto';
+import type { CreateRuleSubCategoryDto } from './dto/create-rule-sub-category.dto';
 import type { RuleSortField, ListRulesQueryDto } from './dto/list-rules-query.dto';
 import type { UpdateRuleDto } from './dto/update-rule.dto';
+import type { UpdateRuleCategoryDto } from './dto/update-rule-category.dto';
+import type { UpdateRuleSubCategoryDto } from './dto/update-rule-sub-category.dto';
 import {
   toRuleCategoryDto,
   toRuleCountryAssignmentDto,
@@ -405,6 +411,127 @@ export class RulesService {
     const where = categoryId === undefined ? {} : { categoryId };
     const rows = await this.scoped.listAll(RuleSubCategory, { where, order: [['name', 'ASC']] });
     return rows.map(toRuleSubCategoryDto);
+  }
+
+  /**
+   * T-106 — `POST /rule-categories`. `super_admin` only (layer 2, mirroring `create()`'s own
+   * `assertRole`). Always `tenant_id = 1` — matching every existing category row and the
+   * read path's own "unrestricted, tenant_id is a NOT NULL technicality, not a real scope"
+   * treatment (`listCategories`'s own comment) — never a tenant picker in the request.
+   */
+  async createCategory(
+    actor: AuthenticatedUser,
+    dto: CreateRuleCategoryDto,
+  ): Promise<RuleCategoryDto> {
+    assertRole(actor, 'super_admin');
+
+    const duplicateCount = await this.scoped.count(RuleCategory, {
+      where: { tenantId: 1, categoryCode: dto.categoryCode },
+    });
+    if (duplicateCount > 0) throw new RuleCategoryCodeExistsError();
+
+    let created: RuleCategory;
+    try {
+      created = await this.scoped.create(RuleCategory, {
+        tenantId: 1,
+        categoryCode: dto.categoryCode,
+        name: dto.name.trim(),
+        status: 'active',
+      } as never);
+    } catch (error) {
+      if (error instanceof UniqueConstraintError) {
+        throw new RuleCategoryCodeExistsError({ cause: error });
+      }
+      throw error;
+    }
+
+    this.audit.annotate({ targetId: created.id, detail: { categoryCode: created.categoryCode } });
+    return toRuleCategoryDto(created);
+  }
+
+  /** T-106 — `PATCH /rule-categories/:id`. `categoryCode` is immutable — never accepted here. */
+  async updateCategory(
+    actor: AuthenticatedUser,
+    id: number,
+    dto: UpdateRuleCategoryDto,
+  ): Promise<RuleCategoryDto> {
+    assertRole(actor, 'super_admin');
+
+    await this.scoped.findByPkOrFail(RuleCategory, id);
+    const changes: Partial<RuleCategory> = {};
+    if (dto.name !== undefined) changes.name = dto.name.trim();
+    if (dto.status !== undefined) changes.status = dto.status;
+
+    if (Object.keys(changes).length > 0) {
+      await this.scoped.update(RuleCategory, changes, { where: { id } });
+    }
+
+    const after = await this.scoped.findByPkOrFail(RuleCategory, id);
+    this.audit.annotate({ targetId: id, detail: { changes } });
+    return toRuleCategoryDto(after);
+  }
+
+  /**
+   * T-106 — `POST /rule-sub-categories`. `super_admin` only. `categoryId` must reference a
+   * real, existing category — `findByPkOrFail` surfaces a 404 rather than a raw FK violation
+   * if it doesn't.
+   */
+  async createSubCategory(
+    actor: AuthenticatedUser,
+    dto: CreateRuleSubCategoryDto,
+  ): Promise<RuleSubCategoryDto> {
+    assertRole(actor, 'super_admin');
+
+    await this.scoped.findByPkOrFail(RuleCategory, dto.categoryId);
+
+    const duplicateCount = await this.scoped.count(RuleSubCategory, {
+      where: { categoryId: dto.categoryId, subCategoryCode: dto.subCategoryCode },
+    });
+    if (duplicateCount > 0) throw new RuleSubCategoryCodeExistsError();
+
+    let created: RuleSubCategory;
+    try {
+      created = await this.scoped.create(RuleSubCategory, {
+        categoryId: dto.categoryId,
+        subCategoryCode: dto.subCategoryCode,
+        name: dto.name.trim(),
+        status: 'active',
+      } as never);
+    } catch (error) {
+      if (error instanceof UniqueConstraintError) {
+        throw new RuleSubCategoryCodeExistsError({ cause: error });
+      }
+      throw error;
+    }
+
+    this.audit.annotate({
+      targetId: created.id,
+      detail: { subCategoryCode: created.subCategoryCode },
+    });
+    return toRuleSubCategoryDto(created);
+  }
+
+  /** T-106 — `PATCH /rule-sub-categories/:id`. `subCategoryCode`/`categoryId` are immutable —
+   * neither is accepted here. */
+  async updateSubCategory(
+    actor: AuthenticatedUser,
+    id: number,
+    dto: UpdateRuleSubCategoryDto,
+  ): Promise<RuleSubCategoryDto> {
+    assertRole(actor, 'super_admin');
+
+    await this.scoped.findByPkOrFail(RuleSubCategory, id);
+    const changes: Partial<RuleSubCategory> = {};
+    if (dto.name !== undefined) changes.name = dto.name.trim();
+    if (dto.status !== undefined) changes.status = dto.status;
+
+    if (Object.keys(changes).length > 0) {
+      await this.scoped.update(RuleSubCategory, changes, { where: { id } });
+    }
+
+    const after = await this.scoped.findByPkOrFail(RuleSubCategory, id);
+    this.audit.annotate({ targetId: id, detail: { changes } });
+    return toRuleSubCategoryDto(after);
   }
 
   // --- private helpers -----------------------------------------------------------------------

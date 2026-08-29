@@ -66,6 +66,8 @@ export * from './tracker-component-rule.model';
 export * from './reward-campaign-assignment.model';
 export * from './reward-tracker-assignment.model';
 export * from './reward-component-assignment.model';
+export * from './rule-resolver.model';
+export * from './rule-operator.model';
 
 import { Country } from './country.model';
 import { Tenant } from './tenant.model';
@@ -113,6 +115,8 @@ import { TrackerComponentRule } from './tracker-component-rule.model';
 import { RewardCampaignAssignment } from './reward-campaign-assignment.model';
 import { RewardTrackerAssignment } from './reward-tracker-assignment.model';
 import { RewardComponentAssignment } from './reward-component-assignment.model';
+import { RuleResolver } from './rule-resolver.model';
+import { RuleOperator } from './rule-operator.model';
 
 export const REWARD_CONFIG_MODELS = [
   Country,
@@ -161,4 +165,6 @@ export const REWARD_CONFIG_MODELS = [
   RewardCampaignAssignment,
   RewardTrackerAssignment,
   RewardComponentAssignment,
+  RuleResolver,
+  RuleOperator,
 ];

@@ -78,6 +78,29 @@ export class TrackerComponentRule extends Model<TrackerComponentRule> {
   @Column({ type: DataType.INTEGER, allowNull: true, field: 'rule_version_id' })
   declare ruleVersionId: number | null;
 
+  /**
+   * T-104 — the first-class comparison contract this binding actually evaluates, sitting next
+   * to `config` rather than replacing it: `config` keeps holding the Maker's extra field values
+   * (e.g. `targetComponentCode`), `operator`/`value` are the dedicated comparison the runtime
+   * engine reads. `operator` is validated at the application layer against the pinned version's
+   * `default_operators` (a future task) — no DB-level CHECK, matching how `status` on this same
+   * table has no CHECK constraint either.
+   */
+  @Column({ type: DataType.STRING(30), allowNull: true })
+  declare operator: string | null;
+
+  /** JSON — scalar/array/range depending on `operator`'s `expected_value_type`. */
+  @Column({ type: DataType.TEXT, allowNull: true })
+  declare value: string | null;
+
+  /** Evaluation order within the component — lower runs first. `NULL` reads as `100`. */
+  @Column({ type: DataType.INTEGER, allowNull: true })
+  declare priority: number | null;
+
+  /** Per-binding override of the resolver's path. */
+  @Column({ type: DataType.STRING(200), allowNull: true, field: 'resolved_data_key_path' })
+  declare resolvedDataKeyPath: string | null;
+
   @BelongsTo(() => Tenant)
   declare tenant: Tenant;
 

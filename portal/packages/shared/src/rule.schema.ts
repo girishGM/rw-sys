@@ -236,3 +236,83 @@ export type RuleSubCategory = z.infer<typeof ruleSubCategorySchema>;
 export const ruleSubCategoryListEnvelopeSchema = z
   .object({ data: z.array(ruleSubCategorySchema) })
   .strict();
+
+/** `POST /rule-categories`. `categoryCode` is immutable once created, same discipline
+ * `createRuleRequestSchema` applies to `ruleCode` — never in the update schema below. */
+export const createRuleCategoryRequestSchema = z
+  .object({
+    categoryCode: z.string().min(2).max(50),
+    name: z.string().min(1).max(200),
+  })
+  .strict();
+
+export type CreateRuleCategoryRequest = z.infer<typeof createRuleCategoryRequestSchema>;
+
+export const updateRuleCategoryRequestSchema = z
+  .object({
+    name: z.string().min(1).max(200).optional(),
+    status: ruleStatusSchema.optional(),
+  })
+  .strict();
+
+export type UpdateRuleCategoryRequest = z.infer<typeof updateRuleCategoryRequestSchema>;
+
+export const ruleCategoryEnvelopeSchema = z.object({ data: ruleCategorySchema }).strict();
+
+/** `POST /rule-sub-categories`. Moving a sub-category to a different category is out of
+ * scope (T-106) — `categoryId` is write-once, at creation, and absent from the update schema. */
+export const createRuleSubCategoryRequestSchema = z
+  .object({
+    categoryId: z.number().int(),
+    subCategoryCode: z.string().min(2).max(50),
+    name: z.string().min(1).max(200),
+  })
+  .strict();
+
+export type CreateRuleSubCategoryRequest = z.infer<typeof createRuleSubCategoryRequestSchema>;
+
+export const updateRuleSubCategoryRequestSchema = z
+  .object({
+    name: z.string().min(1).max(200).optional(),
+    status: ruleStatusSchema.optional(),
+  })
+  .strict();
+
+export type UpdateRuleSubCategoryRequest = z.infer<typeof updateRuleSubCategoryRequestSchema>;
+
+export const ruleSubCategoryEnvelopeSchema = z.object({ data: ruleSubCategorySchema }).strict();
+
+/** `GET /rule-resolvers`. Read-only reference data (T-108) — declares *how* to fetch a fact;
+ * `handlerClass`/`inputSchema` are backend-only and deliberately not part of this wire contract. */
+export const ruleResolverSchema = z
+  .object({
+    id: z.number().int(),
+    resolverCode: z.string(),
+    name: z.string(),
+    description: z.string().nullable(),
+    status: z.string(),
+  })
+  .strict();
+
+export type RuleResolver = z.infer<typeof ruleResolverSchema>;
+
+export const ruleResolverListEnvelopeSchema = z
+  .object({ data: z.array(ruleResolverSchema) })
+  .strict();
+
+/** `GET /rule-operators`. Read-only reference data (T-108). */
+export const ruleOperatorSchema = z
+  .object({
+    id: z.number().int(),
+    operatorCode: z.string(),
+    displayName: z.string(),
+    expectedValueType: z.string(),
+    status: z.string(),
+  })
+  .strict();
+
+export type RuleOperator = z.infer<typeof ruleOperatorSchema>;
+
+export const ruleOperatorListEnvelopeSchema = z
+  .object({ data: z.array(ruleOperatorSchema) })
+  .strict();
