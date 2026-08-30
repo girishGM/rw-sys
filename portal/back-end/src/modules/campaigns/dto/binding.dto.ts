@@ -15,7 +15,17 @@
  * `@IsObject()` is still worth having: it turns `values: "5"` into a 400 with a field-level
  * detail rather than a confusing schema error about every key at once.
  */
-import { IsIn, IsInt, IsObject, IsOptional, IsPositive, IsString, Length } from 'class-validator';
+import {
+  IsIn,
+  IsInt,
+  IsObject,
+  IsOptional,
+  IsPositive,
+  IsString,
+  Length,
+  MaxLength,
+  MinLength,
+} from 'class-validator';
 import {
   attachRewardRequestSchema,
   bindComponentRuleRequestSchema,
@@ -54,11 +64,24 @@ export class BindComponentRuleDto {
   values?: Record<string, unknown>;
 }
 
-/** `PATCH /campaigns/:id/rules/:bindingId` — step 4 edits values without re-picking the rule. */
+/**
+ * `PATCH /campaigns/:id/rules/:bindingId` — step 4 edits values without re-picking the rule.
+ *
+ * T-147 — `operator` joins `values` here (this file's header explains the shape; the schema's
+ * own header explains why one endpoint rather than two). Which operators are actually *allowed*
+ * is runtime state (`BindingsService#updateRuleValues` checks it against the binding's pinned
+ * version) — this decorator only checks that a supplied value is a plausible operator code.
+ */
 export class UpdateComponentRuleValuesDto {
   @IsObject()
   @MatchesSharedContract(updateComponentRuleValuesRequestSchema)
   values!: Record<string, unknown>;
+
+  @IsOptional()
+  @IsString()
+  @MinLength(1)
+  @MaxLength(30)
+  operator?: string | null;
 }
 
 /**

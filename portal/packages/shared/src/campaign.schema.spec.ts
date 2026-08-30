@@ -376,6 +376,7 @@ describe('campaign.schema — ruleOptionSchema (T-112/T-138)', () => {
     ruleVersionId: 9,
     ruleVersionNo: 1,
     parameters: { fields: [] },
+    defaultOperators: [],
   };
 
   it('TC-1: parses a well-formed option, including categoryId/subCategoryId', () => {

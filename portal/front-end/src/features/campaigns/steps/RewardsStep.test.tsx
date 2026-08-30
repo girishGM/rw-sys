@@ -93,6 +93,8 @@ const JOURNEY: Journey = {
           sequenceOrder: 1,
           isMandatory: true,
           status: 'active',
+          ruleLogic: null,
+          ruleThreshold: null,
           rules: [],
           rewards: [],
         },

@@ -11,9 +11,9 @@ import 'reflect-metadata';
 import { plainToInstance } from 'class-transformer';
 import { validateSync } from 'class-validator';
 import { CreateCampaignDto, UpdateCampaignDto } from '@/modules/campaigns/dto/campaign.dto';
-import { CreateTrackerDto } from '@/modules/campaigns/dto/journey.dto';
+import { CreateTrackerDto, UpdateComponentDto } from '@/modules/campaigns/dto/journey.dto';
 import { CampaignCapDto, PutCampaignCapsDto } from '@/modules/campaigns/dto/caps.dto';
-import { AttachRewardDto } from '@/modules/campaigns/dto/binding.dto';
+import { AttachRewardDto, UpdateComponentRuleValuesDto } from '@/modules/campaigns/dto/binding.dto';
 
 /** Tomorrow, in a +08:00 offset — always a valid `startDate`. */
 function tomorrowInKl(): string {
@@ -181,6 +181,58 @@ describe('T-037 DTOs', () => {
       expect(
         errorsFor(CreateTrackerDto, { name: 'X', completionLogic: 'all', groupCode: 'A' }),
       ).toContain('whitelistValidation');
+    });
+  });
+
+  describe('UpdateComponentDto — T-147 ruleLogic/ruleThreshold', () => {
+    it('requires a threshold for n_of', () => {
+      expect(errorsFor(UpdateComponentDto, { ruleLogic: 'n_of' })).toContain(
+        'matchesSharedContract',
+      );
+    });
+
+    it('does not require one for all/any', () => {
+      expect(errorsFor(UpdateComponentDto, { ruleLogic: 'all' })).toEqual([]);
+    });
+
+    it('forbids a threshold when ruleLogic is not n_of', () => {
+      expect(errorsFor(UpdateComponentDto, { ruleLogic: 'any', ruleThreshold: 2 })).toContain(
+        'matchesSharedContract',
+      );
+    });
+
+    it('accepts n_of with a threshold', () => {
+      expect(errorsFor(UpdateComponentDto, { ruleLogic: 'n_of', ruleThreshold: 2 })).toEqual([]);
+    });
+
+    it('rejects a rule logic outside the tracker completion-logic set', () => {
+      expect(errorsFor(UpdateComponentDto, { ruleLogic: 'most_of' })).toContain('isIn');
+    });
+
+    it('a plain field-only update (neither ruleLogic nor ruleThreshold) is unaffected', () => {
+      expect(errorsFor(UpdateComponentDto, { name: 'Step 1' })).toEqual([]);
+    });
+  });
+
+  describe('UpdateComponentRuleValuesDto — T-147 operator', () => {
+    it('accepts values with no operator (unchanged behaviour)', () => {
+      expect(errorsFor(UpdateComponentRuleValuesDto, { values: { minSpend: 30 } })).toEqual([]);
+    });
+
+    it('accepts a plausible operator string alongside values', () => {
+      expect(errorsFor(UpdateComponentRuleValuesDto, { values: {}, operator: 'at_least' })).toEqual(
+        [],
+      );
+    });
+
+    it('accepts operator: null (clears it)', () => {
+      expect(errorsFor(UpdateComponentRuleValuesDto, { values: {}, operator: null })).toEqual([]);
+    });
+
+    it('rejects a non-string operator', () => {
+      expect(errorsFor(UpdateComponentRuleValuesDto, { values: {}, operator: 42 })).toContain(
+        'isString',
+      );
     });
   });
 

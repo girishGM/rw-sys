@@ -162,6 +162,23 @@ export class UpdateComponentDto {
   @IsOptional()
   @IsBoolean()
   isMandatory?: boolean;
+
+  /**
+   * T-147 — the component's "rules combine" contract, mirroring `completionLogic`/
+   * `completionThreshold` above one level up. Cross-field "n_of needs a threshold, anything else
+   * forbids one" is enforced by `updateComponentRequestSchema`'s own refine, run via `name`'s
+   * `@MatchesSharedContract` above — see that decorator's header on why it must stay off a
+   * property carrying `@IsOptional()`.
+   */
+  @IsOptional()
+  @IsIn([...TRACKER_COMPLETION_LOGICS])
+  ruleLogic?: 'all' | 'any' | 'n_of';
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(1000)
+  ruleThreshold?: number | null;
 }
 
 /** One entry of {@link ReorderComponentsDto}. */

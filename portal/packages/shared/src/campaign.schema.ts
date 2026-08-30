@@ -451,6 +451,15 @@ export const createComponentRequestSchema = z
 
 export type CreateComponentRequest = z.infer<typeof createComponentRequestSchema>;
 
+/**
+ * T-147 — `ruleLogic`/`ruleThreshold`: the component-level "rules combine" contract T-104 added,
+ * mirroring `trackers.completion_logic`/`.completion_threshold` one level up (same three values,
+ * same `n_of`-needs-a-threshold shape, same `createTrackerRequestSchema` precedent below). Always
+ * sent together, never as a partial update of just one — the two-sided refine only has enough
+ * information to enforce "n_of requires a threshold, anything else forbids one" when both fields
+ * reflect what this request is actually setting, not a mix of "what the caller sent" and "what
+ * was already in the database".
+ */
 export const updateComponentRequestSchema = z
   .object({
     name: z.string().min(1).max(200).optional(),
@@ -458,8 +467,22 @@ export const updateComponentRequestSchema = z
     activityId: z.number().int().positive().optional(),
     sequenceOrder: z.number().int().min(1).max(1000).optional(),
     isMandatory: z.boolean().optional(),
+    ruleLogic: trackerCompletionLogicSchema.optional(),
+    ruleThreshold: z.number().int().min(1).max(1000).nullable().optional(),
   })
-  .strict();
+  .strict()
+  .refine((value) => value.ruleLogic !== 'n_of' || value.ruleThreshold != null, {
+    message: "ruleThreshold is required when ruleLogic is 'n_of'",
+    path: ['ruleThreshold'],
+  })
+  .refine(
+    (value) =>
+      value.ruleLogic === undefined || value.ruleLogic === 'n_of' || value.ruleThreshold == null,
+    {
+      message: "ruleThreshold is only allowed when ruleLogic is 'n_of'",
+      path: ['ruleThreshold'],
+    },
+  );
 
 export type UpdateComponentRequest = z.infer<typeof updateComponentRequestSchema>;
 
@@ -495,6 +518,16 @@ export const componentRuleSchema = z
     /** The meta-schema the values below were validated against — what the form renders from. */
     parameters: ruleParametersSchema,
     values: z.record(z.unknown()),
+    /**
+     * T-147 — the comparison contract T-104 added (`tracker_component_rules.operator`/`.value`),
+     * sitting next to `values` rather than inside it: `values` is the Maker's own parameter-field
+     * input (e.g. `targetComponentCode`), `operator`/`value` are the dedicated comparison the
+     * runtime engine reads, matching `tracker-component-rule.model.ts`'s own header on the split.
+     * `null` until the Maker sets one — this portal never evaluates rules, so an unset comparison
+     * blocks nothing here, only whatever the external engine does with it.
+     */
+    operator: z.string().nullable(),
+    value: z.unknown().nullable(),
     status: z.string(),
   })
   .strict();
@@ -535,6 +568,14 @@ export const componentSchema = z
     sequenceOrder: z.number().int(),
     isMandatory: z.boolean(),
     status: z.string(),
+    /**
+     * T-147 — how this component's own bound rules combine into "is this component complete?",
+     * mirroring `trackerSchema`'s `completionLogic`/`completionThreshold` one level up. `null`
+     * (never populated, T-104's own default) reads as `'all'` — every existing component keeps
+     * behaving exactly as it always has until a Maker explicitly sets one.
+     */
+    ruleLogic: trackerCompletionLogicSchema.nullable(),
+    ruleThreshold: z.number().int().nullable(),
     rules: z.array(componentRuleSchema),
     rewards: z.array(rewardAssignmentSchema),
   })
@@ -594,9 +635,22 @@ export const bindComponentRuleRequestSchema = z
 
 export type BindComponentRuleRequest = z.infer<typeof bindComponentRuleRequestSchema>;
 
-/** `PATCH /campaigns/:id/rules/:bindingId` — change the values without re-picking the rule. */
+/**
+ * `PATCH /campaigns/:id/rules/:bindingId` — change the values without re-picking the rule.
+ *
+ * T-147 — `operator` travels in the same request as `values` rather than its own endpoint: the
+ * Maker's UI treats the operator dropdown as part of the same rule-configuration panel `values`
+ * already saves as one unit (`ComponentRulesStep.tsx`'s existing dirty/save cycle), and a second
+ * endpoint for one more optional field would be a second thing to keep in sync for no benefit.
+ * Which operators are actually *allowed* depends on the binding's pinned rule version — runtime
+ * state no Zod schema can see — so that check lives in `BindingsService#updateRuleValues`, not
+ * here; this schema only checks shape.
+ */
 export const updateComponentRuleValuesRequestSchema = z
-  .object({ values: z.record(z.unknown()) })
+  .object({
+    values: z.record(z.unknown()),
+    operator: z.string().min(1).max(30).nullable().optional(),
+  })
   .strict();
 
 export type UpdateComponentRuleValuesRequest = z.infer<
@@ -618,6 +672,12 @@ export const ruleOptionSchema = z
     ruleVersionId: z.number().int().nullable(),
     ruleVersionNo: z.number().int().nullable(),
     parameters: ruleParametersSchema,
+    /**
+     * T-147 — the pinned version's own `defaultOperators` (T-109/T-110), so the Maker's operator
+     * dropdown (`ComponentRulesStep.tsx`) knows what to offer *before* the rule is even bound.
+     * Empty for a rule with no assigned version, or a version that never had any set.
+     */
+    defaultOperators: z.array(z.string()),
   })
   .strict();
 

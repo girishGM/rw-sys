@@ -30,6 +30,7 @@ function ruleOption(overrides: Partial<RuleOption>): RuleOption {
     ruleVersionId: null,
     ruleVersionNo: null,
     parameters: { fields: [] },
+    defaultOperators: [],
     ...overrides,
   };
 }
@@ -100,6 +101,8 @@ function journeyWith(
           sequenceOrder: component.sequenceOrder,
           isMandatory: true,
           status: 'active',
+          ruleLogic: null,
+          ruleThreshold: null,
           rewards: [],
           rules: component.ruleIds.map((ruleId) => ({
             id: ruleId,
@@ -110,6 +113,8 @@ function journeyWith(
             ruleVersionNo: null,
             parameters: { fields: [] },
             values: {},
+            operator: null,
+            value: null,
             status: 'active',
           })),
         })),
@@ -171,6 +176,8 @@ function journeyWithBoundRuleFields(
             sequenceOrder: 2,
             isMandatory: true,
             status: 'active',
+            ruleLogic: null,
+            ruleThreshold: null,
             rewards: [],
             rules: [
               {
@@ -182,6 +189,8 @@ function journeyWithBoundRuleFields(
                 ruleVersionNo: null,
                 parameters: { fields },
                 values,
+                operator: null,
+                value: null,
                 status: 'active',
               },
             ],
@@ -404,6 +413,8 @@ describe('ComponentRulesStep — Add-a-rule category/sub-category filter (T-112)
               sequenceOrder: 1,
               isMandatory: true,
               status: 'active',
+              ruleLogic: null,
+              ruleThreshold: null,
               rewards: [],
               rules: [
                 {
@@ -419,6 +430,8 @@ describe('ComponentRulesStep — Add-a-rule category/sub-category filter (T-112)
                     ],
                   },
                   values: {},
+                  operator: null,
+                  value: null,
                   status: 'active',
                 },
               ],

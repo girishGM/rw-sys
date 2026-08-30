@@ -38,6 +38,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { Op, UniqueConstraintError, type Transaction } from 'sequelize';
 import type { Sequelize } from 'sequelize-typescript';
 import { SEQUELIZE } from '@/database/sequelize.provider';
+import { parseJsonColumn } from '@/database/util/json-text.util';
 import {
   RewardCampaignAssignment,
   RewardComponentAssignment,
@@ -72,6 +73,7 @@ import {
 } from '@reward-portal/shared';
 import { AUDIT_ACTION, AUDIT_ENTITY, ROW_ACTIVE, ROW_INACTIVE } from './campaigns.constants';
 import {
+  OperatorNotAllowedError,
   PromoCodeConfigNotApplicableError,
   RewardAlreadyAttachedError,
   RewardNotAssignedToCountryError,
@@ -162,6 +164,9 @@ export class BindingsService {
         ruleVersionId: version?.id ?? null,
         ruleVersionNo: version?.versionNo ?? null,
         parameters: parametersOf(version?.parameters ?? rule.parameters),
+        // T-147 — read verbatim per `rule-version.model.ts`'s own comment on the column; parsed
+        // here, once, the same `parseJsonColumn` treatment `version-response.dto.ts` gives it.
+        defaultOperators: parseJsonColumn<string[]>(version?.defaultOperators ?? null, []),
       };
     });
   }
@@ -245,11 +250,18 @@ export class BindingsService {
     });
   }
 
-  /** `PATCH /campaigns/:id/rules/:bindingId` — step 4 edits values in place, re-validating
+  /**
+   * `PATCH /campaigns/:id/rules/:bindingId` — step 4 edits values in place, re-validating
    * against the **pinned** version rather than whatever is current (06-VERSIONING.md §7).
    * Re-runs the same sibling-order guard {@link bindRule} does (T-124/T-141) — a second Maker
    * mid-edit on the same journey can submit a stale/forged component id here just as easily as
-   * on the original bind. */
+   * on the original bind.
+   *
+   * T-147 — `dto.operator`, when supplied, must name one of the pinned version's own
+   * `defaultOperators` ({@link OperatorNotAllowedError}) — the same "server re-validates against
+   * the pinned version" discipline `validateRuleValues` already applies to `values`. `undefined`
+   * leaves the stored operator untouched; `null` clears it.
+   */
   async updateRuleValues(
     actor: AuthenticatedUser,
     campaign: TenantCampaign,
@@ -274,11 +286,17 @@ export class BindingsService {
         transaction,
       );
 
-      await this.scoped.update(
-        TrackerComponentRule,
-        { config: values },
-        { where: { id: bindingId }, transaction },
-      );
+      if (dto.operator !== undefined && dto.operator !== null) {
+        await this.assertOperatorAllowed(binding, dto.operator, transaction);
+      }
+
+      const changes: Record<string, unknown> = { config: values };
+      if (dto.operator !== undefined) changes['operator'] = dto.operator;
+
+      await this.scoped.update(TrackerComponentRule, changes, {
+        where: { id: bindingId },
+        transaction,
+      });
 
       await this.audit.record(
         actor,
@@ -288,7 +306,12 @@ export class BindingsService {
           entityType: AUDIT_ENTITY.RULE_ASSIGNMENT,
           entityId: bindingId,
           action: AUDIT_ACTION.UPDATED,
-          fieldChanges: this.audit.diff(binding.config, values),
+          fieldChanges: {
+            ...this.audit.diff(binding.config, values),
+            ...(dto.operator !== undefined && dto.operator !== binding.operator
+              ? { operator: { before: binding.operator, after: dto.operator } }
+              : {}),
+          },
         },
         transaction,
       );
@@ -873,6 +896,29 @@ export class BindingsService {
     }
     const rule = await byIdOrNull(this.scoped, RuleMaster, binding.ruleId, { transaction });
     return parametersOf(rule?.parameters ?? {});
+  }
+
+  /**
+   * T-147 — {@link OperatorNotAllowedError} unless `operator` is one of the binding's own pinned
+   * version's `defaultOperators`. A binding with no pinned version (`ruleVersionId === null`) or
+   * a version with no `defaultOperators` set has an empty allowed set, so every operator is
+   * rejected — the same "no version, no rule-engine wiring, nothing to validate against" gap
+   * {@link parametersForBinding} falls back to `{}` for.
+   */
+  private async assertOperatorAllowed(
+    binding: TrackerComponentRule,
+    operator: string,
+    transaction: Transaction,
+  ): Promise<void> {
+    const allowed =
+      binding.ruleVersionId === null
+        ? []
+        : parseJsonColumn<readonly string[]>(
+            (await byIdOrNull(this.scoped, RuleVersion, binding.ruleVersionId, { transaction }))
+              ?.defaultOperators ?? null,
+            [],
+          );
+    if (!allowed.includes(operator)) throw new OperatorNotAllowedError(operator);
   }
 
   /**

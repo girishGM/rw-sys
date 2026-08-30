@@ -46,6 +46,9 @@ const RULE_OPTION: RuleOption = {
       },
     ],
   },
+  // T-147 — `defaultOperators` added to `ruleOptionSchema`; this fixture is a plain literal
+  // typed against it, not owned by T-147, so it needs the same field to type-check.
+  defaultOperators: [],
 };
 
 const REWARD_OPTION: RewardOption = {

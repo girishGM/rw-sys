@@ -387,6 +387,12 @@ export class JourneyService {
       if (dto.name !== undefined) changes['name'] = dto.name.trim();
       if (dto.description !== undefined) changes['description'] = dto.description;
       if (dto.activityId !== undefined) changes['activityId'] = dto.activityId;
+      // T-147 — `updateComponentRequestSchema`'s own refine already proved (before this method
+      // is ever reached) that `ruleThreshold` is present iff `ruleLogic === 'n_of'`, so both are
+      // simply written through here, the same "no per-field business logic left to apply"
+      // treatment `dto.activityId`'s own line gets.
+      if (dto.ruleLogic !== undefined) changes['ruleLogic'] = dto.ruleLogic;
+      if (dto.ruleThreshold !== undefined) changes['ruleThreshold'] = dto.ruleThreshold;
       if (Object.keys(changes).length > 0) {
         await this.scoped.update(TrackerComponent, changes, {
           where: { id: componentId },

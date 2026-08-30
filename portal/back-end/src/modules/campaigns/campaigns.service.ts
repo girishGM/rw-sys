@@ -32,6 +32,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { Op, UniqueConstraintError, type Transaction, type WhereOptions } from 'sequelize';
 import type { Sequelize } from 'sequelize-typescript';
 import { SEQUELIZE } from '@/database/sequelize.provider';
+import { parseJsonColumn } from '@/database/util/json-text.util';
 import { CampaignMerchant, Merchant, TenantCampaign } from '@/database/models';
 import {
   PortalApprovalRequest,
@@ -522,6 +523,11 @@ export class CampaignsService {
             sequenceOrder: link.sequenceOrder,
             isMandatory: link.isMandatory,
             status: component.status,
+            // T-147 — mirrors `tracker.completionLogic`/`.completionThreshold` below, one level
+            // down: `null` (T-104's default) reads as `'all'`, the same convention the DTO/service
+            // layer already applies on write.
+            ruleLogic: component.ruleLogic as JourneyComponent['ruleLogic'],
+            ruleThreshold: component.ruleThreshold,
             rules: bindings.map((binding) => {
               const described = describedRules.get(binding.id);
               return {
@@ -533,6 +539,8 @@ export class CampaignsService {
                 ruleVersionNo: described?.version?.versionNo ?? null,
                 parameters: described?.parameters ?? { fields: [] },
                 values: binding.config,
+                operator: binding.operator,
+                value: parseJsonColumn<unknown>(binding.value, null),
                 status: binding.status,
               };
             }),

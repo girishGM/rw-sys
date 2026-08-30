@@ -68,6 +68,8 @@ export const CAMPAIGN_ERROR_CODE = Object.freeze({
   /** T-124/T-141 — a `SIBLING_COMPONENTS` field bound to a component that is not strictly
    * earlier, in the same tracker, than the component the binding itself is on. */
   SIBLING_COMPONENT_NOT_EARLIER: 'SIBLING_COMPONENT_NOT_EARLIER',
+  /** T-147 — an `operator` outside the binding's own pinned rule version's `defaultOperators`. */
+  OPERATOR_NOT_ALLOWED: 'OPERATOR_NOT_ALLOWED',
 });
 
 /** 409 — `POST /campaigns` with a `campaignCode` already used in this tenant (TC-6). A different
@@ -317,6 +319,26 @@ export class SiblingComponentNotEarlierError extends AppError {
       ...options,
       details: [{ field: `values.${fieldKey}`, code: `COMPONENT_${targetComponentId}` }],
       logContext: { ...options.logContext, fieldKey, ownComponentId, targetComponentId },
+    });
+  }
+}
+
+/**
+ * 400 — T-147. `operator` must name one of the binding's own pinned rule version's
+ * `defaultOperators` (T-109/T-110). Checked in the service, not a decorator: the allowed set is
+ * runtime state (which version is pinned to this specific binding), the same reason
+ * {@link RuleNotAssignedToCountryError}'s own header gives for `values`' validation living in
+ * `BindingsService` rather than in a Zod schema.
+ */
+export class OperatorNotAllowedError extends AppError {
+  constructor(operator: string, options: AppErrorOptions = {}) {
+    super(CAMPAIGN_ERROR_CODE.OPERATOR_NOT_ALLOWED, 400, {
+      ...options,
+      // `rule_operators.operator_code` is lower snake case (`at_least`, `days_since_between`) —
+      // `SAFE_ERROR_CODE_PATTERN` (app-error.ts) requires upper snake, same reason
+      // `issueCode()` in bindings.service.ts upper-cases a Zod issue code before embedding it.
+      details: [{ field: 'operator', code: `OPERATOR_${operator.toUpperCase()}` }],
+      logContext: { ...options.logContext, operator },
     });
   }
 }

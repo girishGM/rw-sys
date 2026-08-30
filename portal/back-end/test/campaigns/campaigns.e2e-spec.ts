@@ -431,6 +431,58 @@ async function ensureRuleVersion(ruleId: number, countryId: number): Promise<num
   return versionId;
 }
 
+/**
+ * T-147 — the {@link ensureRuleVersion} mirror for a version that needs `default_operators` set.
+ * `default_operators` is one of the columns `T103_002`'s immutability trigger freezes once a
+ * version is `published` (same set as `expression`/`parameters`/`version_no`/`is_breaking`), so it
+ * must be baked into the **same** `INSERT` that publishes the row — an `UPDATE` after the fact
+ * (even idempotent, even from a fixture) is rejected by that trigger, reproduced directly while
+ * building this fixture. Idempotent the same way `ensureRuleVersion` is: a second call against the
+ * same `ruleId` reuses the version already created, trusting its `default_operators` from the
+ * first call rather than re-writing it.
+ */
+async function ensureRuleVersionWithOperators(
+  ruleId: number,
+  countryId: number,
+  operators: readonly string[],
+): Promise<number> {
+  const [existing] = await sql<{ id: number }>(
+    'SELECT id FROM reward_config.rule_versions WHERE rule_id = :ruleId AND version_no = 1',
+    { ruleId },
+  );
+  const versionId =
+    existing?.id ??
+    (
+      await sql<{ id: number }>(
+        `INSERT INTO reward_config.rule_versions
+           (rule_id, version_no, parameters, default_operators, status, created_by, published_by, published_at)
+         VALUES (:ruleId, 1, :parameters, :defaultOperators, 'published', :adminUserId, :adminUserId, now())
+         RETURNING id`,
+        {
+          ruleId,
+          parameters: RULE_PARAMETERS,
+          defaultOperators: JSON.stringify(operators),
+          adminUserId,
+        },
+      )
+    )[0].id;
+
+  const [assignment] = await sql<{ id: number }>(
+    `SELECT id FROM reward_config.rule_version_country_assignments
+      WHERE rule_version_id = :versionId AND country_id = :countryId`,
+    { versionId, countryId },
+  );
+  if (assignment === undefined) {
+    await exec(
+      `INSERT INTO reward_config.rule_version_country_assignments
+         (rule_version_id, rule_id, country_id, status, assigned_by)
+       VALUES (:versionId, :ruleId, :countryId, 'active', :adminUserId)`,
+      { versionId, ruleId, countryId, adminUserId },
+    );
+  }
+  return versionId;
+}
+
 async function ensureRewardSystem(code: string, countryId: number, rewardType: string) {
   const [existing] = await sql<{ id: number }>(
     'SELECT id FROM reward_config.reward_systems WHERE system_code = :code',
@@ -1532,6 +1584,183 @@ describe('T-037 · rule binding and dynamic values', () => {
     });
     expect(response.status).toBe(400);
     expect(response.body.error.code).toBe('NOT_PART_OF_CAMPAIGN');
+  });
+});
+
+// --- T-147: rule operator + component combination logic ------------------------------------------
+
+describe('T-147 · rule operator and component combination logic', () => {
+  // A rule/version of this block's own, not `ruleAssignedToA`/`ruleVersionA` — `default_operators`
+  // is one of the columns `T103_002`'s immutability trigger freezes once a version is `published`
+  // (same set as `expression`/`parameters`/`version_no`/`is_breaking`), so it must be baked into
+  // the version's own creating `INSERT` ({@link ensureRuleVersionWithOperators}) rather than set
+  // by an `UPDATE` on the shared fixture after the fact — reproduced directly while building this
+  // fixture the first way.
+  let operatorRuleId: number;
+
+  beforeAll(async () => {
+    operatorRuleId = await ensureRule(`${PREFIX}_RULE_OP`);
+    await assignRuleToCountry(operatorRuleId, countryA);
+    await ensureRuleVersionWithOperators(operatorRuleId, countryA, ['at_least', 'equals']);
+  });
+
+  /** Binds {@link operatorRuleId} to a fresh submittable campaign's component, alongside its
+   * existing `ruleAssignedToA` binding — `bindRule` allows more than one rule per component, so
+   * this needs none of `buildSubmittableCampaign`'s own setup duplicated. */
+  async function bindOperatorRule(): Promise<{
+    id: number;
+    componentId: number;
+    bindingId: number;
+  }> {
+    const { id, componentId } = await buildSubmittableCampaign();
+    const bound = await post('makerA', `/campaigns/${String(id)}/rules`, {
+      componentId,
+      ruleId: operatorRuleId,
+      values: { minSpend: 50 },
+    }).expect(201);
+    const component = (
+      bound.body.data.trackers[0].components as { id: number; rules: { id: number }[] }[]
+    ).find((c) => c.id === componentId);
+    const bindingId = component?.rules[component.rules.length - 1]?.id as number;
+    return { id, componentId, bindingId };
+  }
+
+  it("the rule picker carries the pinned version's defaultOperators", async () => {
+    const { id } = await createDraft();
+    const response = await get('makerA', `/campaigns/${String(id)}/rule-options`).expect(200);
+    const option = (response.body.data as { ruleId: number; defaultOperators: string[] }[]).find(
+      (entry) => entry.ruleId === operatorRuleId,
+    );
+    expect(option?.defaultOperators).toEqual(['at_least', 'equals']);
+  });
+
+  it("an operator from the pinned version's defaultOperators is accepted and persisted", async () => {
+    const { id, bindingId } = await bindOperatorRule();
+    await patch('makerA', `/campaigns/${String(id)}/rules/${String(bindingId)}`, {
+      values: { minSpend: 50 },
+      operator: 'at_least',
+    }).expect(200);
+
+    const [row] = await sql<{ operator: string }>(
+      'SELECT operator FROM reward_config.tracker_component_rules WHERE id = :id',
+      { id: bindingId },
+    );
+    expect(row.operator).toBe('at_least');
+  });
+
+  it('an operator outside defaultOperators is a 400 OPERATOR_NOT_ALLOWED', async () => {
+    const { id, bindingId } = await bindOperatorRule();
+    const response = await patch('makerA', `/campaigns/${String(id)}/rules/${String(bindingId)}`, {
+      values: { minSpend: 50 },
+      operator: 'between',
+    });
+    expect(response.status).toBe(400);
+    expect(response.body.error.code).toBe('OPERATOR_NOT_ALLOWED');
+  });
+
+  it('an operator is rejected on a binding whose rule has no defaultOperators at all', async () => {
+    // `ruleAssignedToA` (via `buildSubmittableCampaign`'s own default binding) has never had
+    // `default_operators` set — every operator must be refused, not just ones outside some set.
+    const { id, bindingId } = await buildSubmittableCampaign();
+    const response = await patch('makerA', `/campaigns/${String(id)}/rules/${String(bindingId)}`, {
+      values: { minSpend: 50 },
+      operator: 'at_least',
+    });
+    expect(response.status).toBe(400);
+    expect(response.body.error.code).toBe('OPERATOR_NOT_ALLOWED');
+  });
+
+  it('operator: null clears a previously set operator', async () => {
+    const { id, bindingId } = await bindOperatorRule();
+    await patch('makerA', `/campaigns/${String(id)}/rules/${String(bindingId)}`, {
+      values: { minSpend: 50 },
+      operator: 'equals',
+    }).expect(200);
+    await patch('makerA', `/campaigns/${String(id)}/rules/${String(bindingId)}`, {
+      values: { minSpend: 50 },
+      operator: null,
+    }).expect(200);
+
+    const [row] = await sql<{ operator: string | null }>(
+      'SELECT operator FROM reward_config.tracker_component_rules WHERE id = :id',
+      { id: bindingId },
+    );
+    expect(row.operator).toBeNull();
+  });
+
+  it('ruleLogic n_of without ruleThreshold is a 400', async () => {
+    const { id, componentId } = await buildSubmittableCampaign();
+    const response = await patch(
+      'makerA',
+      `/campaigns/${String(id)}/components/${String(componentId)}`,
+      { ruleLogic: 'n_of' },
+    );
+    expect(response.status).toBe(400);
+  });
+
+  it('ruleThreshold without ruleLogic n_of is a 400', async () => {
+    const { id, componentId } = await buildSubmittableCampaign();
+    const response = await patch(
+      'makerA',
+      `/campaigns/${String(id)}/components/${String(componentId)}`,
+      { ruleLogic: 'any', ruleThreshold: 2 },
+    );
+    expect(response.status).toBe(400);
+  });
+
+  it('ruleLogic n_of with ruleThreshold is accepted and persisted', async () => {
+    const { id, componentId } = await buildSubmittableCampaign();
+    await patch('makerA', `/campaigns/${String(id)}/components/${String(componentId)}`, {
+      ruleLogic: 'n_of',
+      ruleThreshold: 1,
+    }).expect(200);
+
+    const [row] = await sql<{ rule_logic: string; rule_threshold: number }>(
+      'SELECT rule_logic, rule_threshold FROM reward_config.tracker_components WHERE id = :id',
+      { id: componentId },
+    );
+    expect(row.rule_logic).toBe('n_of');
+    expect(row.rule_threshold).toBe(1);
+  });
+
+  it("ruleLogic defaults to null (reads as 'all') until a Maker sets one", async () => {
+    const { id, componentId } = await buildSubmittableCampaign();
+    const journey = await get('makerA', `/campaigns/${String(id)}/journey`).expect(200);
+    const component = (
+      journey.body.data as {
+        trackers: { components: { id: number; ruleLogic: string | null }[] }[];
+      }
+    ).trackers[0]?.components.find((c) => c.id === componentId);
+    expect(component?.ruleLogic).toBeNull();
+  });
+
+  it('GET journey surfaces operator/value on the rule and ruleLogic/ruleThreshold on the component', async () => {
+    const { id, bindingId, componentId } = await bindOperatorRule();
+    await patch('makerA', `/campaigns/${String(id)}/rules/${String(bindingId)}`, {
+      values: { minSpend: 50 },
+      operator: 'at_least',
+    }).expect(200);
+    await patch('makerA', `/campaigns/${String(id)}/components/${String(componentId)}`, {
+      ruleLogic: 'n_of',
+      ruleThreshold: 1,
+    }).expect(200);
+
+    const journey = await get('makerA', `/campaigns/${String(id)}/journey`).expect(200);
+    const component = (
+      journey.body.data as {
+        trackers: {
+          components: {
+            id: number;
+            ruleLogic: string;
+            ruleThreshold: number;
+            rules: { id: number; operator: string | null }[];
+          }[];
+        }[];
+      }
+    ).trackers[0]?.components.find((c) => c.id === componentId);
+    expect(component?.ruleLogic).toBe('n_of');
+    expect(component?.ruleThreshold).toBe(1);
+    expect(component?.rules.find((rule) => rule.id === bindingId)?.operator).toBe('at_least');
   });
 });
 

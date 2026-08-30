@@ -554,6 +554,8 @@ function journeyWithValueSourceRule() {
             sequenceOrder: 2,
             isMandatory: true,
             status: 'active',
+            ruleLogic: null,
+            ruleThreshold: null,
             rewards: [],
             rules: [
               {
@@ -578,6 +580,8 @@ function journeyWithValueSourceRule() {
                   ],
                 },
                 values: {},
+                operator: null,
+                value: null,
                 status: 'active',
               },
             ],
