@@ -27,7 +27,11 @@ import type { RuleMaster } from '@/database/models/rule-master.model';
 import type { RuleCategory } from '@/database/models/rule-category.model';
 import type { RuleSubCategory } from '@/database/models/rule-sub-category.model';
 import type { RuleCountryAssignment } from '@/database/models/rule-country-assignment.model';
+import type { RuleVersion } from '@/database/models/rule-version.model';
+import type { RuleResolver } from '@/database/models/rule-resolver.model';
 import type { Country } from '@/database/models/country.model';
+import type { FieldContextProvider } from '@/database/models/field-context-provider.model';
+import type { FieldApiLookupProvider } from '@/database/models/field-api-lookup-provider.model';
 import type { PortalUser } from '@/database/portal-models';
 
 export interface RecordedCall {
@@ -303,6 +307,56 @@ export function countryRow(overrides: Partial<Country> = {}): Country {
   } as unknown as Country;
 }
 
+/** T-114 — a `rule_versions` row shaped for `resolveInputFieldKeysByRule`'s own reads
+ * (`ruleId`, `versionNo`, `resolverId`). `resolverId: null` (T-103's "not yet wired" reading)
+ * is the default, matching every other model row in this file that has no special behaviour
+ * to opt into. */
+export function ruleVersionRow(overrides: Partial<RuleVersion> = {}): RuleVersion {
+  return {
+    id: 1,
+    ruleId: 1,
+    versionNo: 1,
+    expression: null,
+    parameters: { fields: [] },
+    changeSummary: null,
+    isBreaking: false,
+    status: 'draft',
+    supersedesVersionId: null,
+    originRequestId: null,
+    createdBy: 1,
+    publishedBy: null,
+    publishedAt: null,
+    deprecatedAt: null,
+    retiredAt: null,
+    resolverId: null,
+    resolverConfig: null,
+    evaluationContext: null,
+    defaultOperators: null,
+    createdAt: new Date('2026-01-01T00:00:00.000Z'),
+    updatedAt: new Date('2026-01-01T00:00:00.000Z'),
+    ...overrides,
+  } as unknown as RuleVersion;
+}
+
+/** T-114 — a `rule_resolvers` row, `resolverInputFieldKeys` defaulting to
+ * `TRACKER_STATE_LOOKUP`'s real seeded value (`T114_002`) since that is the one resolver these
+ * tests actually need to exercise the `resolver_input` branch. */
+export function ruleResolverRow(overrides: Partial<RuleResolver> = {}): RuleResolver {
+  return {
+    id: 1,
+    resolverCode: 'TRACKER_STATE_LOOKUP',
+    name: 'Sibling Tracker Component Lookup',
+    description: null,
+    handlerClass: 'com.reward.resolvers.TrackerStateLookupResolver',
+    inputSchema: '{}',
+    status: 'active',
+    resolverInputFieldKeys: ['targetComponentCode'],
+    createdAt: new Date('2026-01-01T00:00:00.000Z'),
+    updatedAt: new Date('2026-01-01T00:00:00.000Z'),
+    ...overrides,
+  } as unknown as RuleResolver;
+}
+
 export function ruleCountryAssignmentRow(
   overrides: Partial<RuleCountryAssignment> = {},
 ): RuleCountryAssignment & { country: Country } {
@@ -315,4 +369,43 @@ export function ruleCountryAssignmentRow(
     country: countryRow(),
     ...overrides,
   } as unknown as RuleCountryAssignment & { country: Country };
+}
+
+/** T-122 — a `field_context_providers` row, reduced to the one column
+ * `RulesService.assertValueSourceProvidersExist` reads back (`providerCode`). Defaults to
+ * `SIBLING_COMPONENTS`, T121_002's own real seeded code. */
+export function fieldContextProviderRow(
+  overrides: Partial<FieldContextProvider> = {},
+): FieldContextProvider {
+  return {
+    id: 1,
+    providerCode: 'SIBLING_COMPONENTS',
+    name: 'Sibling Components In This Journey',
+    description: null,
+    status: 'active',
+    ...overrides,
+  } as unknown as FieldContextProvider;
+}
+
+/** T-122 — a `field_api_lookup_providers` row. Defaults to `status: 'planned'` because that is
+ * the state T121_002 actually seeds every API provider in, and the state TC-5 requires to be
+ * *accepted* at authoring time — a fixture defaulting to `active` would quietly make the
+ * interesting case the exception rather than the norm. */
+export function fieldApiLookupProviderRow(
+  overrides: Partial<FieldApiLookupProvider> = {},
+): FieldApiLookupProvider {
+  return {
+    id: 1,
+    providerCode: 'PRODUCT_CATALOG',
+    name: 'Product Catalog',
+    description: null,
+    endpointUrl: 'PLACEHOLDER',
+    httpMethod: 'GET',
+    authType: 'none',
+    authConfigEnc: null,
+    responseValueKey: 'productId',
+    responseLabelKey: 'productName',
+    status: 'planned',
+    ...overrides,
+  } as unknown as FieldApiLookupProvider;
 }

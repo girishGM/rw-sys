@@ -131,3 +131,123 @@ th[class~='text-slate-400'],
 td[class~='text-slate-400'] {
   color: var(--color-slate-600);
 }
+
+/**
+ * T-129 — the three selectable themes (13-REWARD-MASTER-VALUE-SOURCES.md §6; palette lifted
+ * from `project-plan/requirements/super-admin-rules-rewards-theme-preview.html`'s own theme
+ * picker, per that task's implementation note 1: "match its palette rather than re-deriving
+ * from scratch"). `ThemeProvider` (`src/app/ThemeProvider.tsx`) sets `data-theme="…"` on
+ * `document.documentElement` from the user's persisted preference (T-128); every block below
+ * redefines *only the values* of tokens already declared in the `:root` block above — never a
+ * new token name — so every component in `src/components/**`/`src/layouts/**` that already
+ * consumes `bg-primary-600`, `text-slate-900`, `border-slate-200`, etc. re-themes for free with
+ * no per-component change, exactly as this task's scope requires ("a token-layer change, not a
+ * redesign of every component").
+ *
+ * **`light-blue` has no block of its own.** It is the DB column's own default (`T128_001`'s
+ * `DEFAULT 'light-blue'`) *and* this file's own pre-existing `:root` default from T-021 — the
+ * portal's colours were already "light blue" (an indigo-leaning blue/white palette) before this
+ * task existed, so `data-theme="light-blue"` simply falls through to the block above with
+ * nothing to override. Re-deriving the prototype's own, slightly different blue for this one
+ * theme would be a visual change to every screen the whole portal already ships today, which is
+ * exactly the "redesign" this task's own scope excludes — see the completion report for this
+ * task for the explicit call-out.
+ *
+ * **Every colour pair a component in `src/components/**` actually renders together (`bg-*`
+ * paired with `text-*` in the same class string — Badge's tone chips, Button's filled
+ * variants, StatusPill, Drawer's close button, DatePicker's selected-day cell) is verified at
+ * >= 4.5:1 for *each* theme below independently, the same WCAG 2.1 §1.4.3 bar
+ * `test/components/tokenContrast.spec.ts` (T-021 TC-9) already enforces for the default theme
+ * — not just for whichever block happens to be declared last in this file, since that test's
+ * own simple "last `--color-*` declaration wins" parsing would otherwise only ever check one of
+ * the three. See that spec file's own header for the exact mechanism.
+ *
+ * **Distinct accent vs. semantic tones (implementation note 2).** Each theme's `primary` scale
+ * is deliberately kept far enough (in hue and/or lightness) from `warning`/`danger` that a
+ * themed accent is never mistaken for a status colour:
+ *  - `yellow-black`'s gold accent (`primary-500` hue ~45°) sits close enough to the *default*
+ *    amber `warning` (hue ~38°) that the two would have read as the same colour side by side —
+ *    confirmed by eye against the rendered swatches, not assumed — so `warning` is shifted to a
+ *    true orange (Tailwind's own orange 100/600/700, hue ~20°) for this theme only, a clean 25°
+ *    away from the gold accent while still reading as "amber/orange = caution" against the
+ *    portal's own `danger` (rose, hue ~350°) and `success` (emerald, hue ~160°). `danger` is left
+ *    at its default rose — already far enough from gold to need no change.
+ *  - `red-white`'s red accent is the one that would otherwise collide with the default rose
+ *    `danger` scale (both read as "red"), so this theme instead shifts `danger` to a darker,
+ *    desaturated maroon/wine (hue ~345° but markedly darker and less saturated than the bright
+ *    accent red) — the same distinction
+ *    `super-admin-rules-rewards-theme-preview.html`'s own `red-white` block draws between its
+ *    `--primary-*` and `--danger-*` variables. `warning` (orange/amber) is left at its default —
+ *    already a clearly different hue from red.
+ *  - `success` and `sky` (the "paused" status colour, §7 of `tokens.css`'s own header) are left
+ *    untouched in every theme: both sit far enough in hue from every accent colour above that no
+ *    theme needs to move them, matching the prototype's own comment that these are "constant
+ *    across all 3 themes so meaning never changes".
+ *
+ * `--color-white` is deliberately **never** overridden: every theme's cards, modals and inputs
+ * stay pure white, exactly like the prototype's own `--surface:#ffffff` staying constant across
+ * all three of its themes — only the page background, borders, text and accent colour move.
+ */
+[data-theme='yellow-black'] {
+  --color-slate-50: #fdfcf4;
+  --color-slate-100: #fef9e0;
+  --color-slate-200: #eae6cf;
+  --color-slate-300: #d8d2ab;
+  --color-slate-400: #9a9377;
+  --color-slate-500: #6b6555;
+  --color-slate-600: #55503f;
+  --color-slate-700: #3d3829;
+  --color-slate-800: #241f11;
+  --color-slate-900: #14110a;
+
+  --color-primary-50: #fefce8;
+  --color-primary-100: #fef9c3;
+  --color-primary-200: #fef08a;
+  --color-primary-300: #fde047;
+  --color-primary-400: #facc15;
+  --color-primary-500: #eab308;
+  --color-primary-600: #8a6508;
+  --color-primary-700: #6b4e06;
+  --color-primary-800: #543d05;
+
+  /* Shifted away from the default amber — see this file's own T-129 header, implementation
+     note 2's first bullet — to stay distinct from this theme's gold `primary` accent. */
+  --color-warning-50: #fff7ed;
+  --color-warning-100: #ffedd5;
+  --color-warning-200: #fed7aa;
+  --color-warning-500: #f97316;
+  --color-warning-600: #ea580c;
+  --color-warning-700: #c2410c;
+}
+
+[data-theme='red-white'] {
+  --color-slate-50: #fdf7f7;
+  --color-slate-100: #fbeaea;
+  --color-slate-200: #f4d9d9;
+  --color-slate-300: #e8b8b8;
+  --color-slate-400: #a68f8f;
+  --color-slate-500: #7a6363;
+  --color-slate-600: #5c4a4a;
+  --color-slate-700: #402f2f;
+  --color-slate-800: #2a1c1c;
+  --color-slate-900: #180f0f;
+
+  --color-primary-50: #fef2f2;
+  --color-primary-100: #fee2e2;
+  --color-primary-200: #fecaca;
+  --color-primary-300: #fca5a5;
+  --color-primary-400: #f87171;
+  --color-primary-500: #ef4444;
+  --color-primary-600: #b91c1c;
+  --color-primary-700: #7f1d1d;
+  --color-primary-800: #5f1616;
+
+  /* Shifted to a darker, desaturated maroon — see this file's own T-129 header, implementation
+     note 2's second bullet — to stay distinct from this theme's bright red `primary` accent. */
+  --color-danger-50: #fdf2f4;
+  --color-danger-100: #f8d7da;
+  --color-danger-200: #f1b0b7;
+  --color-danger-500: #9f1239;
+  --color-danger-600: #7f1d1d;
+  --color-danger-700: #450a0a;
+}

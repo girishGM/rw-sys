@@ -64,6 +64,8 @@ import { ROLE_DASHBOARD_WIDGETS } from '@/database/migrations/T004_003_seed_role
 // T-069 — `role_nav_configs` is seeded by more than one migration. See NAV_SEED_MIGRATIONS below.
 import { DEFINITION_REQUEST_NAV_CONFIGS } from '@/database/migrations/T042_002_seed_definition_request_nav';
 import { AGENT_NAV_CONFIGS } from '@/database/migrations/T049_001_seed_agent_nav';
+import { RULE_CATEGORY_NAV_CONFIGS } from '@/database/migrations/T107_001_seed_rule_category_nav';
+import { REWARD_CATEGORY_NAV_CONFIGS } from '@/database/migrations/T117_001_seed_reward_category_nav';
 import type { PortalRole } from '@/database/portal-models';
 import { expectErrorEnvelope } from '../common/support/error-envelope';
 // T-055 — a `super_admin` login now ends in an MFA challenge; this completes it through the real
@@ -264,6 +266,8 @@ const NAV_SEED_MIGRATIONS: { readonly file: string; readonly rows: readonly Seed
   { file: 'T004_002_seed_role_nav_configs.ts', rows: ROLE_NAV_CONFIGS },
   { file: 'T042_002_seed_definition_request_nav.ts', rows: DEFINITION_REQUEST_NAV_CONFIGS },
   { file: 'T049_001_seed_agent_nav.ts', rows: AGENT_NAV_CONFIGS },
+  { file: 'T107_001_seed_rule_category_nav.ts', rows: RULE_CATEGORY_NAV_CONFIGS },
+  { file: 'T117_001_seed_reward_category_nav.ts', rows: REWARD_CATEGORY_NAV_CONFIGS },
 ];
 
 /** Every seeded nav row, from every seeding migration, flattened. */

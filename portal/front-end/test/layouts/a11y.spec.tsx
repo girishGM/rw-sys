@@ -16,6 +16,7 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import * as axe from 'axe-core';
 import { BootstrapContext } from '../../src/auth/useBootstrap';
+import { ThemeProvider } from '../../src/app/ThemeProvider';
 import { AppShell } from '../../src/layouts/AppShell';
 import { NAV_WITH_CHILDREN, SUPER_ADMIN_WIDGETS, makeBootstrapValue } from './fixtures';
 import { DashboardPage } from '../../src/features/dashboard/DashboardPage';
@@ -72,9 +73,11 @@ function renderShell(initialPath = '/dashboard') {
             <Route
               path="*"
               element={
-                <AppShell>
-                  <DashboardPage />
-                </AppShell>
+                <ThemeProvider>
+                  <AppShell>
+                    <DashboardPage />
+                  </AppShell>
+                </ThemeProvider>
               }
             />
           </Routes>
@@ -92,11 +95,17 @@ beforeEach(() => {
   mockPost.mockReset();
 });
 
+// T-129 — every scan below now also renders `ThemeSwitcher` (via `TopBar`), which needs its
+// own `/users/me/preferences` answered the same way `NotificationBell`'s
+// `/notifications/unread-count` already is.
+const PREFERENCES_RESPONSE = { data: { data: { uiTheme: 'light-blue' } } };
+
 describe('TC-19 — axe-core scan of the shell, zero violations', () => {
   it('desktop shell with a populated dashboard', async () => {
     mockGet.mockImplementation((path: string) => {
       if (path === '/notifications/unread-count')
         return Promise.resolve({ data: { data: { count: 3 } } });
+      if (path === '/users/me/preferences') return Promise.resolve(PREFERENCES_RESPONSE);
       const match = /^\/dashboard\/widgets\/(.+)$/.exec(path);
       if (match) return Promise.resolve({ data: { data: widgetResponseFor(match[1]) } });
       return Promise.reject(new Error(`unexpected path ${path}`));
@@ -111,6 +120,7 @@ describe('TC-19 — axe-core scan of the shell, zero violations', () => {
     mockGet.mockImplementation((path: string) => {
       if (path === '/notifications/unread-count')
         return Promise.resolve({ data: { data: { count: 0 } } });
+      if (path === '/users/me/preferences') return Promise.resolve(PREFERENCES_RESPONSE);
       const match = /^\/dashboard\/widgets\/(.+)$/.exec(path);
       if (match) return Promise.resolve({ data: { data: widgetResponseFor(match[1]) } });
       return Promise.reject(new Error(`unexpected path ${path}`));
@@ -124,7 +134,10 @@ describe('TC-19 — axe-core scan of the shell, zero violations', () => {
   });
 
   it('the empty dashboard state (no widgets configured)', async () => {
-    mockGet.mockResolvedValue({ data: { data: { count: 0 } } });
+    mockGet.mockImplementation((path: string) => {
+      if (path === '/users/me/preferences') return Promise.resolve(PREFERENCES_RESPONSE);
+      return Promise.resolve({ data: { data: { count: 0 } } });
+    });
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const { container } = render(
       <QueryClientProvider client={client}>
@@ -136,9 +149,11 @@ describe('TC-19 — axe-core scan of the shell, zero violations', () => {
               <Route
                 path="*"
                 element={
-                  <AppShell>
-                    <DashboardPage />
-                  </AppShell>
+                  <ThemeProvider>
+                    <AppShell>
+                      <DashboardPage />
+                    </AppShell>
+                  </ThemeProvider>
                 }
               />
             </Routes>
@@ -155,6 +170,7 @@ describe('TC-19 — axe-core scan of the shell, zero violations', () => {
     mockGet.mockImplementation((path: string) => {
       if (path === '/notifications/unread-count')
         return Promise.resolve({ data: { data: { count: 0 } } });
+      if (path === '/users/me/preferences') return Promise.resolve(PREFERENCES_RESPONSE);
       return Promise.reject({ isAxiosError: true, response: { status: 500 }, message: 'boom' });
     });
     const { container } = renderShell();

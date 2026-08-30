@@ -42,6 +42,11 @@ export const DEFAULT_PAGE_SIZE = 20;
 /** 03-API-CONTRACT.md §1 — "`pageSize` capped at 100". */
 export const MAX_PAGE_SIZE = 100;
 
+/** T-111 — `GET /rules?search=` bound. Same width `list-merchants-query.dto.ts`'s own
+ * `MERCHANT_SEARCH_MAX_LENGTH` uses; this is a UI convenience filter, not a column, so there is
+ * no schema width to transcribe from — just a sane cap on the query string itself. */
+export const RULE_SEARCH_MAX_LENGTH = 100;
+
 /**
  * `rule_master.parameters` meta-schema bounds (implementation note 4 — "validate it against a
  * meta-schema on save").

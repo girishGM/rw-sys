@@ -10,6 +10,8 @@ import {
   UpdatedAt,
 } from 'sequelize-typescript';
 import { Tenant } from './tenant.model';
+import { RewardCategory } from './reward-category.model';
+import { RewardSubCategory } from './reward-sub-category.model';
 import { parseJsonColumn, stringifyJsonColumn } from '../util/json-text.util';
 
 /**
@@ -18,6 +20,11 @@ import { parseJsonColumn, stringifyJsonColumn } from '../util/json-text.util';
  * exists). `connector_config`, `retry_config` and `maintenance_schedule` are `text` holding
  * JSON — same tolerant getter/setter treatment as every other legacy JSON-in-text column.
  * `merchant_id` has no FK constraint in the live schema for this table.
+ *
+ * `category_id`/`sub_category_id` — T-118 (`T118_001`). Unlike `rule_master`, which carries only
+ * `sub_category_id` and derives its category through the sub-category's own FK, this model
+ * carries **both** directly (13-REWARD-MASTER-VALUE-SOURCES.md §1) since a reward category may
+ * legitimately have zero sub-categories (T-116's own "Points never needs one" example).
  */
 @Table({
   schema: 'reward_config',
@@ -40,6 +47,14 @@ export class RewardSystem extends Model<RewardSystem> {
   /** No FK constraint in the live schema for this column. */
   @Column({ type: DataType.INTEGER, allowNull: true, field: 'merchant_id' })
   declare merchantId: number | null;
+
+  @ForeignKey(() => RewardCategory)
+  @Column({ type: DataType.INTEGER, allowNull: false, field: 'category_id' })
+  declare categoryId: number;
+
+  @ForeignKey(() => RewardSubCategory)
+  @Column({ type: DataType.INTEGER, allowNull: true, field: 'sub_category_id' })
+  declare subCategoryId: number | null;
 
   @Column({ type: DataType.STRING(50), allowNull: false, field: 'system_code' })
   declare systemCode: string;
@@ -113,6 +128,12 @@ export class RewardSystem extends Model<RewardSystem> {
 
   @BelongsTo(() => Tenant)
   declare tenant: Tenant | null;
+
+  @BelongsTo(() => RewardCategory)
+  declare category: RewardCategory;
+
+  @BelongsTo(() => RewardSubCategory)
+  declare subCategory: RewardSubCategory | null;
 
   @CreatedAt
   @Column({ type: DataType.DATE, field: 'created_at' })

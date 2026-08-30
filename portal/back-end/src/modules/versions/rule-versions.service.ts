@@ -22,11 +22,20 @@ import { Inject, Injectable } from '@nestjs/common';
 import { UniqueConstraintError } from 'sequelize';
 import type { Sequelize } from 'sequelize-typescript';
 import { SEQUELIZE } from '@/database/sequelize.provider';
-import { Country, RuleMaster, RuleVersion, RuleVersionCountryAssignment } from '@/database/models';
+import {
+  Country,
+  RuleMaster,
+  RuleOperator,
+  RuleResolver,
+  RuleVersion,
+  RuleVersionCountryAssignment,
+} from '@/database/models';
 import { ScopedRepository } from '@/common/scope/scoped.repository';
 import { PortalUser } from '@/database/portal-models';
 import { assertRole } from '@/common/rbac/assert-role';
 import { AuditService } from '@/common/audit/audit.service';
+import { ValidationFailedError } from '@/common/errors/app-error';
+import { stringifyJsonColumn } from '@/database/util/json-text.util';
 import type { AuthenticatedUser } from '@/modules/auth/decorators/current-user.decorator';
 import { diffRuleParameterFields, suggestIsBreaking } from './version-diff.util';
 import { findActiveCampaignsUsingRuleVersionInCountry } from './version-campaign-usage.query';
@@ -182,6 +191,11 @@ export class RuleVersionsService {
   ): Promise<RuleVersionDto> {
     assertRole(actor, 'super_admin');
     const before = await this.findVersionOrFail(ruleId, versionId);
+    // T-109: the app-level status check below is what actually protects a published version's
+    // resolver wiring on this path — `fn_rule_version_immutable` (`T103_002`) is the DB-level
+    // backstop for the same four columns, never reached through this service (task file's own
+    // implementation note 3: "this service method doesn't need its own immutability check, the
+    // DB enforces it" — true, but only because this check already refuses first).
     if (before.status !== 'draft') throw new VersionInvalidTransitionError();
 
     const changes: Record<string, unknown> = {};
@@ -198,6 +212,32 @@ export class RuleVersionsService {
         throw new VersionBreakingConfirmationRequiredError(suggested);
       }
       changes['isBreaking'] = dto.isBreaking;
+    }
+
+    // T-109 — resolver wiring. `undefined` means "leave as is" (omitted from `changes`
+    // entirely); `null` means "clear back to inert", accepted with no lookup since there is
+    // nothing to validate against. A non-null value is checked against its registry table
+    // before being accepted — same "fail before writing" discipline `isBreaking` above uses.
+    if (dto.resolverId !== undefined) {
+      if (dto.resolverId !== null) {
+        await this.scoped.findByPkOrFail(RuleResolver, dto.resolverId);
+      }
+      changes['resolverId'] = dto.resolverId;
+    }
+    if (dto.resolverConfig !== undefined) {
+      // Opaque JSON, stored as `text` (`rule-version.model.ts`'s own doc comment) — the task
+      // file's own Scope "Out" note excludes validating this against the resolver's own
+      // `input_schema`.
+      changes['resolverConfig'] = stringifyJsonColumn(dto.resolverConfig);
+    }
+    if (dto.evaluationContext !== undefined) {
+      changes['evaluationContext'] = dto.evaluationContext;
+    }
+    if (dto.defaultOperators !== undefined) {
+      if (dto.defaultOperators !== null) {
+        await this.assertOperatorsExist(dto.defaultOperators);
+      }
+      changes['defaultOperators'] = stringifyJsonColumn(dto.defaultOperators);
     }
 
     if (Object.keys(changes).length > 0) {
@@ -359,6 +399,31 @@ export class RuleVersionsService {
     return (rows[0]?.versionNo ?? 0) + 1;
   }
 
+  /**
+   * T-109 — `defaultOperators` entries must each name a real, active-or-not `rule_operators`
+   * row (`rule_registries.service.ts`'s own read side lists every status, active included; this
+   * task's own scope note does not ask for an `active`-only restriction, so none is applied).
+   * One `WHERE operator_code IN (...)` query regardless of how many codes are supplied — the
+   * task file's own implementation note 2: "not a query per code."
+   */
+  private async assertOperatorsExist(codes: readonly string[]): Promise<void> {
+    if (codes.length === 0) return;
+    const unique = [...new Set(codes)];
+    const found = await this.scoped.listAll(RuleOperator, {
+      where: { operatorCode: unique },
+    });
+    if (found.length === unique.length) return;
+
+    const foundCodes = new Set(found.map((operator) => operator.operatorCode));
+    const unknown = unique.filter((code) => !foundCodes.has(code));
+    // `code` values are never echoed into `details` — a client-supplied string cannot be
+    // trusted to pass `SAFE_FIELD_PATTERN`/`SAFE_ERROR_CODE_PATTERN` (`app-error.ts`), the same
+    // reasoning `grpc-grants.service.ts#normaliseSections` documents for `UNKNOWN_SECTION`.
+    throw new ValidationFailedError(
+      unknown.map(() => ({ field: 'defaultOperators', code: 'UNKNOWN_OPERATOR' })),
+    );
+  }
+
   private async loadSupersedes(version: RuleVersion): Promise<RuleVersion | null> {
     if (version.supersedesVersionId === null) return null;
     return this.scoped
@@ -398,5 +463,10 @@ function fieldSnapshot(version: RuleVersion): Record<string, unknown> {
     parameters: version.parameters,
     changeSummary: version.changeSummary,
     isBreaking: version.isBreaking,
+    // T-109
+    resolverId: version.resolverId,
+    resolverConfig: version.resolverConfig,
+    evaluationContext: version.evaluationContext,
+    defaultOperators: version.defaultOperators,
   };
 }

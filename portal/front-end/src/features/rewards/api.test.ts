@@ -1,5 +1,14 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import type { Reward, RewardCountryAssignment, RewardPolicy } from '@reward-portal/shared';
+import {
+  createRewardRequestSchema,
+  rewardListItemSchema,
+  rewardSchema,
+  type CreateRewardRequest,
+  type Reward,
+  type RewardCountryAssignment,
+  type RewardListItem,
+  type RewardPolicy,
+} from '@reward-portal/shared';
 
 const { mockGet, mockPost, mockPatch, mockDelete } = vi.hoisted(() => ({
   mockGet: vi.fn(),
@@ -31,6 +40,11 @@ import {
 } from './api';
 import { ApiError } from '../../lib/apiError';
 
+/** T-133 — `categoryId`/`categoryName`/`subCategoryId`/`subCategoryName` are part of every
+ * `/rewards` response since T-118 (`reward_systems.category_id` is `NOT NULL`, and
+ * `reward-response.dto.ts` resolves both names off the eagerly-loaded associations). A fixture
+ * without them is a shape the server cannot produce, so this one carries a resolved
+ * sub-category; `listRow` below covers the `subCategoryId: null` branch. */
 const reward: Reward = {
   id: 1,
   systemCode: 'CASHBACK_STANDARD',
@@ -45,9 +59,46 @@ const reward: Reward = {
   retryEnabled: true,
   retryConfig: {},
   merchantId: null,
+  categoryId: 4,
+  categoryName: 'Cashback',
+  subCategoryId: 9,
+  subCategoryName: 'Instant cashback',
   status: 'active',
   createdAt: '2026-01-01T00:00:00.000Z',
   updatedAt: '2026-01-01T00:00:00.000Z',
+};
+
+/** One `GET /rewards` row — no `connectorConfigPreview` key at all (TC-11), and the
+ * "category with no sub-category" branch T-116 documents ("Points never needs one"). */
+const listRow: RewardListItem = {
+  id: 1,
+  systemCode: 'POINTS_STANDARD',
+  name: 'Standard points',
+  description: null,
+  rewardType: 'points',
+  deliveryMode: 'realtime',
+  connectorType: 'internal_api',
+  maintenanceWindowEnabled: false,
+  maintenanceSchedule: {},
+  retryEnabled: true,
+  retryConfig: {},
+  merchantId: null,
+  categoryId: 7,
+  categoryName: 'Points',
+  subCategoryId: null,
+  subCategoryName: null,
+  status: 'active',
+  createdAt: '2026-01-01T00:00:00.000Z',
+  updatedAt: '2026-01-01T00:00:00.000Z',
+};
+
+/** The minimum body `POST /rewards` accepts — `categoryId` included, required since T-118. */
+const createRewardInput: CreateRewardRequest = {
+  systemCode: 'CASHBACK_STANDARD',
+  name: 'Standard cashback',
+  rewardType: 'monetary',
+  connectorType: 'internal_api',
+  categoryId: 4,
 };
 
 const assignment: RewardCountryAssignment = {
@@ -79,6 +130,46 @@ beforeEach(() => {
   mockDelete.mockReset();
 });
 
+/** T-133 regression guard. The defect this task fixes was a *type-level* one — the fixtures
+ * below stopped matching the shared schema after T-118 added the category fields — and a
+ * type-level break is invisible to `npm test`: `tsc` catches it, Vitest's esbuild transform
+ * strips the annotation and runs anyway. These cases re-judge each fixture with the same zod
+ * schema the API client uses at runtime, so the drift fails the test suite too, not only the
+ * workspace typecheck. If a future schema change makes a fixture unproducible by the server
+ * again, this goes red first. */
+describe('fixtures match the published contract (T-133)', () => {
+  it('the detail fixture parses as a Reward', () => {
+    expect(rewardSchema.parse(reward)).toEqual(reward);
+  });
+
+  it('the list fixture parses as a RewardListItem', () => {
+    expect(rewardListItemSchema.parse(listRow)).toEqual(listRow);
+  });
+
+  it('the create-reward fixture parses as a CreateRewardRequest', () => {
+    expect(createRewardRequestSchema.parse(createRewardInput)).toEqual(createRewardInput);
+  });
+
+  it('every T-118 category field is actually present on the fixtures', () => {
+    // Named explicitly: `.parse()` above would still pass if a later schema change made these
+    // optional again, and the point of the fixture is that it mirrors what the server sends.
+    expect(reward).toMatchObject({
+      categoryId: expect.any(Number),
+      categoryName: expect.any(String),
+      subCategoryId: expect.any(Number),
+      subCategoryName: expect.any(String),
+    });
+    // The other branch: a category with no sub-category resolves both sub-category fields to null.
+    expect(listRow).toMatchObject({
+      categoryId: expect.any(Number),
+      categoryName: expect.any(String),
+      subCategoryId: null,
+      subCategoryName: null,
+    });
+    expect(createRewardInput).toMatchObject({ categoryId: expect.any(Number) });
+  });
+});
+
 describe('query keys', () => {
   it('rewardsQueryKey is scoped per params', () => {
     expect(rewardsQueryKey({ page: 1 })).toEqual(['rewards', { page: 1 }]);
@@ -98,25 +189,7 @@ describe('fetchRewards', () => {
   it('requests /rewards with the given params and returns the parsed list', async () => {
     mockGet.mockResolvedValue({
       data: {
-        data: [
-          {
-            id: 1,
-            systemCode: 'CASHBACK_STANDARD',
-            name: 'Standard cashback',
-            description: null,
-            rewardType: 'monetary',
-            deliveryMode: 'realtime',
-            connectorType: 'internal_api',
-            maintenanceWindowEnabled: false,
-            maintenanceSchedule: {},
-            retryEnabled: true,
-            retryConfig: {},
-            merchantId: null,
-            status: 'active',
-            createdAt: '2026-01-01T00:00:00.000Z',
-            updatedAt: '2026-01-01T00:00:00.000Z',
-          },
-        ],
+        data: [listRow],
         meta: { page: 1, pageSize: 20, total: 1 },
       },
     });
@@ -125,6 +198,7 @@ describe('fetchRewards', () => {
 
     expect(mockGet).toHaveBeenCalledWith('/rewards', { params: { page: 1, sort: 'name:asc' } });
     expect(result.data).toHaveLength(1);
+    expect(result.data[0]).toEqual(listRow);
   });
 
   it('rejects a list row that carries connectorConfigPreview — TC-11 is a contract test too', async () => {
@@ -134,7 +208,13 @@ describe('fetchRewards', () => {
     mockGet.mockResolvedValue({
       data: { data: [reward], meta: { page: 1, pageSize: 20, total: 1 } },
     });
-    await expect(fetchRewards({})).rejects.toBeInstanceOf(ApiError);
+    const error = await fetchRewards({}).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ApiError);
+    // T-133: assert *why* it was rejected. Until this task, the fixture was also missing the
+    // four T-118 category fields, so this test passed on "required field absent" and would
+    // have stayed green even if `.strict()` were dropped — a change-detector, not a test.
+    expect(String((error as ApiError).cause)).toContain('connectorConfigPreview');
+    expect(String((error as ApiError).cause)).toContain('unrecognized_keys');
   });
 
   it('maps a rejected request into an ApiError', async () => {
@@ -181,16 +261,11 @@ describe('createReward', () => {
   it('posts to /rewards and returns the created reward (TC-1)', async () => {
     mockPost.mockResolvedValue({ data: { data: reward } });
 
-    const result = await createReward({
-      systemCode: 'CASHBACK_STANDARD',
-      name: 'Standard cashback',
-      rewardType: 'monetary',
-      connectorType: 'internal_api',
-    });
+    const result = await createReward(createRewardInput);
 
     expect(mockPost).toHaveBeenCalledWith(
       '/rewards',
-      expect.objectContaining({ systemCode: 'CASHBACK_STANDARD' }),
+      expect.objectContaining({ systemCode: 'CASHBACK_STANDARD', categoryId: 4 }),
     );
     expect(result).toEqual(reward);
   });
@@ -204,12 +279,9 @@ describe('createReward', () => {
       },
     });
 
-    const error = await createReward({
-      systemCode: 'XX',
-      name: 'x',
-      rewardType: 'monetary',
-      connectorType: 'internal_api',
-    }).catch((e: unknown) => e);
+    const error = await createReward({ ...createRewardInput, systemCode: 'XX', name: 'x' }).catch(
+      (e: unknown) => e,
+    );
     expect(error).toBeInstanceOf(ApiError);
     expect((error as ApiError).code).toBe('REWARD_SYSTEM_CODE_EXISTS');
   });
@@ -229,12 +301,9 @@ describe('createReward', () => {
       },
     });
 
-    const error = await createReward({
-      systemCode: 'XX',
-      name: 'x',
-      rewardType: 'monetary',
-      connectorType: 'internal_api',
-    }).catch((e: unknown) => e);
+    const error = await createReward({ ...createRewardInput, systemCode: 'XX', name: 'x' }).catch(
+      (e: unknown) => e,
+    );
     expect(error).toBeInstanceOf(ApiError);
     expect((error as ApiError).code).toBe('VALIDATION_FAILED');
   });

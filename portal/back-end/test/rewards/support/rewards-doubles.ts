@@ -22,6 +22,8 @@ import type { AuthenticatedUser } from '@/modules/auth/decorators/current-user.d
 import type { RewardSystem } from '@/database/models/reward-system.model';
 import type { RewardPolicy } from '@/database/models/reward-policy.model';
 import type { RewardCountryAssignment } from '@/database/models/reward-country-assignment.model';
+import type { RewardCategory } from '@/database/models/reward-category.model';
+import type { RewardSubCategory } from '@/database/models/reward-sub-category.model';
 import type { Country } from '@/database/models/country.model';
 import type { PortalUser } from '@/database/portal-models';
 import type { RewardConnectorConfigCrypto } from '@/modules/rewards/reward-connector-config.crypto';
@@ -273,7 +275,10 @@ export function actor(overrides: Partial<AuthenticatedUser> = {}): Authenticated
 
 /** A `reward_systems` row shaped exactly as `toRewardDto`/`toRewardListItemDto` expect to read
  * it. `connectorConfig` defaults to `{}` — `parseJsonColumn`'s own fallback for a `NULL` column
- * (`reward-system.model.ts`), i.e. "no envelope, no connector config set". */
+ * (`reward-system.model.ts`), i.e. "no envelope, no connector config set". `category`/
+ * `subCategory` (T-118) default to the eagerly-loaded `UNCATEGORIZED` category and no
+ * sub-category — the shape every real read path loads it in (`WITH_CATEGORY`,
+ * `rewards.service.ts`). */
 export function rewardSystemRow(overrides: Partial<RewardSystem> = {}): RewardSystem {
   return {
     id: 1,
@@ -290,6 +295,10 @@ export function rewardSystemRow(overrides: Partial<RewardSystem> = {}): RewardSy
     maintenanceSchedule: {},
     retryEnabled: true,
     retryConfig: {},
+    categoryId: 1,
+    subCategoryId: null,
+    category: rewardCategoryRow(),
+    subCategory: null,
     status: 'active',
     createdAt: new Date('2026-01-01T00:00:00.000Z'),
     updatedAt: new Date('2026-01-01T00:00:00.000Z'),
@@ -327,6 +336,40 @@ export function countryRow(overrides: Partial<Country> = {}): Country {
     name: 'Malaysia',
     ...overrides,
   } as unknown as Country;
+}
+
+/** T-116 — a `reward_categories` row shaped exactly as `toRewardCategoryDto` expects to read
+ * it. */
+export function rewardCategoryRow(overrides: Partial<RewardCategory> = {}): RewardCategory {
+  return {
+    id: 1,
+    tenantId: 1,
+    categoryCode: 'UNCATEGORIZED',
+    name: 'Uncategorized',
+    description: null,
+    status: 'active',
+    createdAt: new Date('2026-01-01T00:00:00.000Z'),
+    updatedAt: new Date('2026-01-01T00:00:00.000Z'),
+    ...overrides,
+  } as unknown as RewardCategory;
+}
+
+/** T-116 — a `reward_sub_categories` row shaped exactly as `toRewardSubCategoryDto` expects to
+ * read it. */
+export function rewardSubCategoryRow(
+  overrides: Partial<RewardSubCategory> = {},
+): RewardSubCategory {
+  return {
+    id: 1,
+    categoryId: 1,
+    subCategoryCode: 'GENERAL',
+    name: 'General',
+    description: null,
+    status: 'active',
+    createdAt: new Date('2026-01-01T00:00:00.000Z'),
+    updatedAt: new Date('2026-01-01T00:00:00.000Z'),
+    ...overrides,
+  } as unknown as RewardSubCategory;
 }
 
 export function rewardCountryAssignmentRow(

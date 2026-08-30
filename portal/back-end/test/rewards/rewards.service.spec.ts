@@ -7,14 +7,24 @@
  */
 import { UniqueConstraintError } from 'sequelize';
 import { PermissionDeniedHttpException } from '@/common/rbac/rbac.exceptions';
-import { NotFoundError } from '@/common/errors/app-error';
-import { Country, RewardCountryAssignment, RewardPolicy, RewardSystem } from '@/database/models';
+import { NotFoundError, ValidationFailedError } from '@/common/errors/app-error';
+import {
+  Country,
+  RewardCategory,
+  RewardCountryAssignment,
+  RewardPolicy,
+  RewardSubCategory,
+  RewardSystem,
+} from '@/database/models';
 import { PortalUser } from '@/database/portal-models';
 import { RewardsService } from '@/modules/rewards/rewards.service';
 import {
+  REWARD_ERROR_CODE,
+  RewardCategoryCodeExistsError,
   RewardHasCountryAssignmentsError,
   RewardInUseByCampaignError,
   RewardPolicyCodeExistsError,
+  RewardSubCategoryCodeExistsError,
   RewardSystemCodeExistsError,
 } from '@/modules/rewards/rewards.errors';
 import {
@@ -29,8 +39,10 @@ import {
   asSequelize,
   countryRow,
   portalUserRow,
+  rewardCategoryRow,
   rewardCountryAssignmentRow,
   rewardPolicyRow,
+  rewardSubCategoryRow,
   rewardSystemRow,
 } from './support/rewards-doubles';
 
@@ -65,6 +77,29 @@ describe('RewardsService — reads', () => {
     const [call] = scoped.callsTo('listAll');
     expect((call.options as { where: Record<string, unknown> }).where).toMatchObject({
       tenantId: null,
+    });
+  });
+
+  it('list() resolves categoryId/categoryName and, when set, subCategoryId/subCategoryName (T-118)', async () => {
+    const { service, scoped } = buildService();
+    scoped.setListRows(RewardSystem, [
+      rewardSystemRow({
+        id: 8,
+        categoryId: 3,
+        subCategoryId: 9,
+        category: rewardCategoryRow({ id: 3, name: 'Points' }),
+        subCategory: rewardSubCategoryRow({ id: 9, categoryId: 3, name: 'Tier 1' }),
+      }),
+    ]);
+    scoped.setCount(RewardSystem, 1);
+
+    const { rows } = await service.list({});
+
+    expect(rows[0]).toMatchObject({
+      categoryId: 3,
+      categoryName: 'Points',
+      subCategoryId: 9,
+      subCategoryName: 'Tier 1',
     });
   });
 
@@ -157,6 +192,7 @@ describe('RewardsService.create — layers 2 and 3', () => {
         name: 'x',
         rewardType: 'monetary',
         connectorType: 'internal_api',
+        categoryId: 1,
       }),
     ).rejects.toBeInstanceOf(PermissionDeniedHttpException);
 
@@ -166,12 +202,14 @@ describe('RewardsService.create — layers 2 and 3', () => {
   it('writes tenant_id = NULL explicitly (layer 3), never inferred from the actor', async () => {
     const { service, scoped } = buildService();
     scoped.setByPk(RewardSystem, rewardSystemRow({ id: 1000 }));
+    scoped.setByPk(RewardCategory, rewardCategoryRow({ id: 1 }));
 
     await service.create(actor(), {
       systemCode: 'CASHBACK',
       name: ' Padded ',
       rewardType: 'monetary',
       connectorType: 'internal_api',
+      categoryId: 1,
     });
 
     const [call] = scoped.callsTo('create');
@@ -179,6 +217,8 @@ describe('RewardsService.create — layers 2 and 3', () => {
     expect((call.values as { name: string }).name).toBe('Padded');
     expect((call.values as { status: string }).status).toBe('active');
     expect((call.values as { deliveryMode: string }).deliveryMode).toBe('realtime');
+    expect((call.values as { categoryId: unknown }).categoryId).toBe(1);
+    expect((call.values as { subCategoryId: unknown }).subCategoryId).toBeNull();
   });
 
   it('refuses a systemCode already used by another global reward, checked before the insert (TC-16)', async () => {
@@ -191,13 +231,53 @@ describe('RewardsService.create — layers 2 and 3', () => {
         name: 'x',
         rewardType: 'monetary',
         connectorType: 'internal_api',
+        categoryId: 1,
       }),
     ).rejects.toBeInstanceOf(RewardSystemCodeExistsError);
     expect(scoped.callsTo('create')).toHaveLength(0);
   });
 
+  it('refuses a subCategoryId that belongs to a different category (TC-3)', async () => {
+    const { service, scoped } = buildService();
+    scoped.setByPk(RewardCategory, rewardCategoryRow({ id: 1 }));
+    scoped.setByPk(RewardSubCategory, rewardSubCategoryRow({ id: 9, categoryId: 2 }));
+
+    const error: unknown = await service
+      .create(actor(), {
+        systemCode: 'X',
+        name: 'x',
+        rewardType: 'monetary',
+        connectorType: 'internal_api',
+        categoryId: 1,
+        subCategoryId: 9,
+      })
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(ValidationFailedError);
+    expect((error as ValidationFailedError).details).toEqual([
+      { field: 'subCategoryId', code: REWARD_ERROR_CODE.REWARD_SUB_CATEGORY_CATEGORY_MISMATCH },
+    ]);
+    expect(scoped.callsTo('create')).toHaveLength(0);
+  });
+
+  it('404s when categoryId does not reference a real category', async () => {
+    const { service, scoped } = buildService();
+
+    await expect(
+      service.create(actor(), {
+        systemCode: 'X',
+        name: 'x',
+        rewardType: 'monetary',
+        connectorType: 'internal_api',
+        categoryId: 999_999,
+      }),
+    ).rejects.toThrow();
+    expect(scoped.callsTo('create')).toHaveLength(0);
+  });
+
   it('maps a unique-constraint violation to RewardSystemCodeExistsError (TC-16)', async () => {
     const { service, scoped } = buildService();
+    scoped.setByPk(RewardCategory, rewardCategoryRow({ id: 1 }));
     scoped.failNextCreate(RewardSystem, new UniqueConstraintError({}));
 
     await expect(
@@ -206,12 +286,14 @@ describe('RewardsService.create — layers 2 and 3', () => {
         name: 'x',
         rewardType: 'monetary',
         connectorType: 'internal_api',
+        categoryId: 1,
       }),
     ).rejects.toBeInstanceOf(RewardSystemCodeExistsError);
   });
 
   it('re-throws any other error from the insert untouched', async () => {
     const { service, scoped } = buildService();
+    scoped.setByPk(RewardCategory, rewardCategoryRow({ id: 1 }));
     const boom = new Error('boom');
     scoped.failNextCreate(RewardSystem, boom);
 
@@ -221,6 +303,7 @@ describe('RewardsService.create — layers 2 and 3', () => {
         name: 'x',
         rewardType: 'monetary',
         connectorType: 'internal_api',
+        categoryId: 1,
       }),
     ).rejects.toBe(boom);
   });
@@ -235,6 +318,7 @@ describe('RewardsService.create — layers 2 and 3', () => {
       RewardSystem,
       rewardSystemRow({ id: 1000, connectorConfig: { __enc: 'bound:1000:rebound' } }),
     );
+    scoped.setByPk(RewardCategory, rewardCategoryRow({ id: 1 }));
 
     await service.create(actor(), {
       systemCode: 'X',
@@ -242,6 +326,7 @@ describe('RewardsService.create — layers 2 and 3', () => {
       rewardType: 'monetary',
       connectorType: 'internal_api',
       connectorConfig: { apiKey: 'sk_live_1234' },
+      categoryId: 1,
     });
 
     expect(sequelize.transactionCalls).toBe(1);
@@ -258,12 +343,14 @@ describe('RewardsService.create — layers 2 and 3', () => {
   it('never touches the crypto helper when connectorConfig is omitted', async () => {
     const { service, scoped, crypto } = buildService();
     scoped.setByPk(RewardSystem, rewardSystemRow({ id: 42 }));
+    scoped.setByPk(RewardCategory, rewardCategoryRow({ id: 1 }));
 
     await service.create(actor(), {
       systemCode: 'X',
       name: 'x',
       rewardType: 'monetary',
       connectorType: 'internal_api',
+      categoryId: 1,
     });
 
     expect(crypto.encryptForNewRowCalls).toHaveLength(0);
@@ -274,6 +361,7 @@ describe('RewardsService.create — layers 2 and 3', () => {
   it('annotates the audit draft with the new reward id, never the connector config', async () => {
     const { service, scoped, audit } = buildService();
     scoped.setByPk(RewardSystem, rewardSystemRow({ id: 42 }));
+    scoped.setByPk(RewardCategory, rewardCategoryRow({ id: 1 }));
 
     await service.create(actor(), {
       systemCode: 'X',
@@ -281,6 +369,7 @@ describe('RewardsService.create — layers 2 and 3', () => {
       rewardType: 'monetary',
       connectorType: 'internal_api',
       connectorConfig: { apiKey: 'secret' },
+      categoryId: 1,
     });
 
     expect(audit.annotations[0]).toMatchObject({ targetId: 1000 });
@@ -831,5 +920,225 @@ describe('RewardsService — reward_policy_caps, implementation note 5', () => {
     );
     expect(updateCall).toBeDefined();
     expect(audit.annotations[0]?.detail).toMatchObject({ rewardId: 1, policyId: 10 });
+  });
+});
+
+describe('RewardsService — reward_categories / reward_sub_categories (T-116)', () => {
+  it('listCategories() maps rows through toRewardCategoryDto, ordered by name', async () => {
+    const { service, scoped } = buildService();
+    scoped.setListRows(RewardCategory, [rewardCategoryRow({ id: 3, categoryCode: 'POINTS' })]);
+
+    const rows = await service.listCategories();
+
+    expect(rows).toEqual([
+      { id: 3, categoryCode: 'POINTS', name: 'Uncategorized', status: 'active' },
+    ]);
+    const [call] = scoped.callsTo('listAll');
+    expect((call.options as { order: unknown[] }).order).toEqual([['name', 'ASC']]);
+  });
+
+  it('listSubCategories() filters by categoryId when supplied, and omits the filter when not', async () => {
+    const { service, scoped } = buildService();
+    scoped.setListRows(RewardSubCategory, [rewardSubCategoryRow()]);
+
+    await service.listSubCategories(7);
+    const [withFilter] = scoped.callsTo('listAll');
+    expect((withFilter.options as { where: Record<string, unknown> }).where).toEqual({
+      categoryId: 7,
+    });
+
+    await service.listSubCategories(undefined);
+    const [, withoutFilter] = scoped.callsTo('listAll');
+    expect((withoutFilter.options as { where: Record<string, unknown> }).where).toEqual({});
+  });
+
+  it('createCategory() refuses a non-super_admin before any query runs (layer 2)', async () => {
+    const { service, scoped } = buildService();
+    await expect(
+      service.createCategory(actor({ role: 'maker' }), { categoryCode: 'X', name: 'x' }),
+    ).rejects.toBeInstanceOf(PermissionDeniedHttpException);
+    expect(scoped.calls).toHaveLength(0);
+  });
+
+  it('createCategory() writes tenant_id = 1 and trims the name, checking uniqueness first (TC-3)', async () => {
+    const { service, scoped } = buildService();
+
+    await service.createCategory(actor(), { categoryCode: 'POINTS', name: ' Points ' });
+
+    const [call] = scoped.callsTo('create');
+    expect((call.values as { tenantId: unknown }).tenantId).toBe(1);
+    expect((call.values as { name: string }).name).toBe('Points');
+    expect((call.values as { status: string }).status).toBe('active');
+  });
+
+  it('createCategory() refuses a categoryCode already in use, checked before the insert (TC-3)', async () => {
+    const { service, scoped } = buildService();
+    scoped.setCount(RewardCategory, 1);
+
+    await expect(
+      service.createCategory(actor(), { categoryCode: 'DUP', name: 'x' }),
+    ).rejects.toBeInstanceOf(RewardCategoryCodeExistsError);
+    expect(scoped.callsTo('create')).toHaveLength(0);
+  });
+
+  it('createCategory() maps a unique-constraint violation to RewardCategoryCodeExistsError', async () => {
+    const { service, scoped } = buildService();
+    scoped.failNextCreate(RewardCategory, new UniqueConstraintError({}));
+
+    await expect(
+      service.createCategory(actor(), { categoryCode: 'DUP', name: 'x' }),
+    ).rejects.toBeInstanceOf(RewardCategoryCodeExistsError);
+  });
+
+  it('createCategory() re-throws any other error from the insert untouched', async () => {
+    const { service, scoped } = buildService();
+    const boom = new Error('boom');
+    scoped.failNextCreate(RewardCategory, boom);
+
+    await expect(service.createCategory(actor(), { categoryCode: 'X', name: 'x' })).rejects.toBe(
+      boom,
+    );
+  });
+
+  it('updateCategory() refuses a non-super_admin (layer 2)', async () => {
+    const { service } = buildService();
+    await expect(
+      service.updateCategory(actor({ role: 'maker' }), 1, { name: 'x' }),
+    ).rejects.toBeInstanceOf(PermissionDeniedHttpException);
+  });
+
+  it('updateCategory() 404s when the row is absent or out of scope', async () => {
+    const { service } = buildService();
+    await expect(service.updateCategory(actor(), 999, { name: 'x' })).rejects.toThrow();
+  });
+
+  it('updateCategory() writes only the supplied fields — never categoryCode — and audits the diff', async () => {
+    const { service, scoped, audit } = buildService();
+    scoped.setByPk(RewardCategory, rewardCategoryRow({ id: 3 }));
+
+    const dto = await service.updateCategory(actor(), 3, { name: ' Renamed ', status: 'inactive' });
+
+    const [call] = scoped.callsTo('update');
+    expect(call.values).toEqual({ name: 'Renamed', status: 'inactive' });
+    expect(dto.name).toBe('Renamed');
+    expect(dto.status).toBe('inactive');
+    expect(audit.annotations[0]?.targetId).toBe(3);
+  });
+
+  it('updateCategory() skips the UPDATE entirely when nothing changed', async () => {
+    const { service, scoped } = buildService();
+    scoped.setByPk(RewardCategory, rewardCategoryRow({ id: 3 }));
+
+    await service.updateCategory(actor(), 3, {});
+
+    expect(scoped.callsTo('update')).toHaveLength(0);
+  });
+
+  it('createSubCategory() refuses a non-super_admin before any query runs (layer 2)', async () => {
+    const { service, scoped } = buildService();
+    await expect(
+      service.createSubCategory(actor({ role: 'maker' }), {
+        categoryId: 1,
+        subCategoryCode: 'X',
+        name: 'x',
+      }),
+    ).rejects.toBeInstanceOf(PermissionDeniedHttpException);
+    expect(scoped.calls).toHaveLength(0);
+  });
+
+  it('createSubCategory() 404s when categoryId does not reference a real category (TC-6)', async () => {
+    const { service, scoped } = buildService();
+
+    await expect(
+      service.createSubCategory(actor(), {
+        categoryId: 999_999,
+        subCategoryCode: 'X',
+        name: 'x',
+      }),
+    ).rejects.toThrow();
+    expect(scoped.callsTo('create')).toHaveLength(0);
+  });
+
+  it('createSubCategory() writes categoryId/subCategoryCode/name, checking uniqueness first (TC-5)', async () => {
+    const { service, scoped } = buildService();
+    scoped.setByPk(RewardCategory, rewardCategoryRow({ id: 3 }));
+
+    await service.createSubCategory(actor(), {
+      categoryId: 3,
+      subCategoryCode: 'TIER_1',
+      name: ' Tier 1 ',
+    });
+
+    const [call] = scoped.callsTo('create');
+    expect(call.values).toMatchObject({
+      categoryId: 3,
+      subCategoryCode: 'TIER_1',
+      name: 'Tier 1',
+      status: 'active',
+    });
+  });
+
+  it('createSubCategory() refuses a subCategoryCode already in use under that category', async () => {
+    const { service, scoped } = buildService();
+    scoped.setByPk(RewardCategory, rewardCategoryRow({ id: 3 }));
+    scoped.setCount(RewardSubCategory, 1);
+
+    await expect(
+      service.createSubCategory(actor(), { categoryId: 3, subCategoryCode: 'DUP', name: 'x' }),
+    ).rejects.toBeInstanceOf(RewardSubCategoryCodeExistsError);
+    expect(scoped.callsTo('create')).toHaveLength(0);
+  });
+
+  it('createSubCategory() maps a unique-constraint violation to RewardSubCategoryCodeExistsError', async () => {
+    const { service, scoped } = buildService();
+    scoped.setByPk(RewardCategory, rewardCategoryRow({ id: 3 }));
+    scoped.failNextCreate(RewardSubCategory, new UniqueConstraintError({}));
+
+    await expect(
+      service.createSubCategory(actor(), { categoryId: 3, subCategoryCode: 'DUP', name: 'x' }),
+    ).rejects.toBeInstanceOf(RewardSubCategoryCodeExistsError);
+  });
+
+  it('createSubCategory() re-throws any other error from the insert untouched', async () => {
+    const { service, scoped } = buildService();
+    scoped.setByPk(RewardCategory, rewardCategoryRow({ id: 3 }));
+    const boom = new Error('boom');
+    scoped.failNextCreate(RewardSubCategory, boom);
+
+    await expect(
+      service.createSubCategory(actor(), { categoryId: 3, subCategoryCode: 'X', name: 'x' }),
+    ).rejects.toBe(boom);
+  });
+
+  it('updateSubCategory() refuses a non-super_admin (layer 2)', async () => {
+    const { service } = buildService();
+    await expect(
+      service.updateSubCategory(actor({ role: 'maker' }), 1, { name: 'x' }),
+    ).rejects.toBeInstanceOf(PermissionDeniedHttpException);
+  });
+
+  it('updateSubCategory() writes only the supplied fields — never subCategoryCode/categoryId — and audits the diff', async () => {
+    const { service, scoped, audit } = buildService();
+    scoped.setByPk(RewardSubCategory, rewardSubCategoryRow({ id: 5 }));
+
+    const dto = await service.updateSubCategory(actor(), 5, {
+      name: ' Renamed ',
+      status: 'inactive',
+    });
+
+    const [call] = scoped.callsTo('update');
+    expect(call.values).toEqual({ name: 'Renamed', status: 'inactive' });
+    expect(dto.name).toBe('Renamed');
+    expect(dto.status).toBe('inactive');
+    expect(audit.annotations[0]?.targetId).toBe(5);
+  });
+
+  it('updateSubCategory() skips the UPDATE entirely when nothing changed', async () => {
+    const { service, scoped } = buildService();
+    scoped.setByPk(RewardSubCategory, rewardSubCategoryRow({ id: 5 }));
+
+    await service.updateSubCategory(actor(), 5, {});
+
+    expect(scoped.callsTo('update')).toHaveLength(0);
   });
 });

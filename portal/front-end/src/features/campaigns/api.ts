@@ -14,6 +14,7 @@
  * reward tree and step 6's warnings in step with step 3 without a manual refetch.
  */
 import { useMutation, useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query';
+import { z } from 'zod';
 import {
   campaignActivityOptionListEnvelopeSchema,
   campaignAuditListEnvelopeSchema,
@@ -98,6 +99,11 @@ export function rewardOptionsQueryKey(id: number) {
 }
 export function auditQueryKey(id: number) {
   return ['campaigns', id, 'audit'] as const;
+}
+/** T-127 — not campaign-scoped: the same provider answers the same list for every campaign, so
+ * caching it per campaign id would refetch it once per wizard rather than once per session. */
+export function apiLookupOptionsQueryKey(providerCode: string) {
+  return ['field-value-sources', 'api', providerCode] as const;
 }
 
 /** Parses `payload` or throws a readable contract error. One helper rather than the same nine
@@ -234,6 +240,54 @@ export function useRewardOptionsQuery(id: number | null) {
     queryKey: rewardOptionsQueryKey(id ?? 0),
     queryFn: () => fetchRewardOptions(id as number),
     enabled: id !== null,
+  });
+}
+
+/**
+ * T-127 — `GET /field-value-sources/api/:providerCode` (T-123), the live dropdown behind step 5's
+ * Promo Code Config picker.
+ *
+ * The response shape is declared here rather than imported from `packages/shared`: T-123 documents
+ * `{ value, label }` per item in its own service header but publishes no schema for it (the shared
+ * `field-value-source.schema.ts` covers the *registries*, not this runtime lookup), and inventing
+ * one there would be editing another task's file. `value` is `string | number` exactly as that
+ * header states — the promo code service is unbuilt, so which of the two it will answer with is
+ * genuinely not yet decided.
+ */
+const apiLookupOptionSchema = z
+  .object({ value: z.union([z.string(), z.number()]), label: z.string() })
+  .strict();
+
+const apiLookupOptionListEnvelopeSchema = z
+  .object({ data: z.array(apiLookupOptionSchema) })
+  .strict();
+
+export type ApiLookupOption = z.infer<typeof apiLookupOptionSchema>;
+
+export async function fetchApiLookupOptions(
+  providerCode: string,
+): Promise<readonly ApiLookupOption[]> {
+  try {
+    const response = await api.get<unknown>(
+      `/field-value-sources/api/${encodeURIComponent(providerCode)}`,
+    );
+    return parsed(apiLookupOptionListEnvelopeSchema, response.data, 'Field value options').data;
+  } catch (error) {
+    throw toApiError(error);
+  }
+}
+
+/**
+ * A `planned` provider answers 501 (`FIELD_LOOKUP_PROVIDER_NOT_AVAILABLE`) and will keep answering
+ * 501 until somebody builds it — so `retry: false`: retrying a "this does not exist yet" is three
+ * more requests for the same answer, and the picker's job is to say so calmly, not to keep asking.
+ */
+export function useApiLookupOptionsQuery(providerCode: string | null) {
+  return useQuery({
+    queryKey: apiLookupOptionsQueryKey(providerCode ?? ''),
+    queryFn: () => fetchApiLookupOptions(providerCode as string),
+    enabled: providerCode !== null,
+    retry: false,
   });
 }
 

@@ -9,6 +9,10 @@ import {
 import { ROLE_ENTITY_PERMISSIONS } from '@/database/migrations/T004_001_seed_role_entity_permissions';
 import { DEFINITION_REQUEST_PERMISSIONS } from '@/database/migrations/T042_001_seed_definition_request_permissions';
 import { GRPC_GRANT_PERMISSIONS } from '@/database/migrations/T047_002_seed_grpc_grant_permissions';
+import { RULE_CATEGORY_PERMISSIONS } from '@/database/migrations/T106_001_seed_rule_category_permissions';
+import { REWARD_CATEGORY_PERMISSIONS } from '@/database/migrations/T116_002_seed_reward_category_permissions';
+import { FIELD_VALUE_SOURCE_PERMISSIONS } from '@/database/migrations/T121_002_seed_field_value_source_registries';
+import { TENANT_CURRENCY_PERMISSIONS } from '@/database/migrations/T126_002_seed_tenant_currency_permissions';
 
 describe('ENTITY_ACTION_CATALOGUE — 01-DATABASE.md §5.1', () => {
   it('matches the seeded entity list exactly', () => {
@@ -30,6 +34,19 @@ describe('ENTITY_ACTION_CATALOGUE — 01-DATABASE.md §5.1', () => {
         'audit',
         'notification',
         'definition_request',
+        // T-140 regression: these 7 are seeded by T106_001/T116_002/T121_002/T126_002 (added after
+        // this catalogue was last synced — see the entity-by-entity notes on
+        // `ENTITY_ACTION_CATALOGUE` itself) but were missing here, so `isPermissionsMatrix` 400ed
+        // any PUT carrying a role's legitimately seeded grant on one of them, and any PUT that *was*
+        // accepted silently dropped that role's rows for all 7 (full-replace semantics, implementation
+        // note 5 — same shape of bug T-062 already fixed once for `campaign` pause/resume).
+        'rule_category',
+        'rule_sub_category',
+        'reward_category',
+        'reward_sub_category',
+        'field_context_provider',
+        'field_api_lookup_provider',
+        'tenant_currency',
       ].sort(),
     );
   });
@@ -70,6 +87,13 @@ describe('ENTITY_ACTION_CATALOGUE — 01-DATABASE.md §5.1', () => {
         // own `AFTER` constant, and TC-9/TC-24's own precedent of asserting the *outcome* rather
         // than re-importing the migration's private state).
         { role: 'tenant_admin', entity: 'campaign', actions: ['view', 'pause', 'resume'] },
+        // T-140 regression: the 4 later seed migrations that grant the 7 entities this catalogue
+        // was missing (rule_category, rule_sub_category, reward_category, reward_sub_category,
+        // field_context_provider, field_api_lookup_provider, tenant_currency).
+        ...RULE_CATEGORY_PERMISSIONS,
+        ...REWARD_CATEGORY_PERMISSIONS,
+        ...FIELD_VALUE_SOURCE_PERMISSIONS,
+        ...TENANT_CURRENCY_PERMISSIONS,
       ];
 
       const unknown: { role: string; entity: string; action: string }[] = [];

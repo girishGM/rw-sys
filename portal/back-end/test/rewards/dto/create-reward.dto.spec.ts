@@ -23,6 +23,7 @@ function validBody(overrides: Record<string, unknown> = {}): Record<string, unkn
     name: 'Standard cashback',
     rewardType: 'monetary',
     connectorType: 'internal_api',
+    categoryId: 1,
     ...overrides,
   };
 }
@@ -82,6 +83,21 @@ describe('CreateRewardDto', () => {
     expect(result.connectorConfig).toContain('IS_REWARD_CONNECTOR_CONFIG');
   });
 
+  it('rejects a body with no categoryId at all (TC-4)', async () => {
+    const { systemCode, name, rewardType, connectorType } = validBody();
+    const result = await failures({ systemCode, name, rewardType, connectorType });
+    expect(result.categoryId).toContain('IS_INT');
+  });
+
+  it('accepts a valid subCategoryId alongside categoryId', async () => {
+    await expect(failures(validBody({ subCategoryId: 5 }))).resolves.toEqual({});
+  });
+
+  it('rejects a non-integer subCategoryId', async () => {
+    const result = await failures(validBody({ subCategoryId: 'not-a-number' }));
+    expect(result.subCategoryId).toContain('IS_INT');
+  });
+
   it('rejects an unexpected top-level field under the whitelist (R3 — no client-supplied tenantId)', async () => {
     const errors = await validate(plainToInstance(CreateRewardDto, validBody({ tenantId: 999 })), {
       whitelist: true,
@@ -103,5 +119,8 @@ describe('CreateRewardDto', () => {
   it('is a subset of the shared Zod request schema', () => {
     expect(createRewardRequestSchema.safeParse(validBody()).success).toBe(true);
     expect(createRewardRequestSchema.safeParse(validBody({ tenantId: 999 })).success).toBe(false);
+    const withoutCategoryId = validBody();
+    delete withoutCategoryId.categoryId;
+    expect(createRewardRequestSchema.safeParse(withoutCategoryId).success).toBe(false);
   });
 });

@@ -11,19 +11,36 @@
  * super_admin → full CRUD available"), exactly the two-control pattern
  * `CountriesListPage.tsx`'s own header documents: hiding the control is UX, the matching
  * `rule:create` permission row is what actually blocks the API either way.
+ *
+ * T-111 — category/sub-category/search filtering (TC-6), so finding one rule among a growing
+ * catalogue doesn't mean scrolling a flat list. The category → sub-category cascade is the exact
+ * pattern `AddRuleModal.tsx` already uses: picking a category resets the sub-category selection
+ * and re-queries `GET /rule-sub-categories?categoryId=`; the sub-category `Select` stays disabled
+ * until a category is picked. `search` follows `MerchantsListPage.tsx`'s own shape — a plain
+ * text box submitted on demand, not queried on every keystroke.
  */
-import { useState } from 'react';
+import { useMemo, useState, type FormEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Plus } from 'lucide-react';
+import { Plus, Search } from 'lucide-react';
 import type { Rule } from '@reward-portal/shared';
 import { Badge } from '../../components/Badge';
 import { Button } from '../../components/Button';
+import { Input } from '../../components/Input';
 import { PageHeader } from '../../components/PageHeader';
+import { Select, type SelectOption } from '../../components/Select';
 import { Table, type TableColumn } from '../../components/Table';
 import { useBootstrap } from '../../auth/useBootstrap';
 import { ApiError } from '../../lib/apiError';
 import { AddRuleModal } from './AddRuleModal';
-import { useRulesQuery, type RuleListParams } from './api';
+import {
+  useRuleCategoriesQuery,
+  useRuleSubCategoriesQuery,
+  useRulesQuery,
+  type RuleListParams,
+} from './api';
+
+const ALL_CATEGORIES_OPTION: SelectOption = { value: '', label: 'All categories' };
+const ALL_SUB_CATEGORIES_OPTION: SelectOption = { value: '', label: 'All sub-categories' };
 
 const COLUMNS: TableColumn<Rule>[] = [
   { key: 'ruleCode', header: 'Code', render: (row) => row.ruleCode, sortable: true },
@@ -43,11 +60,37 @@ const COLUMNS: TableColumn<Rule>[] = [
 export function RulesListPage() {
   const { hasPermission } = useBootstrap();
   const [params, setParams] = useState<RuleListParams>({ page: 1, sort: 'name:asc' });
+  const [searchInput, setSearchInput] = useState('');
   const [addOpen, setAddOpen] = useState(false);
   const navigate = useNavigate();
 
   const { data, isLoading, error } = useRulesQuery(params);
   const canCreate = hasPermission('rule', 'create');
+
+  const categoriesQuery = useRuleCategoriesQuery();
+  const subCategoriesQuery = useRuleSubCategoriesQuery(params.categoryId);
+
+  const categoryOptions: SelectOption[] = useMemo(
+    () => [
+      ALL_CATEGORIES_OPTION,
+      ...(categoriesQuery.data ?? []).map((category) => ({
+        value: String(category.id),
+        label: category.name,
+      })),
+    ],
+    [categoriesQuery.data],
+  );
+
+  const subCategoryOptions: SelectOption[] = useMemo(
+    () => [
+      ALL_SUB_CATEGORIES_OPTION,
+      ...(subCategoriesQuery.data ?? []).map((subCategory) => ({
+        value: String(subCategory.id),
+        label: subCategory.name,
+      })),
+    ],
+    [subCategoriesQuery.data],
+  );
 
   function handleSortChange(key: string): void {
     setParams((current) => {
@@ -55,6 +98,30 @@ export function RulesListPage() {
       const direction = currentField === key && currentDirection === 'asc' ? 'desc' : 'asc';
       return { ...current, page: 1, sort: `${key}:${direction}` };
     });
+  }
+
+  // T-111 — same cascade `AddRuleModal.tsx` uses: picking a category always clears whatever
+  // sub-category was selected, since the previous choice may not even belong to the new category.
+  function handleCategoryChange(value: string): void {
+    setParams((current) => ({
+      ...current,
+      page: 1,
+      categoryId: value === '' ? undefined : Number(value),
+      subCategoryId: undefined,
+    }));
+  }
+
+  function handleSubCategoryChange(value: string): void {
+    setParams((current) => ({
+      ...current,
+      page: 1,
+      subCategoryId: value === '' ? undefined : Number(value),
+    }));
+  }
+
+  function handleSearchSubmit(event: FormEvent<HTMLFormElement>): void {
+    event.preventDefault();
+    setParams((current) => ({ ...current, page: 1, search: searchInput || undefined }));
   }
 
   const [sortField, sortDirection] = (params.sort ?? 'name:asc').split(':') as [
@@ -76,6 +143,37 @@ export function RulesListPage() {
           )
         }
       />
+
+      <div className="mb-4 flex flex-wrap items-end gap-4">
+        <Select
+          label="Category"
+          className="w-56"
+          options={categoryOptions}
+          value={params.categoryId === undefined ? '' : String(params.categoryId)}
+          onChange={handleCategoryChange}
+        />
+        <Select
+          label="Sub-category"
+          className="w-56"
+          options={subCategoryOptions}
+          value={params.subCategoryId === undefined ? '' : String(params.subCategoryId)}
+          onChange={handleSubCategoryChange}
+          disabled={params.categoryId === undefined}
+        />
+        <form onSubmit={handleSearchSubmit} className="flex max-w-sm gap-2">
+          <Input
+            label="Search"
+            hideLabel
+            placeholder="Search by code or name"
+            value={searchInput}
+            onChange={(event) => setSearchInput(event.target.value)}
+          />
+          <Button type="submit" variant="secondary">
+            <Search className="size-4" aria-hidden="true" />
+            Search
+          </Button>
+        </form>
+      </div>
 
       <Table
         caption="Rules"

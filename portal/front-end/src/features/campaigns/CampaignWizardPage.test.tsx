@@ -514,3 +514,212 @@ describe('T-076 — TC-4: the other two step-changing paths still behave', () =>
     });
   });
 });
+
+// --- T-136: a rejected rule-value save has to reach the maker ---------------------------------
+//
+// Step 3 passed `<ComponentRulesStep serverErrors={…}>` a `useMemo(() => ({}), [])` — a literal
+// empty object with a comment describing the mapping that was never written — and, alone among
+// the seven steps, never rendered the wizard's own `error` sentence either. A 400 from
+// `PATCH /campaigns/:id/rules/:bindingId` (a value the rule's schema refuses, T-124's journey-order
+// guard, an expired session) therefore produced **no visible change at all**: the Save button
+// stayed, the value stayed, and nothing said why. Both halves are asserted below, because either
+// one alone still leaves a maker guessing.
+
+/** A tracker/component/binding carrying one provider-sourced `select` field (T-122/T-125). */
+function journeyWithValueSourceRule() {
+  return {
+    campaignId: CAMPAIGN_ID,
+    campaignRewards: [],
+    trackers: [
+      {
+        id: 1,
+        linkId: 1,
+        trackerCode: 'TRK_1',
+        name: 'Tracker 1',
+        description: null,
+        completionLogic: 'all',
+        completionThreshold: null,
+        isPrimary: true,
+        status: 'active',
+        rewards: [],
+        components: [
+          {
+            id: 11,
+            linkId: 11,
+            componentCode: 'CMP_11',
+            name: 'Step 2',
+            description: null,
+            activityId: null,
+            activityName: null,
+            sequenceOrder: 2,
+            isMandatory: true,
+            status: 'active',
+            rewards: [],
+            rules: [
+              {
+                id: 501,
+                ruleId: 101,
+                ruleCode: 'RULE_COMP_AFTER_001',
+                ruleName: 'Completed after another step',
+                ruleVersionId: null,
+                ruleVersionNo: null,
+                parameters: {
+                  fields: [
+                    {
+                      key: 'targetComponentCode',
+                      label: 'Earlier step',
+                      type: 'select',
+                      required: true,
+                      valueSource: {
+                        kind: 'CONTEXT_LOOKUP',
+                        contextProvider: 'SIBLING_COMPONENTS',
+                      },
+                    },
+                  ],
+                },
+                values: {},
+                status: 'active',
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+}
+
+/** `stubGets`, plus the journey above and the context-lookup the field's dropdown resolves against. */
+function stubGetsWithValueSourceRule(): void {
+  const campaign = draft();
+  mockGet.mockImplementation((url: string) => {
+    if (url === '/me/bootstrap') return Promise.resolve({ data: { data: makerBootstrap } });
+    if (url === `/campaigns/${String(CAMPAIGN_ID)}`) {
+      return Promise.resolve({ data: { data: campaign } });
+    }
+    if (url === `/campaigns/${String(CAMPAIGN_ID)}/journey`) {
+      return Promise.resolve({ data: { data: journeyWithValueSourceRule() } });
+    }
+    if (url === '/field-value-sources/context/SIBLING_COMPONENTS') {
+      return Promise.resolve({ data: { data: [{ value: 10, label: 'Step 1' }] } });
+    }
+    return Promise.resolve({ data: { data: [] } });
+  });
+}
+
+/** Picks "Step 1" in the provider-sourced dropdown and saves — the maker's actual gesture. */
+async function pickAndSave(): Promise<void> {
+  const user = userEvent.setup();
+  const combobox = await screen.findByRole('combobox', { name: /earlier step/i });
+  await waitFor(() => {
+    expect(combobox).not.toBeDisabled();
+  });
+  await user.click(combobox);
+  await user.click(await screen.findByRole('option', { name: 'Step 1' }));
+  await user.click(await screen.findByRole('button', { name: 'Save values' }));
+}
+
+const GUARD_MESSAGE = 'Step 1 is not earlier than Step 2 in this tracker.';
+
+/** The 400 `bindings.service.ts` produces: `details[].field` is `values.<parameterKey>`. */
+function ruleValueRejection(field: string) {
+  return {
+    isAxiosError: true,
+    response: {
+      status: 400,
+      data: {
+        error: {
+          code: 'VALIDATION_FAILED',
+          message: GUARD_MESSAGE,
+          details: [{ field, code: 'SIBLING_COMPONENT_NOT_EARLIER' }],
+          traceId: '01J8F3K9QP2M7N00000000',
+        },
+      },
+    },
+    message: 'Request failed with status code 400',
+  };
+}
+
+describe('T-136 — a rejected rule-value save is visible on step 3', () => {
+  /**
+   * TC-3, the regression that matters. Asserted through the accessibility tree rather than by
+   * looking for the text anywhere on screen: `aria-invalid` + `aria-describedby` is what actually
+   * tells a maker (and a screen reader) *which control* was refused, and it is the property that
+   * an empty `serverErrors` map cannot produce however the message is rendered elsewhere.
+   */
+  it('attaches the failure to the control that caused it', async () => {
+    stubGetsWithValueSourceRule();
+    mockPatch.mockRejectedValue(ruleValueRejection('values.targetComponentCode'));
+
+    renderAt({ pathname: `/campaigns/${String(CAMPAIGN_ID)}`, state: { wizardStep: 3 } });
+    await pickAndSave();
+
+    const combobox = await screen.findByRole('combobox', { name: /earlier step/i });
+    await waitFor(() => {
+      expect(combobox).toHaveAttribute('aria-invalid', 'true');
+    });
+    const describedBy = combobox.getAttribute('aria-describedby');
+    expect(describedBy).not.toBeNull();
+    expect(document.getElementById(describedBy ?? '')).toHaveTextContent(GUARD_MESSAGE);
+  });
+
+  /**
+   * The other half. A failure whose `details` name no rule parameter (an expired session, a 500,
+   * T-124's guard reported at object level) has no control to attach to, so the step itself has
+   * to say something — which before this fix it had no way of doing at all.
+   */
+  it('shows the failure on the step even when no detail names a field', async () => {
+    stubGetsWithValueSourceRule();
+    mockPatch.mockRejectedValue(ruleValueRejection('values.root'));
+
+    renderAt({ pathname: `/campaigns/${String(CAMPAIGN_ID)}`, state: { wizardStep: 3 } });
+    await pickAndSave();
+
+    const alerts = await screen.findAllByRole('alert');
+    expect(alerts.some((alert) => alert.textContent === GUARD_MESSAGE)).toBe(true);
+    // Nothing was attributed to the one control on screen — `values.root` names no parameter.
+    expect(screen.getByRole('combobox', { name: /earlier step/i })).not.toHaveAttribute(
+      'aria-invalid',
+    );
+  });
+
+  /** TC-4 — a save that succeeds says nothing, and leaves no stale error on the field. */
+  it('shows nothing when the save succeeds', async () => {
+    stubGetsWithValueSourceRule();
+    mockPatch.mockResolvedValue({ data: { data: journeyWithValueSourceRule() } });
+
+    renderAt({ pathname: `/campaigns/${String(CAMPAIGN_ID)}`, state: { wizardStep: 3 } });
+    await pickAndSave();
+
+    await waitFor(() => {
+      expect(mockPatch).toHaveBeenCalledWith(`/campaigns/${String(CAMPAIGN_ID)}/rules/501`, {
+        values: { targetComponentCode: '10' },
+      });
+    });
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.getByRole('combobox', { name: /earlier step/i })).not.toHaveAttribute(
+      'aria-invalid',
+    );
+  });
+
+  /** A second attempt starts clean: the previous rejection must not outlive the value it judged. */
+  it('clears a previous field error when the save is retried successfully', async () => {
+    stubGetsWithValueSourceRule();
+    mockPatch.mockRejectedValueOnce(ruleValueRejection('values.targetComponentCode'));
+
+    renderAt({ pathname: `/campaigns/${String(CAMPAIGN_ID)}`, state: { wizardStep: 3 } });
+    await pickAndSave();
+
+    const combobox = await screen.findByRole('combobox', { name: /earlier step/i });
+    await waitFor(() => {
+      expect(combobox).toHaveAttribute('aria-invalid', 'true');
+    });
+
+    mockPatch.mockResolvedValue({ data: { data: journeyWithValueSourceRule() } });
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Save values' }));
+
+    await waitFor(() => {
+      expect(combobox).not.toHaveAttribute('aria-invalid');
+    });
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+});

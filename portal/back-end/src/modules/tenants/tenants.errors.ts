@@ -28,6 +28,10 @@ export const TENANT_ERROR_CODE = Object.freeze({
    * layer as a validation failure, not from here — kept in the catalogue for completeness and for
    * `tenants.errors.spec.ts`'s "every code is UPPER_SNAKE_CASE" sweep. */
   TENANT_BUDGET_CEILING_WARN_ABOVE_CEILING: 'TENANT_BUDGET_CEILING_WARN_ABOVE_CEILING',
+  /** `uq_tc_tenant_currency` — this tenant already lists this `currencyCode` (T-126 TC-2). */
+  TENANT_CURRENCY_EXISTS: 'TENANT_CURRENCY_EXISTS',
+  /** `uq_tc_one_default` — this tenant already has an `isDefault: true` row (T-126 TC-3). */
+  TENANT_CURRENCY_DEFAULT_EXISTS: 'TENANT_CURRENCY_DEFAULT_EXISTS',
 });
 
 /** 409 — `POST /tenants` with a `code` already in use (TC-10). */
@@ -68,5 +72,20 @@ export class TenantAlreadyActiveError extends ConflictError {
 export class TenantNotActiveError extends BusinessRuleError {
   constructor(options: AppErrorOptions = {}) {
     super(TENANT_ERROR_CODE.TENANT_NOT_ACTIVE, options);
+  }
+}
+
+/** 409 — `POST /tenants/:id/currencies` with a `currencyCode` this tenant already lists
+ * (T-126 TC-2 counterpart: the accept path; this is the reject path for a repeat). */
+export class TenantCurrencyExistsError extends ConflictError {
+  constructor(options: AppErrorOptions = {}) {
+    super(TENANT_ERROR_CODE.TENANT_CURRENCY_EXISTS, options);
+  }
+}
+
+/** 409 — a second `isDefault: true` row for the same tenant (`uq_tc_one_default`, T-126 TC-3). */
+export class TenantCurrencyDefaultExistsError extends ConflictError {
+  constructor(options: AppErrorOptions = {}) {
+    super(TENANT_ERROR_CODE.TENANT_CURRENCY_DEFAULT_EXISTS, options);
   }
 }

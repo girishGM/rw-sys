@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { BootstrapContext } from '../../src/auth/useBootstrap';
+import { ThemeProvider } from '../../src/app/ThemeProvider';
 import { AppShell } from '../../src/layouts/AppShell';
 import { THREE_ITEM_NAV, makeBootstrapValue } from './fixtures';
 
@@ -15,6 +16,19 @@ vi.mock('axios', async (importOriginal) => {
   return { default: { ...actual.default, create: () => ({ post: mockPost }) } };
 });
 
+// T-129 — see `TopBar.spec.tsx`'s identical helper: `AppShell` now also mounts a
+// `ThemeSwitcher` (via `TopBar`), which needs its own `/users/me/preferences` GET answered
+// alongside `NotificationBell`'s `/notifications/unread-count`.
+function mockGetImplementation(path: string) {
+  if (path === '/notifications/unread-count') {
+    return Promise.resolve({ data: { data: { count: 0 } } });
+  }
+  if (path === '/users/me/preferences') {
+    return Promise.resolve({ data: { data: { uiTheme: 'light-blue' } } });
+  }
+  return Promise.reject(new Error(`unexpected path ${path}`));
+}
+
 function renderShell(initialPath = '/dashboard') {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
@@ -25,9 +39,11 @@ function renderShell(initialPath = '/dashboard') {
             <Route
               path="*"
               element={
-                <AppShell>
-                  <div>Page content</div>
-                </AppShell>
+                <ThemeProvider>
+                  <AppShell>
+                    <div>Page content</div>
+                  </AppShell>
+                </ThemeProvider>
               }
             />
           </Routes>
@@ -45,7 +61,7 @@ afterEach(() => {
 
 describe('AppShell', () => {
   it('renders the sidebar, top bar and page content together', () => {
-    mockGet.mockResolvedValue({ data: { data: { count: 0 } } });
+    mockGet.mockImplementation(mockGetImplementation);
     renderShell();
 
     expect(screen.getByRole('navigation', { name: 'Primary' })).toBeInTheDocument();
@@ -54,7 +70,7 @@ describe('AppShell', () => {
   });
 
   it('the mobile drawer opens from the top bar trigger and closes again on navigation', async () => {
-    mockGet.mockResolvedValue({ data: { data: { count: 0 } } });
+    mockGet.mockImplementation(mockGetImplementation);
     const user = userEvent.setup();
     renderShell();
 

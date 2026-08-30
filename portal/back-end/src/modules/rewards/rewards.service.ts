@@ -33,7 +33,14 @@ import { Inject, Injectable } from '@nestjs/common';
 import { UniqueConstraintError } from 'sequelize';
 import type { Sequelize } from 'sequelize-typescript';
 import { SEQUELIZE } from '@/database/sequelize.provider';
-import { Country, RewardCountryAssignment, RewardPolicy, RewardSystem } from '@/database/models';
+import {
+  Country,
+  RewardCategory,
+  RewardCountryAssignment,
+  RewardPolicy,
+  RewardSubCategory,
+  RewardSystem,
+} from '@/database/models';
 import { ScopedRepository } from '@/common/scope/scoped.repository';
 import { PortalUser } from '@/database/portal-models';
 import { assertRole } from '@/common/rbac/assert-role';
@@ -50,13 +57,28 @@ import {
 } from './reward-policy-caps.repository';
 import { DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE } from './rewards.constants';
 import {
+  RewardCategoryCodeExistsError,
   RewardHasCountryAssignmentsError,
   RewardInUseByCampaignError,
   RewardPolicyCodeExistsError,
+  rewardSubCategoryCategoryMismatchError,
+  RewardSubCategoryCodeExistsError,
   RewardSystemCodeExistsError,
 } from './rewards.errors';
 import type { AssignRewardCountryDto } from './dto/assign-reward-country.dto';
 import type { CreateRewardDto } from './dto/create-reward.dto';
+import type {
+  CreateRewardCategoryDto,
+  CreateRewardSubCategoryDto,
+  UpdateRewardCategoryDto,
+  UpdateRewardSubCategoryDto,
+} from './dto/reward-category.dto';
+import {
+  toRewardCategoryDto,
+  toRewardSubCategoryDto,
+  type RewardCategoryDto,
+  type RewardSubCategoryDto,
+} from './dto/reward-category-response.dto';
 import type { RewardSortField, ListRewardsQueryDto } from './dto/list-rewards-query.dto';
 import type { UpdateRewardDto } from './dto/update-reward.dto';
 import type {
@@ -77,6 +99,7 @@ import {
   type RewardCountryAssignmentDto,
   type RewardDto,
   type RewardListItemDto,
+  type RewardWithCategory,
 } from './dto/reward-response.dto';
 
 const SORT_COLUMN: Readonly<Record<RewardSortField, string>> = Object.freeze({
@@ -84,6 +107,15 @@ const SORT_COLUMN: Readonly<Record<RewardSortField, string>> = Object.freeze({
   name: 'name',
   createdAt: 'createdAt',
   status: 'status',
+});
+
+/** T-118 — the eager-load every read path in this module needs — `toRewardDto`/
+ * `toRewardListItemDto` read `reward.category`/`reward.subCategory` without a guard, so every
+ * query that can reach either function loads both associations. Mirrors `rules.service.ts`'s own
+ * `WITH_CATEGORY`, except `category` is included directly here rather than nested under
+ * `subCategory` — see `reward-system.model.ts`'s own header for why. */
+const WITH_CATEGORY = Object.freeze({
+  include: [RewardCategory, RewardSubCategory],
 });
 
 @Injectable()
@@ -117,11 +149,12 @@ export class RewardsService {
       order: [[SORT_COLUMN[field], direction.toUpperCase()]],
       limit: pageSize,
       offset: (page - 1) * pageSize,
+      ...WITH_CATEGORY,
     });
     const total = await this.scoped.count(RewardSystem, { where });
 
     return {
-      rows: rows.map((row) => toRewardListItemDto(row)),
+      rows: (rows as RewardWithCategory[]).map((row) => toRewardListItemDto(row)),
       meta: { page, pageSize, total },
     };
   }
@@ -167,6 +200,15 @@ export class RewardsService {
    * the row is inserted with a provisional envelope, then immediately re-encrypted under its now
    * -known id and updated, both inside one transaction — so a reader can never observe the
    * provisional (un-rebound) ciphertext.
+   *
+   * ### `categoryId`/`subCategoryId` (T-118)
+   *
+   * `categoryId` must reference a real, existing category — `findByPkOrFail` surfaces a 404
+   * rather than a raw FK violation if it doesn't (the same pattern `createSubCategory` already
+   * uses below). When `subCategoryId` is supplied it must additionally *belong to* `categoryId`
+   * — checked explicitly (TC-3) rather than left to the FK alone, since the FK on
+   * `sub_category_id` only proves the row exists, not that it is the right one for this
+   * `categoryId`.
    */
   async create(actor: AuthenticatedUser, dto: CreateRewardDto): Promise<RewardDto> {
     assertRole(actor, 'super_admin');
@@ -175,6 +217,15 @@ export class RewardsService {
       where: { tenantId: null, systemCode: dto.systemCode },
     });
     if (duplicateCount > 0) throw new RewardSystemCodeExistsError();
+
+    // 404s a bogus/out-of-scope category id before any write is attempted.
+    await this.scoped.findByPkOrFail(RewardCategory, dto.categoryId);
+    if (dto.subCategoryId !== undefined) {
+      const subCategory = await this.scoped.findByPkOrFail(RewardSubCategory, dto.subCategoryId);
+      if (subCategory.categoryId !== dto.categoryId) {
+        throw rewardSubCategoryCategoryMismatchError();
+      }
+    }
 
     const created = await this.sequelize.transaction(async (transaction) => {
       let row: RewardSystem;
@@ -199,6 +250,8 @@ export class RewardsService {
             maintenanceSchedule: dto.maintenanceSchedule ?? {},
             retryEnabled: dto.retryEnabled ?? true,
             retryConfig: dto.retryConfig ?? {},
+            categoryId: dto.categoryId,
+            subCategoryId: dto.subCategoryId ?? null,
             status: 'active',
             // `as never` — the same `sequelize-typescript`/`CreationAttributes<M>` gap
             // `rules.service.ts#create` documents at length.
@@ -548,10 +601,161 @@ export class RewardsService {
     return toRewardPolicyCapDto(updated);
   }
 
+  // --- reward_categories / reward_sub_categories (T-116) --------------------------------------
+
+  /**
+   * `GET /reward-categories`. Read-only reference data, reachable by every role
+   * (`reward-categories.controller.ts`'s own header). Still routed through `ScopedRepository`,
+   * per R2 — `scope-strategy.ts` declares `RewardCategory`/`RewardSubCategory` as
+   * `unrestricted()` for every role, mirroring `rules.service.ts#listCategories`'s own reasoning.
+   */
+  async listCategories(): Promise<RewardCategoryDto[]> {
+    const rows = await this.scoped.listAll(RewardCategory, { order: [['name', 'ASC']] });
+    return rows.map(toRewardCategoryDto);
+  }
+
+  /** `GET /reward-sub-categories`. See {@link listCategories}. */
+  async listSubCategories(categoryId?: number): Promise<RewardSubCategoryDto[]> {
+    const where = categoryId === undefined ? {} : { categoryId };
+    const rows = await this.scoped.listAll(RewardSubCategory, {
+      where,
+      order: [['name', 'ASC']],
+    });
+    return rows.map(toRewardSubCategoryDto);
+  }
+
+  /**
+   * `POST /reward-categories`. `super_admin` only (layer 2, mirroring `create()`'s own
+   * `assertRole`). Always `tenant_id = 1` — matching every existing category row (the
+   * `UNCATEGORIZED` seed, `T116_001`) and the read path's own "unrestricted, `tenant_id` is a
+   * NOT NULL technicality, not a real scope" treatment (`listCategories`'s own comment) — never
+   * a tenant picker in the request, mirroring `rules.service.ts#createCategory` exactly.
+   */
+  async createCategory(
+    actor: AuthenticatedUser,
+    dto: CreateRewardCategoryDto,
+  ): Promise<RewardCategoryDto> {
+    assertRole(actor, 'super_admin');
+
+    const duplicateCount = await this.scoped.count(RewardCategory, {
+      where: { tenantId: 1, categoryCode: dto.categoryCode },
+    });
+    if (duplicateCount > 0) throw new RewardCategoryCodeExistsError();
+
+    let created: RewardCategory;
+    try {
+      created = await this.scoped.create(RewardCategory, {
+        tenantId: 1,
+        categoryCode: dto.categoryCode,
+        name: dto.name.trim(),
+        status: 'active',
+      } as never);
+    } catch (error) {
+      if (error instanceof UniqueConstraintError) {
+        throw new RewardCategoryCodeExistsError({ cause: error });
+      }
+      throw error;
+    }
+
+    this.audit.annotate({ targetId: created.id, detail: { categoryCode: created.categoryCode } });
+    return toRewardCategoryDto(created);
+  }
+
+  /** `PATCH /reward-categories/:id`. `categoryCode` is immutable — never accepted here. */
+  async updateCategory(
+    actor: AuthenticatedUser,
+    id: number,
+    dto: UpdateRewardCategoryDto,
+  ): Promise<RewardCategoryDto> {
+    assertRole(actor, 'super_admin');
+
+    await this.scoped.findByPkOrFail(RewardCategory, id);
+    const changes: Partial<RewardCategory> = {};
+    if (dto.name !== undefined) changes.name = dto.name.trim();
+    if (dto.status !== undefined) changes.status = dto.status;
+
+    if (Object.keys(changes).length > 0) {
+      await this.scoped.update(RewardCategory, changes, { where: { id } });
+    }
+
+    const after = await this.scoped.findByPkOrFail(RewardCategory, id);
+    this.audit.annotate({ targetId: id, detail: { changes } });
+    return toRewardCategoryDto(after);
+  }
+
+  /**
+   * `POST /reward-sub-categories`. `super_admin` only. `categoryId` must reference a real,
+   * existing category — `findByPkOrFail` surfaces a 404 rather than a raw FK violation if it
+   * doesn't. A category with zero sub-categories is a valid, expected end state (this task's own
+   * scope note: "some reward categories, e.g. Points, never need a sub-category") — this method
+   * is simply never called for those, not guarded against.
+   */
+  async createSubCategory(
+    actor: AuthenticatedUser,
+    dto: CreateRewardSubCategoryDto,
+  ): Promise<RewardSubCategoryDto> {
+    assertRole(actor, 'super_admin');
+
+    await this.scoped.findByPkOrFail(RewardCategory, dto.categoryId);
+
+    const duplicateCount = await this.scoped.count(RewardSubCategory, {
+      where: { categoryId: dto.categoryId, subCategoryCode: dto.subCategoryCode },
+    });
+    if (duplicateCount > 0) throw new RewardSubCategoryCodeExistsError();
+
+    let created: RewardSubCategory;
+    try {
+      created = await this.scoped.create(RewardSubCategory, {
+        categoryId: dto.categoryId,
+        subCategoryCode: dto.subCategoryCode,
+        name: dto.name.trim(),
+        status: 'active',
+      } as never);
+    } catch (error) {
+      if (error instanceof UniqueConstraintError) {
+        throw new RewardSubCategoryCodeExistsError({ cause: error });
+      }
+      throw error;
+    }
+
+    this.audit.annotate({
+      targetId: created.id,
+      detail: { subCategoryCode: created.subCategoryCode },
+    });
+    return toRewardSubCategoryDto(created);
+  }
+
+  /** `PATCH /reward-sub-categories/:id`. `subCategoryCode`/`categoryId` are immutable — neither
+   * is accepted here. */
+  async updateSubCategory(
+    actor: AuthenticatedUser,
+    id: number,
+    dto: UpdateRewardSubCategoryDto,
+  ): Promise<RewardSubCategoryDto> {
+    assertRole(actor, 'super_admin');
+
+    await this.scoped.findByPkOrFail(RewardSubCategory, id);
+    const changes: Partial<RewardSubCategory> = {};
+    if (dto.name !== undefined) changes.name = dto.name.trim();
+    if (dto.status !== undefined) changes.status = dto.status;
+
+    if (Object.keys(changes).length > 0) {
+      await this.scoped.update(RewardSubCategory, changes, { where: { id } });
+    }
+
+    const after = await this.scoped.findByPkOrFail(RewardSubCategory, id);
+    this.audit.annotate({ targetId: id, detail: { changes } });
+    return toRewardSubCategoryDto(after);
+  }
+
   // --- private helpers -----------------------------------------------------------------------
 
-  private async findGlobalRewardOrFail(id: number): Promise<RewardSystem> {
-    return this.scoped.findByPkOrFail(RewardSystem, id, { where: { tenantId: null } });
+  private async findGlobalRewardOrFail(id: number): Promise<RewardWithCategory> {
+    const reward = await this.scoped.findByPkOrFail(RewardSystem, id, {
+      where: { tenantId: null },
+      ...WITH_CATEGORY,
+    });
+    return reward as RewardWithCategory;
   }
 
   private async findRewardPolicyOrFail(rewardId: number, policyId: number): Promise<RewardPolicy> {

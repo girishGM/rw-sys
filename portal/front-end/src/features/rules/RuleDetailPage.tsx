@@ -20,6 +20,7 @@ import { ApiError } from '../../lib/apiError';
 import { VersionsPanel } from '../versions';
 import { AssignCountriesModal } from './AssignCountriesModal';
 import { EditRuleModal } from './EditRuleModal';
+import { ruleFieldRoleLabel } from './ruleFieldRole';
 import { useDeleteRuleMutation, useRuleCountriesQuery, useRuleQuery } from './api';
 
 export function RuleDetailPage() {
@@ -169,6 +170,7 @@ export function RuleDetailPage() {
                           <th className="py-1">Label</th>
                           <th className="py-1">Type</th>
                           <th className="py-1">Required</th>
+                          <th className="py-1">Role</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100">
@@ -178,6 +180,14 @@ export function RuleDetailPage() {
                             <td className="py-1.5">{field.label}</td>
                             <td className="py-1.5">{field.type}</td>
                             <td className="py-1.5">{field.required ? 'Yes' : 'No'}</td>
+                            <td className="py-1.5">
+                              {/* T-115 — the `role` this row carries already came from `GET
+                                  /rules/:id` (T-114, server-computed from the rule's actually
+                                  wired resolver) — displayed as-is, never recomputed here. */}
+                              <Badge tone={field.role === 'resolver_input' ? 'primary' : 'slate'}>
+                                {ruleFieldRoleLabel(field.role)}
+                              </Badge>
+                            </td>
                           </tr>
                         ))}
                       </tbody>

@@ -139,6 +139,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { QueryTypes, UniqueConstraintError, type Transaction } from 'sequelize';
 import type { Sequelize } from 'sequelize-typescript';
+import type { UiTheme } from '@reward-portal/shared';
 import { SEQUELIZE } from '@/database/sequelize.provider';
 import { Country, Merchant, Tenant } from '@/database/models';
 import { PortalUser, type PortalRole } from '@/database/portal-models';
@@ -246,7 +247,41 @@ export class UsersService {
     return toUserDto(user);
   }
 
+  /**
+   * `GET /users/me/preferences` (T-128). `actor.userId` — from the verified JWT, never a
+   * parameter — is always within the actor's own scope, so this can never 404 for a real,
+   * still-existing session; it goes through `ScopedRepository` anyway, the same as every other
+   * read here, rather than a bespoke unscoped lookup.
+   */
+  async getPreferences(actor: AuthenticatedUser): Promise<{ uiTheme: UiTheme }> {
+    const user = await this.scoped.findByPkOrFail(PortalUser, actor.userId);
+    return { uiTheme: user.uiTheme as UiTheme };
+  }
+
   // --- writes ------------------------------------------------------------------------------
+
+  /**
+   * `PATCH /users/me/preferences` (T-128). Writes only `uiTheme`, and only the caller's own row
+   * — there is no target id parameter on this route at all (TC-6), so nothing here ever reads
+   * one. `uiTheme` itself has already passed `UpdateUserPreferencesDto`'s `@IsIn(UI_THEMES)`
+   * before this method is entered; `ck_portal_users_ui_theme` (`T128_001`) is the same rule
+   * enforced a second, independent time at the storage layer.
+   */
+  async updatePreferences(
+    actor: AuthenticatedUser,
+    uiTheme: UiTheme,
+  ): Promise<{ uiTheme: UiTheme }> {
+    return this.sequelize.transaction(async (transaction) => {
+      await this.scoped.update(PortalUser, { uiTheme } as never, {
+        where: { id: actor.userId },
+        transaction,
+      });
+
+      const updated = await this.scoped.findByPkOrFail(PortalUser, actor.userId, { transaction });
+      this.audit.annotate({ targetId: actor.userId, detail: { fields: ['uiTheme'] } });
+      return { uiTheme: updated.uiTheme as UiTheme };
+    });
+  }
 
   /**
    * `POST /users`. See this file's own header for the full escalation-matrix argument and for

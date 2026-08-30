@@ -11,6 +11,7 @@
  * `reward-version.model.ts`'s own plain getter/setter treatment of the column.
  */
 import { IsBoolean, IsIn, IsObject, IsOptional, IsString, MaxLength } from 'class-validator';
+import { REWARD_KINDS } from '@reward-portal/shared';
 import { CHANGE_SUMMARY_MAX_LENGTH } from '../versions.constants';
 
 /** `reward_versions.unit_type` — 11-BUDGETS-AND-LIMITS.md §3.1; mirrors `campaign-cap.model.ts`'s
@@ -48,6 +49,23 @@ export class UpdateRewardVersionDto {
   @IsString()
   @MaxLength(CHANGE_SUMMARY_MAX_LENGTH)
   changeSummary?: string | null;
+
+  /**
+   * T-119 — `reward_versions.reward_kind` (13-REWARD-MASTER-VALUE-SOURCES.md §5). Nullable:
+   * clearing the Kind back to "not set" on a draft must stay possible, the same way T-109's
+   * resolver wiring stays clearable. Only the *vocabulary* is checked here; whether
+   * {@link valueConfig} matches the Kind is a cross-field question the service answers, because
+   * on a `PATCH` the other half of the pair may be the one already stored on the draft.
+   */
+  @IsOptional()
+  @IsIn(REWARD_KINDS)
+  rewardKind?: (typeof REWARD_KINDS)[number] | null;
+
+  /** T-119 — `reward_versions.value_config`. Shape-checked against `rewardKind` by
+   * `RewardVersionsService`, never here; see {@link rewardKind}. */
+  @IsOptional()
+  @IsObject()
+  valueConfig?: Record<string, unknown> | null;
 
   @IsOptional()
   @IsBoolean()

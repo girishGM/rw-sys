@@ -6,6 +6,8 @@ import {
   TenantAdminEmailExistsError,
   TenantAlreadyActiveError,
   TenantCodeExistsError,
+  TenantCurrencyDefaultExistsError,
+  TenantCurrencyExistsError,
   TenantNotActiveError,
   TenantSchemaPrefixExistsError,
 } from '@/modules/tenants/tenants.errors';
@@ -39,6 +41,18 @@ describe('tenants.errors', () => {
     const error = new TenantNotActiveError();
     expect(error.status).toBe(422);
     expect(error.code).toBe(TENANT_ERROR_CODE.TENANT_NOT_ACTIVE);
+  });
+
+  it('TenantCurrencyExistsError is 409 TENANT_CURRENCY_EXISTS (T-126 TC-2)', () => {
+    const error = new TenantCurrencyExistsError();
+    expect(error.status).toBe(409);
+    expect(error.code).toBe(TENANT_ERROR_CODE.TENANT_CURRENCY_EXISTS);
+  });
+
+  it('TenantCurrencyDefaultExistsError is 409 TENANT_CURRENCY_DEFAULT_EXISTS (T-126 TC-3)', () => {
+    const error = new TenantCurrencyDefaultExistsError();
+    expect(error.status).toBe(409);
+    expect(error.code).toBe(TENANT_ERROR_CODE.TENANT_CURRENCY_DEFAULT_EXISTS);
   });
 
   it('every code is UPPER_SNAKE_CASE — the shape ErrorNormalizationFilter requires to serialise it', () => {

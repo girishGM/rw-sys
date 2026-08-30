@@ -47,7 +47,7 @@ import { AppModule } from '@/app.module';
 import { SEQUELIZE } from '@/database/sequelize.provider';
 import { ARGON2_OPTIONS } from '@/modules/auth/auth.constants';
 import { CSRF_COOKIE_NAME } from '@/modules/auth/session.constants';
-import { createMigrationConnection } from '@/database/migration-connection';
+import { purgeSuiteResidue } from '../campaigns/support/purge-suite-residue';
 import { validationExceptionFactory } from '@/common/errors/validation.exception-factory';
 import type { PortalUserEmailCrypto } from '@/common/data-protection/portal-user-email.crypto';
 import {
@@ -492,92 +492,17 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (db !== undefined) {
-    const admin = createMigrationConnection();
-    try {
-      const ids = [...createdCampaignIds];
-      if (ids.length > 0) {
-        await admin.query(
-          'DELETE FROM reward_portal.portal_campaign_audit_trail WHERE campaign_id IN (:ids)',
-          { type: QueryTypes.RAW, replacements: { ids } },
-        );
-        await admin.query(
-          'DELETE FROM reward_portal.portal_approval_requests WHERE entity_id IN (:ids) AND entity_type = :type',
-          {
-            type: QueryTypes.RAW,
-            replacements: { ids, type: 'campaign' },
-          },
-        );
-        for (const table of [
-          'reward_config.campaign_caps',
-          'reward_config.reward_campaign_assignments',
-          'reward_config.campaign_merchants',
-        ]) {
-          await admin.query(`DELETE FROM ${table} WHERE campaign_id IN (:ids)`, {
-            type: QueryTypes.RAW,
-            replacements: { ids },
-          });
-        }
-        // Full FK graph confirmed live against `pg_constraint` (`confrelid IN
-        // ('reward_config.trackers', 'reward_config.tracker_components')`), not assumed from
-        // `campaigns.e2e-spec.ts`'s own list — that list turned out to be short two tables
-        // (`tenant_campaign_trackers`, `tracker_component_groups`/`tracker_group_defs`), which
-        // this suite's own first run caught as a real `FOREIGN KEY` violation on cleanup.
-        await admin.query(
-          `DELETE FROM reward_config.tracker_component_rules WHERE tracker_component_id IN (
-             SELECT id FROM reward_config.tracker_components WHERE component_code LIKE :pattern)`,
-          { type: QueryTypes.RAW, replacements: { pattern: 'CMP-%' } },
-        );
-        await admin.query(
-          `DELETE FROM reward_config.reward_component_assignments WHERE component_id IN (
-             SELECT id FROM reward_config.tracker_components WHERE component_code LIKE :pattern)`,
-          { type: QueryTypes.RAW, replacements: { pattern: 'CMP-%' } },
-        );
-        await admin.query(
-          `DELETE FROM reward_config.reward_tracker_assignments WHERE tracker_id IN (
-             SELECT id FROM reward_config.trackers WHERE tracker_code LIKE :pattern)`,
-          { type: QueryTypes.RAW, replacements: { pattern: 'TRK-%' } },
-        );
-        await admin.query(
-          `DELETE FROM reward_config.tracker_tracker_components WHERE tracker_id IN (
-             SELECT id FROM reward_config.trackers WHERE tracker_code LIKE :pattern)`,
-          { type: QueryTypes.RAW, replacements: { pattern: 'TRK-%' } },
-        );
-        await admin.query(
-          'DELETE FROM reward_config.tenant_campaign_trackers WHERE campaign_id IN (:ids)',
-          {
-            type: QueryTypes.RAW,
-            replacements: { ids },
-          },
-        );
-        await admin.query(
-          `DELETE FROM reward_config.tracker_component_groups WHERE tracker_id IN (
-             SELECT id FROM reward_config.trackers WHERE tracker_code LIKE :pattern)`,
-          { type: QueryTypes.RAW, replacements: { pattern: 'TRK-%' } },
-        );
-        await admin.query(
-          `DELETE FROM reward_config.tracker_group_defs WHERE tracker_id IN (
-             SELECT id FROM reward_config.trackers WHERE tracker_code LIKE :pattern)`,
-          { type: QueryTypes.RAW, replacements: { pattern: 'TRK-%' } },
-        );
-        await admin.query(
-          'DELETE FROM reward_config.tracker_components WHERE component_code LIKE :pattern',
-          {
-            type: QueryTypes.RAW,
-            replacements: { pattern: 'CMP-%' },
-          },
-        );
-        await admin.query('DELETE FROM reward_config.trackers WHERE tracker_code LIKE :pattern', {
-          type: QueryTypes.RAW,
-          replacements: { pattern: 'TRK-%' },
-        });
-        await admin.query('DELETE FROM reward_config.tenant_campaigns WHERE id IN (:ids)', {
-          type: QueryTypes.RAW,
-          replacements: { ids },
-        });
-      }
-    } finally {
-      await admin.close();
-    }
+    // T-149 — this suite's own cleanup used to key its tracker/component deletes on the bare
+    // `TRK-%`/`CMP-%` code-generator prefix with no tenant scope at all, the exact defect T-144
+    // found and fixed in `campaigns.e2e-spec.ts` (R9: unscoped `DELETE … LIKE 'TRK-%'` collides
+    // with any other suite's or manual run's own generated trackers, throws on the first foreign
+    // row it hits, and fails every test in this file at `beforeAll`/`afterAll`). This suite never
+    // got the same fix. Replaced with T-132's shared, tenant-scoped `purgeSuiteResidue` — this
+    // suite's own tenant is created as `${PREFIX}_T` (`ensureTenant` call in `beforeAll` above),
+    // matching `SUITE_TENANTS`'s `tenants.code LIKE :prefixPattern`, and its portal users are all
+    // named `T-053 …` (`displayName` above), matching `SUITE_USERS`. Safe to call unconditionally
+    // — a no-op when there is nothing to remove, so the old `ids.length > 0` guard is redundant.
+    await purgeSuiteResidue({ prefix: PREFIX, userDisplayNamePrefix: 'T-053' });
 
     await deletePortalUsersByEmail(db, emailCrypto, [
       ...makers.map((m) => m.email),

@@ -51,7 +51,7 @@
  * Every step change `replace`s the current entry rather than pushing a new one, so "Back" still
  * means "leave the wizard" and not "undo one step, seven times".
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useLocation, useNavigate, useParams, type Location } from 'react-router-dom';
 import type { CampaignCapInput, RewardLevel } from '@reward-portal/shared';
 import { Button } from '../../components/Button';
@@ -150,6 +150,48 @@ function withStep(existing: unknown, next: number): Record<string, unknown> {
   };
 }
 
+/**
+ * The prefix every rule-value validation detail carries. `bindings.service.ts` builds each
+ * `details[].field` as `values.<parameterKey>` — *"which lets the SPA map the error straight back
+ * onto the generated form control"*, which is exactly what this does.
+ */
+const RULE_VALUE_FIELD_PREFIX = 'values.';
+
+/**
+ * T-136 — a rejected rule-value save, mapped onto the controls that caused it.
+ *
+ * Keys are `${bindingId}.${parameterKey}`, the shape `ComponentRulesStep#pickErrors` splits back
+ * apart. The binding id comes from the caller rather than the response because the server has no
+ * reason to repeat it: the SPA knows which save it just issued.
+ *
+ * The message is the server's own `ApiError.message` — the catalogue text for the returned code,
+ * already localised server-side (04-FRONTEND.md §8 note 5: feature code *"renders `message` and
+ * never invents its own copy for a server-side failure"*). What this function adds is **where**
+ * it is shown, not what it says: the same sentence also appears once above the step, and a field
+ * error nobody can attribute to a field is the defect this replaces.
+ *
+ * A detail whose `field` is not `values.<something>` is skipped rather than guessed at, and so is
+ * an object-level issue: the server names those `values.root` (its own placeholder for an issue
+ * with no path — an unrecognised key), which matches no control on a rule that has no field
+ * keyed `root` and therefore renders nothing. Both cases still reach the maker through the
+ * step-level sentence, which is why that had to be rendered in the same change: a field-level map
+ * that cannot represent every failure is only half of the fix.
+ */
+function ruleValueFieldErrors(bindingId: number, cause: unknown): Record<string, string> {
+  if (!(cause instanceof ApiError)) return {};
+
+  const errors: Record<string, string> = {};
+  for (const detail of cause.details ?? []) {
+    if (!detail.field.startsWith(RULE_VALUE_FIELD_PREFIX)) continue;
+    // `values.a.b` (a nested path a future field type could produce) attaches to `a`, the control
+    // the maker can actually see; `values.` alone names no field and is dropped.
+    const [parameterKey] = detail.field.slice(RULE_VALUE_FIELD_PREFIX.length).split('.');
+    if (parameterKey === '') continue;
+    errors[`${String(bindingId)}.${parameterKey}`] ??= cause.message;
+  }
+  return errors;
+}
+
 export function CampaignWizardPage() {
   const params = useParams<{ id?: string }>();
   const navigate = useNavigate();
@@ -159,6 +201,13 @@ export function CampaignWizardPage() {
   const step = readStep(location, campaignId);
   const [basics, setBasics] = useState<BasicsValues>(emptyBasics);
   const [error, setError] = useState<string | undefined>(undefined);
+  /**
+   * T-136 — the field-level half of a rejected rule-value save, keyed exactly as
+   * `ComponentRulesStep` reads it (`${bindingId}.${parameterKey}`). Held as state rather than
+   * derived: which binding a 400 belongs to is only known at the moment the save that caused it
+   * rejects, and no query result carries it.
+   */
+  const [ruleValueErrors, setRuleValueErrors] = useState<Record<string, string>>({});
 
   const campaignQuery = useCampaignQuery(campaignId);
   const journeyQuery = useJourneyQuery(campaignId);
@@ -229,6 +278,7 @@ export function CampaignWizardPage() {
    */
   function goToStep(next: number): void {
     setError(undefined);
+    setRuleValueErrors({});
     navigate(`${location.pathname}${location.search}`, {
       replace: true,
       state: withStep(location.state, next),
@@ -237,11 +287,23 @@ export function CampaignWizardPage() {
 
   const journey = journeyQuery.data;
 
-  const serverFieldErrors = useMemo(() => {
-    // `details` from a 400 on a rule binding are `{ field: 'values.minSpend' }` — mapped onto the
-    // generated form control so TC-17's failure lands on the field that caused it.
-    return {};
-  }, []);
+  /**
+   * Save one binding's values, keeping any field-level rejection attached to the binding it came
+   * from (T-136).
+   *
+   * Written out rather than routed through `run()` because it needs the failure twice: once as
+   * the step's own sentence (`error`, rendered above the step) and once mapped onto the control
+   * that caused it (`ruleValueErrors`). Both are cleared before the attempt, so a save that
+   * succeeds leaves no stale error behind on a field the maker has since fixed.
+   */
+  function saveRuleValues(bindingId: number, values: Record<string, unknown>): void {
+    setError(undefined);
+    setRuleValueErrors({});
+    updateRuleValues.mutateAsync({ bindingId, input: { values } }).catch((cause: unknown) => {
+      report(cause);
+      setRuleValueErrors(ruleValueFieldErrors(bindingId, cause));
+    });
+  }
 
   function saveBasics(): void {
     if (campaignId === null) {
@@ -369,21 +431,32 @@ export function CampaignWizardPage() {
         )}
 
         {step === 3 && campaignId !== null && (
-          <ComponentRulesStep
-            journey={journey}
-            ruleOptions={ruleOptionsQuery.data ?? []}
-            disabled={readOnly}
-            serverErrors={serverFieldErrors}
-            onBindRule={(componentId, ruleId) => {
-              run(bindRule.mutateAsync({ componentId, ruleId }));
-            }}
-            onUnbindRule={(bindingId) => {
-              run(unbindRule.mutateAsync(bindingId));
-            }}
-            onSaveValues={(bindingId, values) => {
-              run(updateRuleValues.mutateAsync({ bindingId, input: { values } }));
-            }}
-          />
+          <>
+            {/* T-136 — step 3 used to pass neither this nor a populated `serverErrors`, so a
+                rejected rule-value save (a value the rule's schema refuses, T-124's journey-order
+                guard, a lost session) showed the maker *nothing at all*. Rendered here rather
+                than passed into `ComponentRulesStep` as an `error` prop: that component belongs
+                to T-125 and is not this task's to change, and every other step renders the same
+                sentence in the same shape (compare `JourneyStep`/`BudgetsStep`). */}
+            {error !== undefined && (
+              <p role="alert" className="rounded-md bg-rose-50 px-3 py-2 text-sm text-rose-700">
+                {error}
+              </p>
+            )}
+            <ComponentRulesStep
+              journey={journey}
+              ruleOptions={ruleOptionsQuery.data ?? []}
+              disabled={readOnly}
+              serverErrors={ruleValueErrors}
+              onBindRule={(componentId, ruleId) => {
+                run(bindRule.mutateAsync({ componentId, ruleId }));
+              }}
+              onUnbindRule={(bindingId) => {
+                run(unbindRule.mutateAsync(bindingId));
+              }}
+              onSaveValues={saveRuleValues}
+            />
+          </>
         )}
 
         {step === 4 && campaignId !== null && (
@@ -392,10 +465,15 @@ export function CampaignWizardPage() {
             rewardOptions={rewardOptionsQuery.data ?? []}
             worstCasePayout={capsQuery.data?.worstCasePayout ?? []}
             disabled={readOnly}
-            onAttach={(level: RewardLevel, refId, rewardPolicyId) => {
+            onAttach={(level: RewardLevel, refId, rewardPolicyId, promoCodeConfig) => {
+              // T-127 — `promoCodeConfig` is omitted, never sent as `null`: the shared contract
+              // is `.strict()` and the key is optional, so "nothing picked" is an absent key.
+              const promoCode = promoCodeConfig === null ? {} : { promoCodeConfig };
               run(
                 attachReward.mutateAsync(
-                  refId === null ? { level, rewardPolicyId } : { level, refId, rewardPolicyId },
+                  refId === null
+                    ? { level, rewardPolicyId, ...promoCode }
+                    : { level, refId, rewardPolicyId, ...promoCode },
                 ),
               );
             }}

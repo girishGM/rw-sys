@@ -476,7 +476,13 @@ describe('T-031 — POST /rules — authorship', () => {
 
     const response = await get('super', `/rules/${String(created.body.data.id)}/parameters`);
     expect(response.status).toBe(200);
-    expect(response.body.data).toEqual(parameters);
+    // T-114 — every field now also carries a response-only `role`. This freshly created rule
+    // has no `rule_versions` row yet (never wired to a resolver), so every field is
+    // `compare_value` (T-114 TC-4) — asserted here as the observable shape of the one field
+    // this test actually supplied, rather than restated as a separate suite.
+    expect(response.body.data).toEqual({
+      fields: parameters.fields.map((field) => ({ ...field, role: 'compare_value' })),
+    });
   });
 
   it('TC-16/TC-17: expression is stored as inert text — never executed', async () => {
@@ -739,6 +745,70 @@ describe('T-031 — PATCH /rules/:id (TC-19, TC-21, TC-22)', () => {
       { id },
     );
     expect(rows).toHaveLength(1);
+  });
+});
+
+describe('T-111 — GET /rules?categoryId=/subCategoryId=/search=', () => {
+  /** T-105's own seed — real category/rule rows, not a fixture this suite creates or tears
+   * down. Confirms the whole path end to end (DTO → `resolveSubCategoryIds` → `where`) against
+   * data nothing in this suite controls, exactly the DoD's own "manually verified" ask. */
+  async function componentCategoryId(): Promise<number> {
+    const [row] = await sql<{ id: number }>(
+      `SELECT id FROM reward_config.rule_categories WHERE category_code = 'COMPONENT'`,
+    );
+    if (row === undefined) {
+      throw new Error('seeded rule_categories COMPONENT row not found — is T-105 applied?');
+    }
+    return row.id;
+  }
+
+  it('TC-5: categoryId=<COMPONENT> returns exactly T-105’s 2 seeded component rules', async () => {
+    const categoryId = await componentCategoryId();
+    const response = await get('super', `/rules?categoryId=${String(categoryId)}&pageSize=100`);
+
+    expect(response.status).toBe(200);
+    const ruleCodes = (response.body.data as { ruleCode: string }[])
+      .map((rule) => rule.ruleCode)
+      .sort();
+    expect(ruleCodes).toEqual(['RULE_COMP_COMPLETED_001', 'RULE_COMP_NOT_COMPLETED_001']);
+  });
+
+  it('TC-1/TC-2: subCategoryId is a direct match; categoryId rolls the sub-category up', async () => {
+    const [subCategory] = await sql<{ id: number }>(
+      `SELECT rsc.id
+         FROM reward_config.rule_sub_categories rsc
+         JOIN reward_config.rule_categories rc ON rc.id = rsc.category_id
+        WHERE rc.category_code = 'COMPONENT' AND rsc.sub_category_code = 'COMP_STATUS_CHECK'`,
+    );
+    expect(subCategory).toBeDefined();
+
+    const response = await get(
+      'super',
+      `/rules?subCategoryId=${String(subCategory.id)}&pageSize=100`,
+    );
+    expect(response.status).toBe(200);
+    const ruleCodes = (response.body.data as { ruleCode: string }[])
+      .map((rule) => rule.ruleCode)
+      .sort();
+    expect(ruleCodes).toEqual(['RULE_COMP_COMPLETED_001', 'RULE_COMP_NOT_COMPLETED_001']);
+  });
+
+  it('TC-3: search matches ruleCode/name case-insensitively', async () => {
+    const response = await get('super', '/rules?search=rule_comp_completed&pageSize=100');
+    expect(response.status).toBe(200);
+    const ruleCodes = (response.body.data as { ruleCode: string }[]).map((rule) => rule.ruleCode);
+    expect(ruleCodes).toEqual(['RULE_COMP_COMPLETED_001']);
+  });
+
+  it('TC-4: categoryId and search combine — both apply (AND)', async () => {
+    const categoryId = await componentCategoryId();
+    const response = await get(
+      'super',
+      `/rules?categoryId=${String(categoryId)}&search=NOT_COMPLETED&pageSize=100`,
+    );
+    expect(response.status).toBe(200);
+    const ruleCodes = (response.body.data as { ruleCode: string }[]).map((rule) => rule.ruleCode);
+    expect(ruleCodes).toEqual(['RULE_COMP_NOT_COMPLETED_001']);
   });
 });
 

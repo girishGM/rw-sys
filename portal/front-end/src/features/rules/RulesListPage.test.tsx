@@ -3,13 +3,23 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import type { Rule } from '@reward-portal/shared';
+import type { Rule, RuleCategory, RuleSubCategory } from '@reward-portal/shared';
 import { BootstrapContext, type BootstrapContextValue } from '../../auth/useBootstrap';
 import { ApiError } from '../../lib/apiError';
 
-const { mockUseRulesQuery } = vi.hoisted(() => ({ mockUseRulesQuery: vi.fn() }));
+const { mockUseRulesQuery, mockUseRuleCategoriesQuery, mockUseRuleSubCategoriesQuery } = vi.hoisted(
+  () => ({
+    mockUseRulesQuery: vi.fn(),
+    mockUseRuleCategoriesQuery: vi.fn(),
+    mockUseRuleSubCategoriesQuery: vi.fn(),
+  }),
+);
 
-vi.mock('./api', () => ({ useRulesQuery: mockUseRulesQuery }));
+vi.mock('./api', () => ({
+  useRulesQuery: mockUseRulesQuery,
+  useRuleCategoriesQuery: mockUseRuleCategoriesQuery,
+  useRuleSubCategoriesQuery: mockUseRuleSubCategoriesQuery,
+}));
 // AddRuleModal pulls in the real mutation/category hooks; stubbed here since this suite only
 // exercises the list screen, not the create flow.
 vi.mock('./AddRuleModal', () => ({
@@ -18,6 +28,16 @@ vi.mock('./AddRuleModal', () => ({
 }));
 
 import { RulesListPage } from './RulesListPage';
+
+const categories: RuleCategory[] = [
+  { id: 1, categoryCode: 'TRANSACTION', name: 'Transaction', status: 'active' },
+  { id: 2, categoryCode: 'COMPONENT', name: 'Component', status: 'active' },
+];
+
+const subCategories: RuleSubCategory[] = [
+  { id: 11, categoryId: 1, subCategoryCode: 'GENERAL', name: 'General', status: 'active' },
+  { id: 12, categoryId: 1, subCategoryCode: 'MERCHANT', name: 'Merchant', status: 'active' },
+];
 
 function ruleRow(overrides: Partial<Rule> = {}): Rule {
   return {
@@ -78,6 +98,14 @@ function renderPage(canCreate: boolean) {
 
 beforeEach(() => {
   mockUseRulesQuery.mockReset();
+  mockUseRuleCategoriesQuery.mockReset();
+  mockUseRuleSubCategoriesQuery.mockReset();
+  mockUseRuleCategoriesQuery.mockReturnValue({ data: categories, isLoading: false, error: null });
+  mockUseRuleSubCategoriesQuery.mockReturnValue({
+    data: subCategories,
+    isLoading: false,
+    error: null,
+  });
 });
 
 describe('RulesListPage', () => {
@@ -206,6 +234,89 @@ describe('RulesListPage', () => {
 
     const lastCall = mockUseRulesQuery.mock.calls.at(-1)?.[0] as { page: number; sort: string };
     expect(lastCall.sort).toBe('ruleCode:desc');
+    expect(lastCall.page).toBe(1);
+  });
+
+  it('T-111 TC-6: picking a category requeries sub-categories scoped to it, cascading like AddRuleModal', async () => {
+    mockUseRulesQuery.mockReturnValue({
+      data: { data: rules, meta: { page: 1, pageSize: 20, total: 2 } },
+      isLoading: false,
+      error: null,
+    });
+    const user = userEvent.setup();
+
+    renderPage(true);
+
+    // Disabled until a category is picked — same cascade AddRuleModal.tsx uses.
+    expect(screen.getByRole('combobox', { name: /^sub-category$/i })).toBeDisabled();
+
+    await user.click(screen.getByRole('combobox', { name: /^category$/i }));
+    await user.click(screen.getByRole('option', { name: 'Transaction' }));
+
+    expect(mockUseRuleSubCategoriesQuery).toHaveBeenLastCalledWith(1);
+    expect(screen.getByRole('combobox', { name: /^sub-category$/i })).not.toBeDisabled();
+
+    const lastRulesCall = mockUseRulesQuery.mock.calls.at(-1)?.[0] as {
+      categoryId?: number;
+      subCategoryId?: number;
+      page: number;
+    };
+    expect(lastRulesCall.categoryId).toBe(1);
+    expect(lastRulesCall.subCategoryId).toBeUndefined();
+    expect(lastRulesCall.page).toBe(1);
+
+    await user.click(screen.getByRole('combobox', { name: /^sub-category$/i }));
+    await user.click(screen.getByRole('option', { name: 'General' }));
+
+    const afterSubCategory = mockUseRulesQuery.mock.calls.at(-1)?.[0] as {
+      subCategoryId?: number;
+    };
+    expect(afterSubCategory.subCategoryId).toBe(11);
+  });
+
+  it('T-111: picking a new category clears a previously selected sub-category', async () => {
+    mockUseRulesQuery.mockReturnValue({
+      data: { data: rules, meta: { page: 1, pageSize: 20, total: 2 } },
+      isLoading: false,
+      error: null,
+    });
+    const user = userEvent.setup();
+
+    renderPage(true);
+
+    await user.click(screen.getByRole('combobox', { name: /^category$/i }));
+    await user.click(screen.getByRole('option', { name: 'Transaction' }));
+    await user.click(screen.getByRole('combobox', { name: /^sub-category$/i }));
+    await user.click(screen.getByRole('option', { name: 'General' }));
+
+    await user.click(screen.getByRole('combobox', { name: /^category$/i }));
+    await user.click(screen.getByRole('option', { name: 'Component' }));
+
+    const lastCall = mockUseRulesQuery.mock.calls.at(-1)?.[0] as {
+      categoryId?: number;
+      subCategoryId?: number;
+    };
+    expect(lastCall.categoryId).toBe(2);
+    expect(lastCall.subCategoryId).toBeUndefined();
+  });
+
+  it('T-111: submitting the search box requeries with the search term and resets to page 1', async () => {
+    mockUseRulesQuery.mockReturnValue({
+      data: { data: rules, meta: { page: 3, pageSize: 20, total: 2 } },
+      isLoading: false,
+      error: null,
+    });
+    const user = userEvent.setup();
+
+    renderPage(true);
+    await user.type(screen.getByLabelText(/search/i), 'SCAN');
+    await user.click(screen.getByRole('button', { name: /^search$/i }));
+
+    const lastCall = mockUseRulesQuery.mock.calls.at(-1)?.[0] as {
+      search?: string;
+      page: number;
+    };
+    expect(lastCall.search).toBe('SCAN');
     expect(lastCall.page).toBe(1);
   });
 });

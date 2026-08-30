@@ -2,12 +2,13 @@
  * T-031 — `PATCH /rules/:id`. `ruleCode` is immutable and never shown as an editable field here
  * (matches `UpdateRuleDto`'s own shape — the back end does not accept it either).
  */
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useForm } from 'react-hook-form';
 import {
   updateRuleRequestSchema,
   type Rule,
   type RuleParameterField,
+  type RuleParameterFieldWithRole,
   type UpdateRuleRequest,
 } from '@reward-portal/shared';
 import { Button } from '../../components/Button';
@@ -16,7 +17,13 @@ import { Modal } from '../../components/Modal';
 import { Select, type SelectOption } from '../../components/Select';
 import { ApiError } from '../../lib/apiError';
 import { ParameterFieldsEditor } from './ParameterFieldsEditor';
-import { useRuleSubCategoriesQuery, useUpdateRuleMutation } from './api';
+import {
+  useFieldApiLookupProvidersQuery,
+  useFieldContextProvidersQuery,
+  useRuleResolversQuery,
+  useRuleSubCategoriesQuery,
+  useUpdateRuleMutation,
+} from './api';
 
 const STATUS_OPTIONS: SelectOption[] = [
   { value: 'active', label: 'Active' },
@@ -30,6 +37,23 @@ interface FormValues {
   status: string;
 }
 
+/**
+ * T-114 — `rule.parameters.fields` is the **response** shape (`ruleSchema`), so every field
+ * carries a server-computed `role` (`packages/shared/src/rule.schema.ts#
+ * ruleParameterFieldWithRoleSchema`). `role` is never accepted by the **write** shape
+ * (`updateRuleRequestSchema` embeds the unmodified `ruleParameterFieldSchema`, still
+ * `.strict()`) — reusing a fetched field object as-is for the edit form's local state would
+ * silently carry `role` all the way to submit and 400 the whole save. Strip it here, once, at
+ * the one place a response value becomes a request value, rather than leaving every future
+ * caller of `setFields` to remember to.
+ */
+function toEditableFields(fields: readonly RuleParameterFieldWithRole[]): RuleParameterField[] {
+  return fields.map(({ role, ...field }) => {
+    void role;
+    return field;
+  });
+}
+
 export interface EditRuleModalProps {
   open: boolean;
   onClose: () => void;
@@ -39,7 +63,16 @@ export interface EditRuleModalProps {
 export function EditRuleModal({ open, onClose, rule }: EditRuleModalProps) {
   const mutation = useUpdateRuleMutation(rule.id);
   const [submitError, setSubmitError] = useState<ApiError | null>(null);
-  const [fields, setFields] = useState<RuleParameterField[]>(rule.parameters.fields);
+  const [fields, setFields] = useState<RuleParameterField[]>(
+    toEditableFields(rule.parameters.fields),
+  );
+  // T-115 — same preview-only Resolver picker `AddRuleModal` carries; see its own comment.
+  // Never included in `onSubmit`'s payload below.
+  const [previewResolverId, setPreviewResolverId] = useState<string>('');
+  const resolversQuery = useRuleResolversQuery();
+  // T-125 — feeds the field builder's "Where do the options come from?" picker.
+  const contextProvidersQuery = useFieldContextProvidersQuery();
+  const apiLookupProvidersQuery = useFieldApiLookupProvidersQuery();
 
   const form = useForm<FormValues>({
     defaultValues: {
@@ -58,7 +91,8 @@ export function EditRuleModal({ open, onClose, rule }: EditRuleModalProps) {
       expression: rule.expression ?? '',
       status: rule.status,
     });
-    setFields(rule.parameters.fields);
+    setFields(toEditableFields(rule.parameters.fields));
+    setPreviewResolverId('');
     // Only re-sync when the modal (re)opens for a given rule, not on every keystroke.
     // eslint-disable-next-line react-hooks/exhaustive-deps -- see comment above
   }, [open, rule.id]);
@@ -68,6 +102,23 @@ export function EditRuleModal({ open, onClose, rule }: EditRuleModalProps) {
     value: String(subCategory.id),
     label: `${subCategory.name} (${subCategory.subCategoryCode})`,
   }));
+
+  const resolverOptions: SelectOption[] = useMemo(
+    () =>
+      (resolversQuery.data ?? []).map((resolver) => ({
+        value: String(resolver.id),
+        label: `${resolver.name} (${resolver.resolverCode})`,
+      })),
+    [resolversQuery.data],
+  );
+
+  // T-115 — see `AddRuleModal`'s identical derivation for why this is client-side-only.
+  const previewResolverInputFieldKeys: readonly string[] = useMemo(
+    () =>
+      (resolversQuery.data ?? []).find((resolver) => String(resolver.id) === previewResolverId)
+        ?.resolverInputFieldKeys ?? [],
+    [resolversQuery.data, previewResolverId],
+  );
 
   function handleClose(): void {
     setSubmitError(null);
@@ -167,7 +218,28 @@ export function EditRuleModal({ open, onClose, rule }: EditRuleModalProps) {
           />
         </div>
 
-        <ParameterFieldsEditor fields={fields} onChange={setFields} />
+        <div className="flex flex-col gap-1.5">
+          <Select
+            label="Resolver (preview)"
+            options={resolverOptions}
+            value={previewResolverId === '' ? null : previewResolverId}
+            onChange={setPreviewResolverId}
+            placeholder="None — every field is Compared value"
+          />
+          <p className="text-xs text-slate-500">
+            Not saved with this rule — wiring a rule to a resolver happens separately, on its
+            version. Pick one here only to preview which parameter keys it would treat as its own
+            input.
+          </p>
+        </div>
+
+        <ParameterFieldsEditor
+          fields={fields}
+          onChange={setFields}
+          resolverInputFieldKeys={previewResolverInputFieldKeys}
+          contextProviders={contextProvidersQuery.data ?? []}
+          apiLookupProviders={apiLookupProvidersQuery.data ?? []}
+        />
 
         <div className="flex justify-end gap-2">
           <Button type="button" variant="secondary" onClick={handleClose}>

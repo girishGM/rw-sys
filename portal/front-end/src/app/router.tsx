@@ -108,6 +108,10 @@ const CategoriesPage = lazyPage(() => import('../features/rules'), 'CategoriesPa
 // behind a stub only to immediately swap it out in the same task would be pure churn.
 const RewardsListPage = lazyPage(() => import('../features/rewards'), 'RewardsListPage');
 const RewardDetailPage = lazyPage(() => import('../features/rewards'), 'RewardDetailPage');
+// T-117 — categories/sub-categories management for Rewards, the same deviation
+// `CategoriesPage`'s own comment above documents for Rules: this screen is this task's own
+// scope, built directly rather than behind a stub.
+const RewardCategoriesPage = lazyPage(() => import('../features/rewards'), 'RewardCategoriesPage');
 // T-033 — `AccessControlPage` replaces the generic `RouteStub` for `/admin/access-control`, the
 // same kind of deviation T-031/T-032/T-045/T-023/T-030/T-040 made: this screen is this task's own
 // scope (`front-end/src/features/access-control/**`), so building it behind a stub only to
@@ -238,6 +242,13 @@ export const PROTECTED_ROUTE_SPECS: readonly ProtectedRouteSpec[] = [
     entity: 'reward',
     action: 'view',
   },
+  // T-117 — mirrors `/rule-categories` above, one row up (same entity-pair pattern, reward side).
+  {
+    path: '/reward-categories',
+    label: 'Categories',
+    entity: 'reward_category',
+    action: 'view',
+  },
   { path: '/tenants', label: 'Tenants', entity: 'tenant', action: 'view' },
   {
     path: '/tenants/:id',
@@ -363,6 +374,8 @@ function buildProtectedChild(spec: ProtectedRouteSpec): RouteObject {
       <RewardsListPage />
     ) : spec.path === '/rewards/:id' ? (
       <RewardDetailPage />
+    ) : spec.path === '/reward-categories' ? (
+      <RewardCategoriesPage />
     ) : spec.path === '/admin/access-control' ? (
       <AccessControlPage />
     ) : spec.path === '/tenants' ? (

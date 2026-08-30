@@ -6,6 +6,11 @@
  * `RuleSubCategoryDto`. Deliberately omits `handlerClass` (a backend implementation detail with
  * no UI purpose) and the raw `inputSchema`/`applicableDataTypes` JSON text (nothing client-side
  * needs it yet — add it only when a real consumer does, per this task's own scope note).
+ *
+ * `resolverInputFieldKeys` (T-114) is the one exception to "backend-only stays off the wire":
+ * it is exactly the data a parameter field's response-only `role`
+ * (`packages/shared/src/rule.schema.ts#ruleFieldRoleSchema`) is computed from, so the rule
+ * editor can explain *why* a field is `resolver_input`.
  */
 import type { RuleResolver } from '@/database/models/rule-resolver.model';
 import type { RuleOperator } from '@/database/models/rule-operator.model';
@@ -16,6 +21,7 @@ export interface RuleResolverDto {
   readonly name: string;
   readonly description: string | null;
   readonly status: string;
+  readonly resolverInputFieldKeys: readonly string[];
 }
 
 export function toRuleResolverDto(resolver: RuleResolver): RuleResolverDto {
@@ -25,6 +31,7 @@ export function toRuleResolverDto(resolver: RuleResolver): RuleResolverDto {
     name: resolver.name,
     description: resolver.description,
     status: resolver.status,
+    resolverInputFieldKeys: resolver.resolverInputFieldKeys,
   };
 }
 

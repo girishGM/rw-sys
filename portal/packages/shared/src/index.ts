@@ -39,10 +39,22 @@ export {
   ruleListEnvelopeSchema,
   ruleOperatorListEnvelopeSchema,
   ruleOperatorSchema,
+  // T-114 — resolver-driven parameter-field role: response-only, never part of the write shape
+  // (`ruleParameterFieldSchema`/`ruleParametersSchema`, unchanged, exported above).
+  RULE_FIELD_ROLES,
+  ruleFieldRoleSchema,
+  // T-122 — an optional value source on a `select` parameter field: its options come from a
+  // registered context/API lookup provider instead of a hand-typed `options` array. Part of the
+  // **write** shape (unlike `role` above), so `createRuleRequestSchema`/`updateRuleRequestSchema`
+  // both carry it.
+  RULE_FIELD_VALUE_SOURCE_KINDS,
+  ruleFieldValueSourceSchema,
   ruleParameterFieldSchema,
+  ruleParameterFieldWithRoleSchema,
   ruleParameterTypeSchema,
   ruleParametersEnvelopeSchema,
   ruleParametersSchema,
+  ruleParametersWithRoleSchema,
   ruleResolverListEnvelopeSchema,
   ruleResolverSchema,
   ruleSchema,
@@ -60,10 +72,14 @@ export {
   type Rule,
   type RuleCategory,
   type RuleCountryAssignment,
+  type RuleFieldRole,
+  type RuleFieldValueSource,
   type RuleOperator,
   type RuleParameterField,
+  type RuleParameterFieldWithRole,
   type RuleParameterType,
   type RuleParameters,
+  type RuleParametersWithRole,
   type RuleResolver,
   type RuleStatus,
   type RuleSubCategory,
@@ -114,12 +130,53 @@ export {
   updateRewardPolicyCapRequestSchema,
   updateRewardPolicyRequestSchema,
   updateRewardRequestSchema,
+  // T-116 — reward categories/sub-categories (mirrors `rule.schema.ts`'s own category exports
+  // above). Added by T-117: `reward.schema.ts` itself already had these (T-116), but this
+  // barrel's own export list — the thing that actually makes them importable from
+  // `@reward-portal/shared` — never did, so nothing outside `reward.schema.ts` could reach them
+  // until now.
+  createRewardCategoryRequestSchema,
+  createRewardSubCategoryRequestSchema,
+  rewardCategoryEnvelopeSchema,
+  rewardCategoryListEnvelopeSchema,
+  rewardCategorySchema,
+  rewardSubCategoryEnvelopeSchema,
+  rewardSubCategoryListEnvelopeSchema,
+  rewardSubCategorySchema,
+  updateRewardCategoryRequestSchema,
+  updateRewardSubCategoryRequestSchema,
+  // T-119 — reward version Kind + per-kind value config (13-REWARD-MASTER-VALUE-SOURCES.md §5).
+  PROMO_CODE_API_PROVIDERS,
+  PROMO_CODE_BIND_LEVELS,
+  REWARD_KINDS,
+  checkRewardVersionValue,
+  createRewardVersionRequestSchema,
+  fixedAmountValueConfigSchema,
+  isRewardVersionValue,
+  percentageValueConfigSchema,
+  physicalValueConfigSchema,
+  pointsValueConfigSchema,
+  promoCodeApiProviderSchema,
+  promoCodeBindLevelSchema,
+  promoCodeValueConfigSchema,
+  rewardKindSchema,
+  rewardValueConfigSchema,
+  rewardVersionValueRequestFields,
+  rewardVersionValueResponseFields,
+  rewardVersionValueSchema,
+  type CreateRewardVersionRequest,
+  type PromoCodeBindLevel,
+  type RewardKind,
+  type RewardVersionValue,
   type AssignRewardCountryRequest,
+  type CreateRewardCategoryRequest,
   type CreateRewardPolicyCapRequest,
   type CreateRewardPolicyRequest,
   type CreateRewardRequest,
+  type CreateRewardSubCategoryRequest,
   type MaskedRewardConnectorConfig,
   type Reward,
+  type RewardCategory,
   type RewardConnectorConfig,
   type RewardConnectorType,
   type RewardCountryAssignment,
@@ -128,9 +185,12 @@ export {
   type RewardPolicy,
   type RewardPolicyCap,
   type RewardStatus,
+  type RewardSubCategory,
+  type UpdateRewardCategoryRequest,
   type UpdateRewardPolicyCapRequest,
   type UpdateRewardPolicyRequest,
   type UpdateRewardRequest,
+  type UpdateRewardSubCategoryRequest,
 } from './reward.schema';
 
 // T-033 — the `/admin/access-control` wire contract (Super Admin nav/permissions/widgets admin).
@@ -591,3 +651,39 @@ export {
   type MerchantSummary,
   type MerchantVisibleCampaignStatus,
 } from './merchant-portal.schema';
+
+// T-128 — the `GET`/`PATCH /users/me/preferences` wire contract (self-service UI theme
+// preference, 13-REWARD-MASTER-VALUE-SOURCES.md §6).
+export {
+  UI_THEMES,
+  uiThemeSchema,
+  updateUserPreferencesRequestSchema,
+  userPreferencesEnvelopeSchema,
+  userPreferencesSchema,
+  type UiTheme,
+  type UpdateUserPreferencesRequest,
+  type UserPreferences,
+} from './user-preferences.schema';
+
+// T-126 — the `/tenants/:id/currencies` wire contract (13-REWARD-MASTER-VALUE-SOURCES.md §4).
+// Exported under its own names — `TenantCurrency`/`TENANT_CURRENCY_STATUSES` would otherwise
+// collide with `tenant.schema.ts`'s own `Tenant`/`TENANT_STATUSES`.
+export {
+  TENANT_CURRENCY_STATUSES,
+  createTenantCurrencyRequestSchema,
+  tenantCurrencyEnvelopeSchema,
+  tenantCurrencyListEnvelopeSchema,
+  tenantCurrencySchema,
+  tenantCurrencyStatusSchema,
+  updateTenantCurrencyRequestSchema,
+  type CreateTenantCurrencyRequest,
+  type TenantCurrency,
+  type TenantCurrencyStatus,
+  type UpdateTenantCurrencyRequest,
+} from './tenant-currency.schema';
+
+// T-121 — the two field value-source registries' wire contract
+// (13-REWARD-MASTER-VALUE-SOURCES.md §3). Its own file rather than an addition to
+// `rule.schema.ts`/`reward.schema.ts`: a value source is used by both, so hanging it off either
+// would couple the two domain schemas together.
+export * from './field-value-source.schema';

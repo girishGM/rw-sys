@@ -17,6 +17,14 @@
  * `Files owned` entry.
  */
 import { z } from 'zod';
+// T-119 — the reward-version `rewardKind`/`valueConfig` pair is defined in `reward.schema.ts`
+// (the file T-119 owns) and only *referenced* from this file's reward section; see the two
+// `// T-119` markers below. One-way import: `reward.schema.ts` imports nothing from here.
+import {
+  checkRewardVersionValue,
+  rewardVersionValueRequestFields,
+  rewardVersionValueResponseFields,
+} from './reward.schema';
 
 // ─────────────────────────────── shared primitives ───────────────────────────────────────────
 
@@ -76,6 +84,17 @@ export const ruleVersionSchema = z
      * schemas". Present on every read so the UI can flag an author's override (implementation
      * note 9). `null` when there is nothing to compare against (the very first version). */
     suggestedIsBreaking: z.boolean().nullable(),
+    // T-109 — resolver wiring (T-102/T-103). `null` reads as "not yet wired to the
+    // registry-driven rule engine"; frozen alongside the rest of the payload once published
+    // (`T103_002`'s extended `fn_rule_version_immutable`). `.optional()` as well as
+    // `.nullable()` — same reasoning `reward.schema.ts#rewardVersionValueResponseFields`
+    // documents for its own pair: a `.strict()` client schema that *required* these four keys
+    // would reject every fixture/mock built before this task, and every response from a server
+    // one version behind during a rolling deploy.
+    resolverId: z.number().int().nullable().optional(),
+    resolverConfig: z.record(z.string(), z.unknown()).nullable().optional(),
+    evaluationContext: z.string().nullable().optional(),
+    defaultOperators: z.array(z.string()).nullable().optional(),
   })
   .strict();
 
@@ -108,6 +127,14 @@ export const updateRuleVersionRequestSchema = z
     changeSummary: z.string().max(500).nullable().optional(),
     isBreaking: z.boolean().optional(),
     confirmBreakingOverride: z.boolean().optional(),
+    // T-109 — all four optional *and* nullable: absent means "leave as is", `null` means
+    // "clear the wiring back to inert" (implementation note 1). The server validates
+    // `resolverId` against `rule_resolvers` and each `defaultOperators` entry against
+    // `rule_operators`; `resolverConfig` is opaque JSON here, same as `parameters` above.
+    resolverId: z.number().int().nullable().optional(),
+    resolverConfig: z.record(z.string(), z.unknown()).nullable().optional(),
+    evaluationContext: z.string().max(50).nullable().optional(),
+    defaultOperators: z.array(z.string()).nullable().optional(),
   })
   .strict();
 
@@ -139,6 +166,10 @@ export const rewardVersionSchema = z
     retiredAt: z.string().nullable(),
     updatedAt: z.string(),
     suggestedIsBreaking: z.boolean().nullable(),
+    // T-119 — `reward_versions.reward_kind`/`value_config` (13-REWARD-MASTER-VALUE-SOURCES.md §5).
+    // Additive: this schema is `.strict()`, so the SPA would reject every reward-version response
+    // the moment the server started sending these two keys if they were not declared here.
+    ...rewardVersionValueResponseFields,
   })
   .strict();
 
@@ -160,8 +191,13 @@ export const updateRewardVersionRequestSchema = z
     changeSummary: z.string().max(500).nullable().optional(),
     isBreaking: z.boolean().optional(),
     confirmBreakingOverride: z.boolean().optional(),
+    // T-119 — see `rewardVersionSchema` above. `superRefine` checks the pair when both halves are
+    // in the same request; the server re-checks the *effective* pair after merging with the
+    // stored draft, which is the only place that merge is knowable.
+    ...rewardVersionValueRequestFields,
   })
-  .strict();
+  .strict()
+  .superRefine(checkRewardVersionValue);
 
 export type UpdateRewardVersionRequest = z.infer<typeof updateRewardVersionRequestSchema>;
 

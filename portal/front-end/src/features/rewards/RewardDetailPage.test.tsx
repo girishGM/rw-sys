@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -10,11 +10,13 @@ const {
   mockUseRewardCountriesQuery,
   mockUseRewardPoliciesQuery,
   mockUseDeleteRewardMutation,
+  mockUseVersionsQuery,
 } = vi.hoisted(() => ({
   mockUseRewardQuery: vi.fn(),
   mockUseRewardCountriesQuery: vi.fn(),
   mockUseRewardPoliciesQuery: vi.fn(),
   mockUseDeleteRewardMutation: vi.fn(),
+  mockUseVersionsQuery: vi.fn(),
 }));
 
 vi.mock('./api', () => ({
@@ -23,6 +25,10 @@ vi.mock('./api', () => ({
   useRewardPoliciesQuery: mockUseRewardPoliciesQuery,
   useDeleteRewardMutation: mockUseDeleteRewardMutation,
 }));
+vi.mock('../versions', () => ({
+  VersionsPanel: () => <div data-testid="versions-panel" />,
+}));
+vi.mock('../versions/api', () => ({ useVersionsQuery: mockUseVersionsQuery }));
 vi.mock('./EditRewardModal', () => ({
   EditRewardModal: ({ open }: { open: boolean }) =>
     open ? <div data-testid="edit-reward-modal" /> : null,
@@ -52,6 +58,10 @@ const reward = {
   retryEnabled: true,
   retryConfig: {},
   merchantId: null,
+  categoryId: 7,
+  categoryName: 'Cashback',
+  subCategoryId: 21,
+  subCategoryName: 'Instant',
   status: 'active' as const,
   createdAt: '2026-01-01T00:00:00.000Z',
   updatedAt: '2026-01-01T00:00:00.000Z',
@@ -96,6 +106,8 @@ beforeEach(() => {
   mockUseDeleteRewardMutation.mockReturnValue({ mutateAsync: vi.fn(), isPending: false });
   mockUseRewardCountriesQuery.mockReturnValue({ data: [], isLoading: false });
   mockUseRewardPoliciesQuery.mockReturnValue({ data: [], isLoading: false });
+  mockUseVersionsQuery.mockReset();
+  mockUseVersionsQuery.mockReturnValue({ data: [], isLoading: false });
 });
 
 describe('RewardDetailPage', () => {
@@ -223,6 +235,100 @@ describe('RewardDetailPage', () => {
     await user.click(screen.getByRole('button', { name: /add policy/i }));
 
     expect(screen.getByTestId('add-policy-modal')).toBeInTheDocument();
+  });
+
+  it('T-120 TC-6: the Countries tab lists exactly the reward_country_assignments rows returned', async () => {
+    mockUseRewardQuery.mockReturnValue({ data: reward, isLoading: false, isError: false });
+    mockUseRewardCountriesQuery.mockReturnValue({
+      data: [
+        {
+          id: 500,
+          rewardId: 1,
+          countryId: 2,
+          countryCode: 'SG',
+          countryName: 'Singapore',
+          assignedAt: '2026-01-01T00:00:00.000Z',
+          assignedBy: null,
+        },
+        {
+          id: 501,
+          rewardId: 1,
+          countryId: 3,
+          countryCode: 'MY',
+          countryName: 'Malaysia',
+          assignedAt: '2026-02-01T00:00:00.000Z',
+          assignedBy: 4,
+        },
+      ],
+      isLoading: false,
+    });
+
+    const user = userEvent.setup();
+    renderPage({ 'reward:view': true });
+    await user.click(screen.getByRole('tab', { name: /countries/i }));
+
+    const panel = screen.getByRole('tabpanel');
+    const rows = within(panel).getAllByRole('listitem');
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toHaveTextContent('Singapore');
+    expect(rows[0]).toHaveTextContent('(SG)');
+    expect(rows[1]).toHaveTextContent('Malaysia');
+    expect(rows[1]).toHaveTextContent('(MY)');
+    // A country the reward is *not* assigned to never appears.
+    expect(within(panel).queryByText(/Thailand/)).not.toBeInTheDocument();
+  });
+
+  it('shows "Not assigned to any country yet" when the reward has no assignments', async () => {
+    mockUseRewardQuery.mockReturnValue({ data: reward, isLoading: false, isError: false });
+    const user = userEvent.setup();
+    renderPage({ 'reward:view': true });
+
+    await user.click(screen.getByRole('tab', { name: /countries/i }));
+
+    expect(screen.getByText(/not assigned to any country yet/i)).toBeInTheDocument();
+  });
+
+  it('shows the reward category and sub-category on the Overview tab', () => {
+    mockUseRewardQuery.mockReturnValue({ data: reward, isLoading: false, isError: false });
+
+    renderPage({ 'reward:view': true });
+
+    expect(screen.getByText('Cashback')).toBeInTheDocument();
+    expect(screen.getByText('Instant')).toBeInTheDocument();
+  });
+
+  it('shows the Kind of the newest published version, not of an in-flight draft', () => {
+    mockUseRewardQuery.mockReturnValue({ data: reward, isLoading: false, isError: false });
+    mockUseVersionsQuery.mockReturnValue({
+      data: [
+        { id: 1, versionNo: 1, status: 'published', rewardKind: 'FIXED_AMOUNT', valueConfig: {} },
+        { id: 2, versionNo: 2, status: 'draft', rewardKind: 'POINTS', valueConfig: {} },
+      ],
+      isLoading: false,
+    });
+
+    renderPage({ 'reward:view': true });
+
+    expect(screen.getByText('Fixed amount')).toBeInTheDocument();
+    expect(screen.queryByText('Points')).not.toBeInTheDocument();
+  });
+
+  it('shows the drafted Kind when nothing has been published yet, and "Not set" when there is none', () => {
+    mockUseRewardQuery.mockReturnValue({ data: reward, isLoading: false, isError: false });
+    mockUseVersionsQuery.mockReturnValue({
+      data: [{ id: 2, versionNo: 1, status: 'draft', rewardKind: 'POINTS', valueConfig: {} }],
+      isLoading: false,
+    });
+    const drafted = renderPage({ 'reward:view': true });
+    expect(screen.getByText('Points')).toBeInTheDocument();
+    drafted.unmount();
+
+    mockUseVersionsQuery.mockReturnValue({
+      data: [{ id: 2, versionNo: 1, status: 'draft', rewardKind: null, valueConfig: null }],
+      isLoading: false,
+    });
+    renderPage({ 'reward:view': true });
+    expect(screen.getByText('Not set')).toBeInTheDocument();
   });
 
   it('shows a 404/error state when the reward is not visible to the caller (TC-6)', () => {

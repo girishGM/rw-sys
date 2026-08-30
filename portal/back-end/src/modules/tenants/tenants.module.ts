@@ -8,6 +8,10 @@
  * (implementation note 8's bulk revoke — see `tenants.service.ts`'s own header for why this
  * module cannot reach the transaction that lives inside it); `DatabaseModule` supplies
  * `SEQUELIZE` for every multi-step transaction here.
+ *
+ * T-126 — `TenantCurrenciesController`/`Service` are additive registrations in this same module
+ * (that file's own header explains why they are a separate pair of files rather than an edit to
+ * the `done` `TenantsController`/`TenantsService` above).
  */
 import { Module } from '@nestjs/common';
 import { AuditModule } from '@/common/audit/audit.module';
@@ -16,11 +20,13 @@ import { DatabaseModule } from '@/database/database.module';
 import { AuthModule } from '@/modules/auth/auth.module';
 import { TenantsController } from './tenants.controller';
 import { TenantsService } from './tenants.service';
+import { TenantCurrenciesController } from './tenant-currencies.controller';
+import { TenantCurrenciesService } from './tenant-currencies.service';
 
 @Module({
   imports: [RbacModule, AuthModule, AuditModule, DatabaseModule],
-  controllers: [TenantsController],
-  providers: [TenantsService],
-  exports: [TenantsService],
+  controllers: [TenantsController, TenantCurrenciesController],
+  providers: [TenantsService, TenantCurrenciesService],
+  exports: [TenantsService, TenantCurrenciesService],
 })
 export class TenantsModule {}

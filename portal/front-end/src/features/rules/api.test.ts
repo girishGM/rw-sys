@@ -16,6 +16,8 @@ import {
   assignRuleCountry,
   createRule,
   deleteRule,
+  fetchFieldApiLookupProviders,
+  fetchFieldContextProviders,
   fetchRule,
   fetchRuleCategories,
   fetchRuleCountries,
@@ -145,8 +147,18 @@ describe('fetchRule', () => {
 
 describe('fetchRuleParameters', () => {
   it('requests /rules/:id/parameters and unwraps {data} (TC-15)', async () => {
+    // T-114 — every field now also carries a response-only `role`; the response is
+    // role-annotated even though the request that authored these fields never was.
     const parameters = {
-      fields: [{ key: 'minSpend', label: 'Minimum spend', type: 'number', required: true }],
+      fields: [
+        {
+          key: 'minSpend',
+          label: 'Minimum spend',
+          type: 'number',
+          required: true,
+          role: 'compare_value',
+        },
+      ],
     };
     mockGet.mockResolvedValue({ data: { data: parameters } });
 
@@ -328,5 +340,51 @@ describe('reference data', () => {
 
     await fetchRuleSubCategories(undefined);
     expect(mockGet).toHaveBeenLastCalledWith('/rule-sub-categories', { params: {} });
+  });
+});
+
+// T-125 — the field builder's "Where do the options come from?" picker reads these two.
+describe('field value-source registries', () => {
+  it('fetchFieldContextProviders requests /field-context-providers', async () => {
+    mockGet.mockResolvedValue({
+      data: {
+        data: [
+          {
+            id: 1,
+            providerCode: 'SIBLING_COMPONENTS',
+            name: 'Sibling components',
+            description: null,
+            status: 'active',
+          },
+        ],
+      },
+    });
+    const result = await fetchFieldContextProviders();
+    expect(mockGet).toHaveBeenCalledWith('/field-context-providers');
+    expect(result).toHaveLength(1);
+  });
+
+  it('fetchFieldApiLookupProviders requests /field-api-lookup-providers', async () => {
+    mockGet.mockResolvedValue({
+      data: {
+        data: [
+          {
+            id: 1,
+            providerCode: 'PRODUCT_CATALOG',
+            name: 'Product catalog',
+            description: null,
+            endpointUrl: 'PLACEHOLDER',
+            httpMethod: 'GET',
+            authType: 'none',
+            responseValueKey: 'id',
+            responseLabelKey: 'name',
+            status: 'planned',
+          },
+        ],
+      },
+    });
+    const result = await fetchFieldApiLookupProviders();
+    expect(mockGet).toHaveBeenCalledWith('/field-api-lookup-providers');
+    expect(result).toHaveLength(1);
   });
 });

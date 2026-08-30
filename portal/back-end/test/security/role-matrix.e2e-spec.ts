@@ -91,6 +91,7 @@ import {
   type PermissionGrants,
 } from './support/route-guard-inventory';
 import { bindTestServer } from './support/bound-app';
+import { fixtureCampaignWindow } from './support/fixture-campaign-window';
 
 jest.setTimeout(900_000);
 
@@ -315,7 +316,19 @@ async function ensureMerchant(
   return created.id;
 }
 
+/**
+ * A fixture campaign, created (or revived) with a start/end this database is allowed to hold.
+ *
+ * **The dates are not `now()`.** They are UTC midnight, produced by the portal's own
+ * `toStoredCampaignDate()` — see {@link fixtureCampaignWindow} for the full story. The reuse branch
+ * rewrites them for the same reason it rewrites `deleted_at`: a row this suite left behind on an
+ * earlier run is this suite's to bring back to a correct state, and a self-healing branch is what
+ * stops a row written by an older version of this file living on forever. That is exactly what
+ * happened — the two rows T-139 was filed for were written on 2026-08-22 and were still wrong
+ * eight days later.
+ */
 async function ensureCampaign(code: string, tenantId: number): Promise<number> {
+  const { start, end } = fixtureCampaignWindow();
   const [existing] = await sql<{ id: number }>(
     `SELECT id FROM reward_config.tenant_campaigns WHERE campaign_code = :code`,
     { code },
@@ -323,18 +336,19 @@ async function ensureCampaign(code: string, tenantId: number): Promise<number> {
   if (existing !== undefined) {
     await exec(
       `UPDATE reward_config.tenant_campaigns
-          SET deleted_at = NULL, tenant_id = :tenantId, name = :code, status = 'draft'
+          SET deleted_at = NULL, tenant_id = :tenantId, name = :code, status = 'draft',
+              start_date = :start, end_date = :end
         WHERE id = :id`,
-      { id: existing.id, tenantId, code },
+      { id: existing.id, tenantId, code, start, end },
     );
     return existing.id;
   }
   const [created] = await sql<{ id: number }>(
     `INSERT INTO reward_config.tenant_campaigns
             (tenant_id, campaign_code, name, start_date, end_date, status, created_by)
-     VALUES (:tenantId, :code, :code, now(), now() + interval '30 days', 'draft', 't051-e2e')
+     VALUES (:tenantId, :code, :code, :start, :end, 'draft', 't051-e2e')
      RETURNING id`,
-    { code, tenantId },
+    { code, tenantId, start, end },
   );
   return created.id;
 }

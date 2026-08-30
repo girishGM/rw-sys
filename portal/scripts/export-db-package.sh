@@ -20,6 +20,11 @@
 # Caught on this script's own first real run; fixed to an explicit table allow-list instead of
 # a schema-wide dump, on the same "an unscoped dump silently grabs the wrong thing" principle as
 # AGENT-PROTOCOL.md's test-scoping rule.
+#
+# T-131 (2026-08-30) added the five Wave 6 reference tables below, confirmed the same way: each
+# is global/tenant-scoped reference data seeded by its own migration (T116_001/T116_002,
+# T121_001/T121_002, T126_001), not per-user runtime state — same category as
+# rule_categories/rule_resolvers above, none of them hold session, credential or audit data.
 SEED_TABLES=(
   reward_config.role_entity_permissions
   reward_config.role_nav_configs
@@ -33,6 +38,11 @@ SEED_TABLES=(
   reward_config.rule_sub_categories
   reward_config.rule_master
   reward_config.rule_versions
+  reward_config.reward_categories
+  reward_config.reward_sub_categories
+  reward_config.field_context_providers
+  reward_config.field_api_lookup_providers
+  reward_config.tenant_currencies
 )
 #
 # Usage (from portal/, with Node 20 on PATH):

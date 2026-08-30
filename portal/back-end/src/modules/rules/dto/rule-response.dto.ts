@@ -82,6 +82,39 @@ export function toRuleParametersDto(rule: RuleMaster): Record<string, unknown> {
   return rule.parameters;
 }
 
+/**
+ * T-114 — `13-REWARD-MASTER-VALUE-SOURCES.md` §2: annotates every field of an already-built
+ * `parameters` blob (from {@link toRuleDto}/{@link toRuleParametersDto}, `rule_master.parameters`
+ * shaped as `{ fields: [...] }`) with its response-only `role` — `resolver_input` when the
+ * field's `key` is one of the rule's wired resolver's `resolver_input_field_keys`
+ * (`rules.service.ts` loads that set; this function only ever consumes it, never queries),
+ * `compare_value` otherwise, including every field when `resolverInputFieldKeys` is empty (an
+ * unwired rule, T-114 TC-4). Never mutates its input. Tolerant of a malformed/legacy
+ * `parameters` blob with no `fields` array — same "never throws" discipline
+ * `rule-master.model.ts`'s own getter documents — returning it unchanged rather than guessing
+ * at a shape it cannot annotate.
+ */
+export function withParameterFieldRoles(
+  parameters: Record<string, unknown>,
+  resolverInputFieldKeys: ReadonlySet<string>,
+): Record<string, unknown> {
+  const fields = (parameters as { fields?: unknown }).fields;
+  if (!Array.isArray(fields)) return parameters;
+
+  return {
+    ...parameters,
+    fields: fields.map((field) => {
+      if (typeof field !== 'object' || field === null || !('key' in field)) return field;
+      const key = (field as { key: unknown }).key;
+      const role =
+        typeof key === 'string' && resolverInputFieldKeys.has(key)
+          ? 'resolver_input'
+          : 'compare_value';
+      return { ...(field as Record<string, unknown>), role };
+    }),
+  };
+}
+
 export interface RuleCountryAssignmentDto {
   readonly id: number;
   readonly ruleId: number;

@@ -21,6 +21,7 @@
  * fail-fast UX) validate against this one definition, so the two can never silently drift.
  */
 import { z } from 'zod';
+import { providerCodeSchema } from './field-value-source.schema';
 
 /** `reward_config.rule_master.status` / `reward_systems.status` — `ck_rm_status`. */
 export const RULE_STATUSES = ['active', 'inactive'] as const;
@@ -32,8 +33,35 @@ export const RULE_PARAMETER_TYPES = ['string', 'number', 'boolean', 'date', 'sel
 export const ruleParameterTypeSchema = z.enum(RULE_PARAMETER_TYPES);
 export type RuleParameterType = z.infer<typeof ruleParameterTypeSchema>;
 
-/** One field of a rule's `parameters` meta-schema. */
-export const ruleParameterFieldSchema = z
+/**
+ * T-122 — `13-REWARD-MASTER-VALUE-SOURCES.md` §3: where a `select` field's options come from,
+ * when they are not the Super Admin's own hand-typed `options` array.
+ *
+ * There is deliberately **no `STATIC_LIST` variant**. A plain `select` with `options` and no
+ * `valueSource` already *is* the fixed-list case; a third variant would be a second way to say
+ * the same thing, and two representations of one state is how they drift apart.
+ *
+ * The provider code is validated with {@link providerCodeSchema}, the same constraint the
+ * registries themselves apply on create (`field-value-source.schema.ts`, which anticipates this
+ * reuse in its own comment) — not a bare `z.string()`. Nothing legitimate is rejected by it (a
+ * provider cannot be registered under a code that fails that pattern), and it keeps an empty or
+ * junk string from travelling as far as a registry lookup. Which codes actually *exist* is not
+ * knowable here — that is a live registry read, done server-side in `rules.service.ts`.
+ */
+export const RULE_FIELD_VALUE_SOURCE_KINDS = ['CONTEXT_LOOKUP', 'API_LOOKUP'] as const;
+
+export const ruleFieldValueSourceSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('CONTEXT_LOOKUP'), contextProvider: providerCodeSchema }).strict(),
+  z.object({ kind: z.literal('API_LOOKUP'), apiProvider: providerCodeSchema }).strict(),
+]);
+
+export type RuleFieldValueSource = z.infer<typeof ruleFieldValueSourceSchema>;
+
+/** The shape shared by every field of a rule's `parameters` meta-schema — the request/write
+ * form (`ruleParameterFieldSchema`, below) and the response-only, role-annotated form
+ * (`ruleParameterFieldWithRoleSchema`, T-114) both `.extend()` this same base rather than
+ * duplicating its fields, so the two can never silently drift. */
+const ruleParameterFieldBaseSchema = z
   .object({
     /** The key a Maker's supplied value is keyed under at campaign time. Identifier-shaped —
      * this travels into a JSON object key and (eventually) into the rules engine's input. */
@@ -41,34 +69,111 @@ export const ruleParameterFieldSchema = z
     label: z.string().min(1).max(200),
     type: ruleParameterTypeSchema,
     required: z.boolean(),
-    /** `type: 'select'` only — the choices a Maker may pick from. */
+    /** `type: 'select'` only — the choices a Maker may pick from, hand-typed by the rule author. */
     options: z.array(z.string().min(1).max(100)).max(50).optional(),
+    /** T-122 — `type: 'select'` only, and mutually *alternative* to `options` rather than
+     * exclusive with it: the choices come from a registered context/API lookup provider instead
+     * of being typed out here. See {@link ruleFieldValueSourceSchema}. */
+    valueSource: ruleFieldValueSourceSchema.optional(),
     /** `type: 'number'` only — an inclusive bound the wizard enforces client-side. */
     min: z.number().optional(),
     max: z.number().optional(),
     helpText: z.string().max(500).optional(),
   })
-  .strict()
-  .refine((field) => field.type !== 'select' || (field.options?.length ?? 0) > 0, {
-    message: "a 'select' field requires at least one option",
-    path: ['options'],
-  });
+  .strict();
+
+/** The subset of a parameter field the two cross-key refinements below read. Declared once so
+ * both predicates, and both the write and response shapes that apply them, agree on it. */
+interface RuleParameterFieldConstraints {
+  readonly type: RuleParameterType;
+  readonly options?: string[];
+  readonly valueSource?: RuleFieldValueSource;
+}
+
+/**
+ * A `'select'` field must say where its choices come from — **either** at least one hand-typed
+ * `options` entry **or** a `valueSource` (T-122). Never both required: those are the two ways to
+ * populate one dropdown, and requiring `options` alongside a `valueSource` would force the rule
+ * author to hand-type the very list the provider exists to supply.
+ *
+ * Supplying both is *permitted* rather than rejected — a fixed list plus a provider is a
+ * meaningful authoring state (T-125 decides how to present it), and the task's own wording is
+ * "valid when either is present", not "exactly one".
+ */
+function requireOptionsOrValueSourceOnSelect(field: RuleParameterFieldConstraints): boolean {
+  return (
+    field.type !== 'select' || (field.options?.length ?? 0) > 0 || field.valueSource !== undefined
+  );
+}
+const SELECT_OPTIONS_REFINEMENT: { message: string; path: string[] } = {
+  message: "a 'select' field requires at least one option or a valueSource",
+  path: ['options'],
+};
+
+/** T-122 — a `valueSource` populates a dropdown, so it only means anything on a `select` field.
+ * Setting one on a `string`/`number`/`boolean`/`date` field is an authoring mistake that would
+ * otherwise be stored and silently ignored forever (TC-6). */
+function valueSourceOnlyOnSelect(field: RuleParameterFieldConstraints): boolean {
+  return field.valueSource === undefined || field.type === 'select';
+}
+const VALUE_SOURCE_TYPE_REFINEMENT: { message: string; path: string[] } = {
+  message: "only a 'select' field may declare a valueSource",
+  path: ['valueSource'],
+};
+
+/** One field of a rule's `parameters` meta-schema — the request/write shape. `role` (T-114,
+ * §2 below) is deliberately **not** a key here: it is never client-writable, and a request body
+ * that supplies one 400s via this `.strict()` (T-114 TC-6) rather than being silently accepted
+ * or ignored. */
+export const ruleParameterFieldSchema = ruleParameterFieldBaseSchema
+  .refine(requireOptionsOrValueSourceOnSelect, SELECT_OPTIONS_REFINEMENT)
+  .refine(valueSourceOnlyOnSelect, VALUE_SOURCE_TYPE_REFINEMENT);
 
 export type RuleParameterField = z.infer<typeof ruleParameterFieldSchema>;
 
-/** `rule_master.parameters`, parsed. At most `RULE_PARAMETERS_MAX_FIELDS` (50) fields, each
- * with a `key` unique within the object — both enforced by `.refine` rather than by the shape
- * alone, since Zod's object/array primitives cannot express "unique across siblings". */
+/**
+ * T-114 — `13-REWARD-MASTER-VALUE-SOURCES.md` §2: does the Maker's value for this field feed
+ * the rule's wired resolver's own lookup (`resolver_input`), or get compared against the fact
+ * the resolver returns (`compare_value`)? Server-computed, per response, from
+ * `rule_resolvers.resolver_input_field_keys` — never a manually-chosen or client-writable
+ * property. This enum and `ruleParameterFieldWithRoleSchema` below back the **response-only**
+ * extension of {@link ruleParameterFieldSchema}; the write schema itself never gains this key.
+ */
+export const RULE_FIELD_ROLES = ['compare_value', 'resolver_input'] as const;
+export const ruleFieldRoleSchema = z.enum(RULE_FIELD_ROLES);
+export type RuleFieldRole = z.infer<typeof ruleFieldRoleSchema>;
+
+/** Response-only counterpart of {@link ruleParameterFieldSchema}, `role` added. Used exclusively
+ * by response DTOs (`ruleSchema`, `ruleParametersEnvelopeSchema`) — never by
+ * `createRuleRequestSchema`/`updateRuleRequestSchema`. */
+export const ruleParameterFieldWithRoleSchema = ruleParameterFieldBaseSchema
+  .extend({ role: ruleFieldRoleSchema })
+  .strict()
+  .refine(requireOptionsOrValueSourceOnSelect, SELECT_OPTIONS_REFINEMENT)
+  .refine(valueSourceOnlyOnSelect, VALUE_SOURCE_TYPE_REFINEMENT);
+
+export type RuleParameterFieldWithRole = z.infer<typeof ruleParameterFieldWithRoleSchema>;
+
+/** At most `RULE_PARAMETERS_MAX_FIELDS` (50) fields, each with a `key` unique within the
+ * object — enforced by `.refine` rather than by the shape alone, since Zod's object/array
+ * primitives cannot express "unique across siblings". Shared by both the write shape below and
+ * its response-only, role-annotated counterpart (T-114) so the uniqueness rule can never drift
+ * between the two. */
+function uniqueFieldKeys(parameters: { fields: ReadonlyArray<{ key: string }> }): boolean {
+  return new Set(parameters.fields.map((field) => field.key)).size === parameters.fields.length;
+}
+const UNIQUE_FIELD_KEYS_REFINEMENT: { message: string; path: string[] } = {
+  message: 'field keys must be unique',
+  path: ['fields'],
+};
+
+/** `rule_master.parameters`, parsed — the write shape. */
 const ruleParametersShapeSchema = z
   .object({
     fields: z.array(ruleParameterFieldSchema).max(50),
   })
   .strict()
-  .refine(
-    (parameters) =>
-      new Set(parameters.fields.map((field) => field.key)).size === parameters.fields.length,
-    { message: 'field keys must be unique', path: ['fields'] },
-  );
+  .refine(uniqueFieldKeys, UNIQUE_FIELD_KEYS_REFINEMENT);
 
 /**
  * T-074 (fix). `rule_master.parameters` is `text` holding JSON, and its own model getter
@@ -105,8 +210,31 @@ export const ruleParametersSchema = z.preprocess(
 
 export type RuleParameters = z.infer<typeof ruleParametersSchema>;
 
+/**
+ * T-114 — the response-only counterpart of {@link ruleParametersSchema}: identical shape, every
+ * field additionally carrying the server-computed `role` {@link ruleParameterFieldWithRoleSchema}
+ * defines. Backs `ruleSchema.parameters` and `ruleParametersEnvelopeSchema` below — never a
+ * request/write schema, so a client cannot submit a `role` and have it silently accepted (T-114
+ * TC-6: it 400s against the unmodified {@link ruleParametersSchema} instead).
+ */
+const ruleParametersWithRoleShapeSchema = z
+  .object({
+    fields: z.array(ruleParameterFieldWithRoleSchema).max(50),
+  })
+  .strict()
+  .refine(uniqueFieldKeys, UNIQUE_FIELD_KEYS_REFINEMENT);
+
+export const ruleParametersWithRoleSchema = z.preprocess(
+  normaliseEmptyRuleParameters,
+  ruleParametersWithRoleShapeSchema,
+);
+
+export type RuleParametersWithRole = z.infer<typeof ruleParametersWithRoleSchema>;
+
 /** One row of `GET /rules` / `GET /rules/:id`. `expression` is inert text — never evaluated by
- * the portal (implementation note 5) — and is included here only for the editor screen. */
+ * the portal (implementation note 5) — and is included here only for the editor screen.
+ * `parameters` is the response-only, role-annotated shape (T-114) — this is a read path, never
+ * the request body a Maker/Super Admin submits. */
 export const ruleSchema = z
   .object({
     id: z.number().int(),
@@ -117,7 +245,7 @@ export const ruleSchema = z
     subCategoryId: z.number().int(),
     subCategoryName: z.string(),
     expression: z.string().nullable(),
-    parameters: ruleParametersSchema,
+    parameters: ruleParametersWithRoleSchema,
     status: ruleStatusSchema,
     createdBy: z.number().int().nullable(),
     createdAt: z.string(),
@@ -170,8 +298,12 @@ export const updateRuleRequestSchema = z
 export type UpdateRuleRequest = z.infer<typeof updateRuleRequestSchema>;
 
 /** `GET /rules/:id/parameters` — the parsed schema a Maker's campaign-wizard form renders
- * from (TC-15). */
-export const ruleParametersEnvelopeSchema = z.object({ data: ruleParametersSchema }).strict();
+ * from (TC-15). Role-annotated (T-114) — same reasoning `ruleSchema.parameters` documents:
+ * this is a read path, so the wizard knows which fields to render as Maker input
+ * (`compare_value`) versus which are consumed by the resolver itself (`resolver_input`). */
+export const ruleParametersEnvelopeSchema = z
+  .object({ data: ruleParametersWithRoleSchema })
+  .strict();
 
 /** One row of `GET /rules/:id/countries` — a `rule_country_assignments` row, joined for
  * display. */
@@ -283,7 +415,10 @@ export type UpdateRuleSubCategoryRequest = z.infer<typeof updateRuleSubCategoryR
 export const ruleSubCategoryEnvelopeSchema = z.object({ data: ruleSubCategorySchema }).strict();
 
 /** `GET /rule-resolvers`. Read-only reference data (T-108) — declares *how* to fetch a fact;
- * `handlerClass`/`inputSchema` are backend-only and deliberately not part of this wire contract. */
+ * `handlerClass`/`inputSchema` are backend-only and deliberately not part of this wire contract.
+ * `resolverInputFieldKeys` (T-114) is the data a parameter field's `role` is computed from — see
+ * `ruleFieldRoleSchema` above; exposed here so the Super Admin's rule editor (T-115) can explain
+ * *why* a given field is `resolver_input`, not just that it is. */
 export const ruleResolverSchema = z
   .object({
     id: z.number().int(),
@@ -291,6 +426,7 @@ export const ruleResolverSchema = z
     name: z.string(),
     description: z.string().nullable(),
     status: z.string(),
+    resolverInputFieldKeys: z.array(z.string()),
   })
   .strict();
 

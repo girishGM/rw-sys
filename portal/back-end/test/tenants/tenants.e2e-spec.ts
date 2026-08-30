@@ -156,6 +156,16 @@ async function cleanupTenant(code: string): Promise<void> {
       WHERE tenant_id = (SELECT id FROM reward_config.tenants WHERE code = :code)`,
     { code },
   );
+  // T-143: `POST /tenants` now inserts a default `reward_config.tenant_currencies` row for
+  // every tenant it creates (this suite's own tenants included) — `tenant_currencies.tenant_id`
+  // is a plain `references reward_config.tenants(id)` FK with no `ON DELETE CASCADE`
+  // (T126_001), so the hard delete below would now fail with a foreign-key violation without
+  // this. Must run before the `tenants` delete for the same reason.
+  await exec(
+    `DELETE FROM reward_config.tenant_currencies
+      WHERE tenant_id = (SELECT id FROM reward_config.tenants WHERE code = :code)`,
+    { code },
+  );
   await exec(`DELETE FROM reward_config.tenants WHERE code = :code`, { code });
 }
 
@@ -353,5 +363,108 @@ describe('T-059 — negative authorisation (R6)', () => {
     });
 
     expect(response.status).toBe(404);
+  });
+});
+
+/**
+ * T-143 — `POST /tenants` never inserted a default `reward_config.tenant_currencies` row,
+ * silently violating T-126's own invariant ("a tenant with no extra rows still has its
+ * country's currency available", 13-REWARD-MASTER-VALUE-SOURCES.md §4) for every tenant created
+ * through the real app since T126_001's migration ran. Proven here against the real database and
+ * over real HTTP — through `GET /tenants/:id/currencies` (T-126's own endpoint), not by reading
+ * `tenant_currencies` directly — because a `FakeScopedRepository` unit test cannot prove the
+ * insert actually lands in Postgres, and reading only via SQL cannot prove the app's own read
+ * path (`TenantCurrenciesService.list`, scope included) actually surfaces the row either.
+ */
+describe('T-143 — POST /tenants seeds a default tenant_currencies row', () => {
+  it('the new tenant has exactly one default currency, matching its country, visible through GET /tenants/:id/currencies (TC-2)', async () => {
+    const countryAdmin = await makeCountryAdmin('t143-default-currency');
+    fixtureUserEmails.push(countryAdmin.email);
+
+    const tenantCode = 'T143A';
+    fixtureTenantCodes.push(tenantCode);
+
+    const created = await post(countryAdmin, '/tenants', {
+      code: tenantCode,
+      name: 'T-143 E2E Tenant',
+    });
+    expect(created.status).toBe(201);
+    const tenantId: number = created.body.data.tenant.id;
+
+    const currencies = await http()
+      .get(`/api/v1/tenants/${tenantId}/currencies`)
+      .set('Cookie', countryAdmin.jar)
+      .set('X-CSRF-Token', countryAdmin.csrf);
+
+    expect(currencies.status).toBe(200);
+    // `ensureCountry('T9', …)` (this file's own fixture, above) seeds `currency_code = 'USD'` —
+    // asserting that value, not just `isDefault: true` in isolation, is what proves the row
+    // carries the *tenant's own country's* currency (T126_001's backfill shape) rather than a
+    // hard-coded constant that would also make this assertion pass by accident.
+    expect(currencies.body.data).toEqual([
+      expect.objectContaining({ currencyCode: 'USD', isDefault: true, status: 'active' }),
+    ]);
+
+    // Belt-and-braces: the row is real, in the real table, not just shaped correctly by the DTO
+    // mapper — `uq_tc_one_default` (T126_001) guarantees at most one, this proves at least one.
+    const [row] = await sql<{ count: string }>(
+      `SELECT count(*)::int AS count FROM reward_config.tenant_currencies
+        WHERE tenant_id = :tenantId AND is_default AND currency_code = 'USD'`,
+      { tenantId },
+    );
+    expect(Number(row.count)).toBe(1);
+  });
+
+  it('a tenant created with a nested admin also gets its default currency, in the same transaction (TC-4 — the T-059 admin-provisioning path is unchanged)', async () => {
+    const countryAdmin = await makeCountryAdmin('t143-with-admin');
+    fixtureUserEmails.push(countryAdmin.email);
+
+    const tenantCode = 'T143B';
+    fixtureTenantCodes.push(tenantCode);
+    const adminEmail = 't143-e2e-tenant-admin@example.invalid';
+    fixtureUserEmails.push(adminEmail);
+
+    const created = await post(countryAdmin, '/tenants', {
+      code: tenantCode,
+      name: 'T-143 E2E Tenant With Admin',
+      admin: { email: adminEmail, displayName: 'T-143 E2E Tenant Admin' },
+    });
+    expect(created.status).toBe(201);
+
+    const [row] = await sql<{ count: string }>(
+      `SELECT count(*)::int AS count FROM reward_config.tenant_currencies
+        WHERE tenant_id = :tenantId AND is_default`,
+      { tenantId: created.body.data.tenant.id },
+    );
+    expect(Number(row.count)).toBe(1);
+  });
+
+  it('a rolled-back tenant insert (duplicate code) leaves no orphan currency row either (TC-4 — atomicity unchanged)', async () => {
+    const countryAdmin = await makeCountryAdmin('t143-dup-code');
+    fixtureUserEmails.push(countryAdmin.email);
+
+    const tenantCode = 'T143C';
+    fixtureTenantCodes.push(tenantCode);
+
+    const first = await post(countryAdmin, '/tenants', { code: tenantCode, name: 'First' });
+    expect(first.status).toBe(201);
+
+    const second = await post(countryAdmin, '/tenants', { code: tenantCode, name: 'Second' });
+    expect(second.status).toBe(409);
+
+    // Exactly one tenant, one default currency row — the duplicate attempt left nothing behind,
+    // in either table.
+    const [tenantCount] = await sql<{ count: string }>(
+      'SELECT count(*)::int AS count FROM reward_config.tenants WHERE code = :code',
+      { code: tenantCode },
+    );
+    expect(Number(tenantCount.count)).toBe(1);
+
+    const [currencyCount] = await sql<{ count: string }>(
+      `SELECT count(*)::int AS count FROM reward_config.tenant_currencies
+        WHERE tenant_id = (SELECT id FROM reward_config.tenants WHERE code = :code)`,
+      { code: tenantCode },
+    );
+    expect(Number(currencyCount.count)).toBe(1);
   });
 });

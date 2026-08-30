@@ -76,14 +76,18 @@ import {
   Country,
   DefinitionRequest,
   EntityAssignment,
+  FieldApiLookupProvider,
+  FieldContextProvider,
   Merchant,
   MerchantActivity,
   MerchantStore,
   RbacCacheConfig,
   RewardCampaignAssignment,
+  RewardCategory,
   RewardComponentAssignment,
   RewardCountryAssignment,
   RewardPolicy,
+  RewardSubCategory,
   RewardSystem,
   RewardTrackerAssignment,
   RewardVersion,
@@ -105,6 +109,7 @@ import {
   TenantBudgetCeiling,
   TenantCampaign,
   TenantCampaignTracker,
+  TenantCurrency,
   Tracker,
   TrackerComponent,
   TrackerComponentRule,
@@ -332,6 +337,52 @@ const STRATEGIES = new Map<ModelStatic<Model>, ScopeStrategy>([
       note:
         'T-102 registry — comparison operators. Seed-managed reference data, no tenant column ' +
         'at all; every role needs it to render an operator picker (T-108).',
+      country: unrestricted(),
+      tenant: unrestricted(),
+      merchant: unrestricted(),
+    },
+  ],
+  [
+    FieldContextProvider,
+    {
+      note:
+        'T-121 registry — field value sources that read the campaign draft. Seed-managed ' +
+        'reference data, no tenant column at all; every role needs it to render a value-source ' +
+        'picker. Writes are super_admin-only, enforced at the controller and again in the ' +
+        'service — not by this strategy.',
+      country: unrestricted(),
+      tenant: unrestricted(),
+      merchant: unrestricted(),
+    },
+  ],
+  [
+    FieldApiLookupProvider,
+    {
+      note:
+        'T-121 registry — field value sources that call a pre-registered endpoint. Same ' +
+        'reasoning as FieldContextProvider above. `auth_config_enc` is encrypted at rest and ' +
+        'never reaches a response DTO, so `unrestricted` reads expose no credential.',
+      country: unrestricted(),
+      tenant: unrestricted(),
+      merchant: unrestricted(),
+    },
+  ],
+  [
+    RewardCategory,
+    {
+      note:
+        'T-116 — the reward equivalent of `RuleCategory` above, same reasoning: Super-Admin-' +
+        'owned reference data, carries a `tenant_id` column that is a NOT NULL technicality, ' +
+        'not a real scope (every role needs the full category list to render a picker).',
+      country: unrestricted(),
+      tenant: unrestricted(),
+      merchant: unrestricted(),
+    },
+  ],
+  [
+    RewardSubCategory,
+    {
+      note: 'T-116 — the reward equivalent of `RuleSubCategory` above. Reference data.',
       country: unrestricted(),
       tenant: unrestricted(),
       merchant: unrestricted(),
@@ -643,6 +694,15 @@ const STRATEGIES = new Map<ModelStatic<Model>, ScopeStrategy>([
       country: subquery('tenantId', 'country', TENANTS_IN_COUNTRY),
       tenant: column('tenantId', 'tenant'),
       merchant: deny(),
+    },
+  ],
+  [
+    TenantCurrency,
+    {
+      note: "T-126 — a tenant’s supported-currency list (13-REWARD-MASTER-VALUE-SOURCES.md §4). Tenant-wide, not merchant-specific — a merchant reaches it by its own tenant, the same \"axis under a different key\" shape Tenant’s own merchant entry uses (`column('id', 'tenant')` there), unlike TenantBudgetCeiling above, which denies merchant outright: this table has a `role_entity_permissions` row for every role (T126_002), including merchant, so the merchant axis must actually resolve rather than deny.",
+      country: subquery('tenantId', 'country', TENANTS_IN_COUNTRY),
+      tenant: column('tenantId', 'tenant'),
+      merchant: column('tenantId', 'tenant'),
     },
   ],
   [

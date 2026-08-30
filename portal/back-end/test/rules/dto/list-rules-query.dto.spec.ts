@@ -25,6 +25,26 @@ describe('ListRulesQueryDto', () => {
     expect(errors).toHaveLength(0);
   });
 
+  it('T-111: accepts categoryId, subCategoryId and search', async () => {
+    const errors = await errorsFor({ categoryId: '3', subCategoryId: '7', search: 'SCAN' });
+    expect(errors).toHaveLength(0);
+  });
+
+  it('T-111: rejects categoryId < 1', async () => {
+    const errors = await errorsFor({ categoryId: '0' });
+    expect(errors.some((error) => error.property === 'categoryId')).toBe(true);
+  });
+
+  it('T-111: rejects subCategoryId < 1', async () => {
+    const errors = await errorsFor({ subCategoryId: '0' });
+    expect(errors.some((error) => error.property === 'subCategoryId')).toBe(true);
+  });
+
+  it('T-111: rejects a search term over the max length', async () => {
+    const errors = await errorsFor({ search: 'x'.repeat(101) });
+    expect(errors.some((error) => error.property === 'search')).toBe(true);
+  });
+
   it('rejects page < 1', async () => {
     const errors = await errorsFor({ page: '0' });
     expect(errors.some((error) => error.property === 'page')).toBe(true);

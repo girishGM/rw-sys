@@ -11,6 +11,8 @@ import {
   createRuleCategoryRequestSchema,
   createRuleRequestSchema,
   createRuleSubCategoryRequestSchema,
+  fieldApiLookupProviderListEnvelopeSchema,
+  fieldContextProviderListEnvelopeSchema,
   ruleCategoryEnvelopeSchema,
   ruleCategoryListEnvelopeSchema,
   ruleCountryAssignmentEnvelopeSchema,
@@ -29,6 +31,8 @@ import {
   type CreateRuleCategoryRequest,
   type CreateRuleRequest,
   type CreateRuleSubCategoryRequest,
+  type FieldApiLookupProvider,
+  type FieldContextProvider,
   type Rule,
   type RuleCategory,
   type RuleCountryAssignment,
@@ -48,6 +52,12 @@ export interface RuleListParams {
   readonly pageSize?: number;
   readonly status?: string;
   readonly sort?: string;
+  /** T-111 — rules whose sub-category rolls up to this category. */
+  readonly categoryId?: number;
+  /** T-111 — exact sub-category match; wins over `categoryId` when both are set. */
+  readonly subCategoryId?: number;
+  /** T-111 — plain-text match against `ruleCode`/`name`, case-insensitive. */
+  readonly search?: string;
 }
 
 export interface RuleListResult {
@@ -475,4 +485,51 @@ export async function fetchRuleOperators(): Promise<readonly RuleOperator[]> {
 
 export function useRuleOperatorsQuery() {
   return useQuery({ queryKey: ['rule-operators'], queryFn: fetchRuleOperators });
+}
+
+// --- T-125: field value-source registries (read-only) ------------------------------------------
+//
+// Feeds the field builder's "Where do the options come from?" picker (`ParameterFieldsEditor`):
+// `GET /field-context-providers` for the "This journey" choice, `GET /field-api-lookup-providers`
+// for "Live lookup" — both T-121, every role may read them (13-REWARD-MASTER-VALUE-SOURCES.md §3).
+
+export async function fetchFieldContextProviders(): Promise<readonly FieldContextProvider[]> {
+  try {
+    const response = await api.get<unknown>('/field-context-providers');
+    const parsed = fieldContextProviderListEnvelopeSchema.safeParse(response.data);
+    if (!parsed.success) {
+      throw new Error(
+        `Field context providers response did not match the expected shape: ${parsed.error.message}`,
+      );
+    }
+    return parsed.data.data;
+  } catch (error) {
+    throw toApiError(error);
+  }
+}
+
+export function useFieldContextProvidersQuery() {
+  return useQuery({ queryKey: ['field-context-providers'], queryFn: fetchFieldContextProviders });
+}
+
+export async function fetchFieldApiLookupProviders(): Promise<readonly FieldApiLookupProvider[]> {
+  try {
+    const response = await api.get<unknown>('/field-api-lookup-providers');
+    const parsed = fieldApiLookupProviderListEnvelopeSchema.safeParse(response.data);
+    if (!parsed.success) {
+      throw new Error(
+        `Field API lookup providers response did not match the expected shape: ${parsed.error.message}`,
+      );
+    }
+    return parsed.data.data;
+  } catch (error) {
+    throw toApiError(error);
+  }
+}
+
+export function useFieldApiLookupProvidersQuery() {
+  return useQuery({
+    queryKey: ['field-api-lookup-providers'],
+    queryFn: fetchFieldApiLookupProviders,
+  });
 }

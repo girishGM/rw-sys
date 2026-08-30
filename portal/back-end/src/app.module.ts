@@ -31,6 +31,7 @@ import { ApprovalsModule } from '@/modules/approvals/approvals.module';
 import { GrpcModule } from '@/grpc/grpc.module';
 import { CampaignAgentModule } from '@/modules/campaign-agent/agent.module';
 import { DashboardModule } from '@/modules/dashboard/dashboard.module';
+import { FieldValueSourcesModule } from '@/modules/field-value-sources/field-value-sources.module';
 
 /**
  * Append-only registration point (05-EXECUTION-PLAN.md §3): each task adds its own module
@@ -225,6 +226,11 @@ import { DashboardModule } from '@/modules/dashboard/dashboard.module';
   // last, after `TenantsModule`/`MerchantPortalModule`, both of which it imports directly for the
   // two services it deliberately reuses rather than re-derives (`dashboard.service.ts`'s own
   // header).
+  // T-121 appended FieldValueSourcesModule (`/field-context-providers`,
+  // `/field-api-lookup-providers`) — the two pluggable value-source registries
+  // (13-REWARD-MASTER-VALUE-SOURCES.md §3). Registers no global guard, interceptor or filter, so
+  // its position here carries no ordering meaning; listed last, appended per 05-EXECUTION-PLAN.md
+  // §3.
   imports: [
     LoggerModule,
     TracingModule,
@@ -258,6 +264,7 @@ import { DashboardModule } from '@/modules/dashboard/dashboard.module';
     GrpcModule,
     CampaignAgentModule,
     DashboardModule,
+    FieldValueSourcesModule,
   ],
 })
 export class AppModule {}

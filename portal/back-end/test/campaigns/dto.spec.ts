@@ -328,5 +328,70 @@ describe('T-037 DTOs', () => {
         errorsFor(AttachRewardDto, { level: 'component', refId: 7, rewardPolicyId: 3 }),
       ).toEqual([]);
     });
+
+    // T-127 — `promoCodeConfig`. Whether it is *allowed* for a given reward is the service's
+    // question (it depends on that reward's live version, which no DTO can see); what this layer
+    // owns is its shape, and that an ordinary attach is unchanged by its existence.
+    it('T-127: accepts an attachment carrying a promo code config', () => {
+      expect(
+        errorsFor(AttachRewardDto, {
+          level: 'campaign',
+          rewardPolicyId: 3,
+          promoCodeConfig: 'RAYA_2026',
+        }),
+      ).toEqual([]);
+    });
+
+    it('T-127: an attachment with no promo code config is still valid — that is the normal path', () => {
+      expect(errorsFor(AttachRewardDto, { level: 'campaign', rewardPolicyId: 3 })).toEqual([]);
+    });
+
+    it('T-127: rejects an empty promo code config rather than storing a blank pick', () => {
+      expect(
+        errorsFor(AttachRewardDto, {
+          level: 'campaign',
+          rewardPolicyId: 3,
+          promoCodeConfig: '',
+        }),
+      ).toContain('isLength');
+    });
+
+    it('T-127: rejects a promo code config beyond 200 characters', () => {
+      expect(
+        errorsFor(AttachRewardDto, {
+          level: 'campaign',
+          rewardPolicyId: 3,
+          promoCodeConfig: 'x'.repeat(201),
+        }),
+      ).toContain('isLength');
+    });
+
+    it('T-127: rejects a non-string promo code config', () => {
+      expect(
+        errorsFor(AttachRewardDto, {
+          level: 'campaign',
+          rewardPolicyId: 3,
+          promoCodeConfig: 42,
+        }),
+      ).toContain('isString');
+    });
+
+    it('T-127: rejects null, which is how a careless client spells "nothing picked"', () => {
+      // The contract is an **absent** key, never an explicit null (see the shared schema's own
+      // comment) — the SPA spreads the key in only when there is a value.
+      //
+      // Asserted as *"the body is refused"*, not as *"`isString` fired"*: `@IsOptional()` treats
+      // `null` as absent, so the refusal comes from the shared zod contract this DTO validates
+      // against rather than from the property decorator. Which of the two catches it is an
+      // implementation detail; that a `null` never reaches the service is the property, and it is
+      // proved end to end by `t127-promo-code-attach.e2e-spec.ts`'s 400 over real HTTP (§3).
+      expect(
+        errorsFor(AttachRewardDto, {
+          level: 'campaign',
+          rewardPolicyId: 3,
+          promoCodeConfig: null,
+        }),
+      ).not.toEqual([]);
+    });
   });
 });

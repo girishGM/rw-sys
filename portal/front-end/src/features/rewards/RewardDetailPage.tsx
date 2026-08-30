@@ -3,10 +3,18 @@
  * country assignments. Every write action here is gated a second, independent time on the
  * server (`RewardsController`'s `@RequirePermission`/`@Roles`), exactly as
  * `RuleDetailPage.tsx`'s own header documents: hiding a control is UX, not the control.
+ *
+ * T-120 — the Countries tab this task asks for **already existed here** (T-032 built it, reading
+ * `GET /rewards/:id/countries`), so implementation note 5's "reuse that view logic if it exists
+ * rather than re-implementing it under a new tab" resolves to: leave it alone, and cover it with
+ * the test it never had (TC-6). What is genuinely new on this screen is additive display only —
+ * the reward's category/sub-category (T-118) and its current Kind/value (T-119, which lives on the
+ * reward's latest version, not on the reward row — 13-REWARD-MASTER-VALUE-SOURCES.md §5).
  */
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { Ban, Globe2, Pencil, Plus, Trash2 } from 'lucide-react';
+import type { RewardKind } from '@reward-portal/shared';
 import { Badge } from '../../components/Badge';
 import { Button } from '../../components/Button';
 import { Card, CardBody, CardHeader } from '../../components/Card';
@@ -18,6 +26,8 @@ import { Tabs } from '../../components/Tabs';
 import { useBootstrap } from '../../auth/useBootstrap';
 import { ApiError } from '../../lib/apiError';
 import { VersionsPanel } from '../versions';
+import { useVersionsQuery, type AnyVersion } from '../versions/api';
+import { REWARD_KIND_LABELS } from './rewardValue';
 import { AddPolicyModal } from './AddPolicyModal';
 import { AssignCountriesModal } from './AssignCountriesModal';
 import { EditRewardModal } from './EditRewardModal';
@@ -27,6 +37,25 @@ import {
   useRewardPoliciesQuery,
   useRewardQuery,
 } from './api';
+
+/** The Kind of the version that currently represents the reward, as a human label. Unknown kinds
+ * (a `PROMO_CODE` authored by T-127, or anything a future migration adds) fall through to their
+ * raw code rather than to "not set" — this screen reports what is stored, it does not filter it. */
+function currentKindLabel(versions: readonly AnyVersion[]): string {
+  const withKind = versions.filter(
+    (version): version is AnyVersion & { rewardKind: string } =>
+      'rewardKind' in version &&
+      typeof (version as { rewardKind?: unknown }).rewardKind === 'string',
+  );
+  if (withKind.length === 0) return 'Not set';
+
+  const published = withKind.filter((version) => version.status === 'published');
+  const pool = published.length > 0 ? published : withKind;
+  const current = pool.reduce((latest, version) =>
+    version.versionNo > latest.versionNo ? version : latest,
+  );
+  return REWARD_KIND_LABELS[current.rewardKind as RewardKind] ?? current.rewardKind;
+}
 
 export function RewardDetailPage() {
   const params = useParams<{ id: string }>();
@@ -46,7 +75,13 @@ export function RewardDetailPage() {
   const rewardQuery = useRewardQuery(id);
   const assignmentsQuery = useRewardCountriesQuery(id);
   const policiesQuery = useRewardPoliciesQuery(id);
+  const versionsQuery = useVersionsQuery('reward', id);
   const deleteMutation = useDeleteRewardMutation();
+
+  // The Kind shown here is the *current* one: the newest published version if there is one,
+  // otherwise the newest version of any status (a reward whose Kind is still only drafted).
+  // Called before the early returns below — hooks may not run conditionally.
+  const kindLabel = useMemo(() => currentKindLabel(versionsQuery.data ?? []), [versionsQuery.data]);
 
   if (!Number.isFinite(id)) {
     return (
@@ -150,6 +185,12 @@ export function RewardDetailPage() {
                 </CardHeader>
                 <CardBody>
                   <dl className="grid grid-cols-2 gap-y-2 text-sm">
+                    <dt className="text-slate-500">Category</dt>
+                    <dd className="text-slate-900">{reward.categoryName}</dd>
+                    <dt className="text-slate-500">Sub-category</dt>
+                    <dd className="text-slate-900">{reward.subCategoryName ?? '—'}</dd>
+                    <dt className="text-slate-500">Kind</dt>
+                    <dd className="text-slate-900">{kindLabel}</dd>
                     <dt className="text-slate-500">Delivery mode</dt>
                     <dd className="text-slate-900">{reward.deliveryMode}</dd>
                     <dt className="text-slate-500">Connector type</dt>

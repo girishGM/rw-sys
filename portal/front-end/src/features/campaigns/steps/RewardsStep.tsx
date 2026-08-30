@@ -13,6 +13,19 @@
  * across units, because no conversion rate exists anywhere in this design
  * (11-BUDGETS-AND-LIMITS.md §3.1) — and it says "at least" when a policy exposes no amount,
  * rather than printing a confident number that is wrong.
+ *
+ * ### T-127 — the one reward whose value isn't decided here
+ *
+ * A reward whose live version is `PROMO_CODE` pays no amount at all; what it is worth is decided
+ * at redemption (`13-REWARD-MASTER-VALUE-SOURCES.md` §5). Two things follow, both handled in
+ * {@link Slot} and neither special-cased per level:
+ *
+ *  - it is only offered at the levels its own `value_config.bindLevels` names, and
+ *  - picking one reveals the live Promo Code Config picker, whose value rides along with the
+ *    attach call into the policy's `config` JSON.
+ *
+ * Every other Kind is untouched: no promo-code UI renders for it, and its attach payload is
+ * byte-for-byte what it was before this task.
  */
 import { useState } from 'react';
 import { Plus, Trash2 } from 'lucide-react';
@@ -28,13 +41,20 @@ import { Button } from '../../../components/Button';
 import { Card, CardBody, CardHeader } from '../../../components/Card';
 import { EmptyState } from '../../../components/EmptyState';
 import { Select } from '../../../components/Select';
+import { PromoCodeConfigPicker } from '../PromoCodeConfigPicker';
 
 export interface RewardsStepProps {
   readonly journey: Journey | undefined;
   readonly rewardOptions: readonly RewardOption[];
   readonly worstCasePayout: readonly WorstCasePayoutLine[];
   readonly disabled?: boolean;
-  readonly onAttach: (level: RewardLevel, refId: number | null, rewardPolicyId: number) => void;
+  readonly onAttach: (
+    level: RewardLevel,
+    refId: number | null,
+    rewardPolicyId: number,
+    /** T-127 — only ever non-null for a `PROMO_CODE` reward whose picker offered a choice. */
+    promoCodeConfig: string | null,
+  ) => void;
   readonly onDetach: (level: RewardLevel, assignmentId: number) => void;
 }
 
@@ -160,8 +180,23 @@ interface SlotProps {
   readonly options: readonly RewardOption[];
   readonly disabled?: boolean;
   readonly hint: string;
-  readonly onAttach: (level: RewardLevel, refId: number | null, rewardPolicyId: number) => void;
+  readonly onAttach: RewardsStepProps['onAttach'];
   readonly onDetach: (level: RewardLevel, assignmentId: number) => void;
+}
+
+/**
+ * T-127 — may this reward be attached *here*?
+ *
+ * Only a `PROMO_CODE` reward answers anything but "yes": its `value_config.bindLevels` is the
+ * Super Admin's answer to "Where can this be attached?" and the server enforces the same rule on
+ * `POST /campaigns/:id/rewards`. `null` bindLevels means the version never stated a restriction
+ * (an older row, or a config the server could not parse) — treated as "no restriction", matching
+ * `BindingsService.assertPromoCodeAttachable` exactly, so the picker can never offer something
+ * the server will refuse, nor hide something it would have accepted.
+ */
+function isAttachableAt(option: RewardOption, level: RewardLevel): boolean {
+  if (option.rewardKind !== 'PROMO_CODE' || option.promoCodeBindLevels === null) return true;
+  return option.promoCodeBindLevels.includes(level);
 }
 
 function Slot({
@@ -175,9 +210,14 @@ function Slot({
   onDetach,
 }: SlotProps) {
   const [policyId, setPolicyId] = useState<string | null>(null);
+  const [promoCodeConfig, setPromoCodeConfig] = useState<string | null>(null);
   const available = options.filter(
-    (option) => !assignments.some((entry) => entry.rewardPolicyId === option.rewardPolicyId),
+    (option) =>
+      !assignments.some((entry) => entry.rewardPolicyId === option.rewardPolicyId) &&
+      isAttachableAt(option, level),
   );
+  const selected = available.find((option) => String(option.rewardPolicyId) === policyId) ?? null;
+  const needsPromoCodeConfig = selected?.rewardKind === 'PROMO_CODE';
 
   return (
     <div className="grid gap-3">
@@ -215,32 +255,57 @@ function Slot({
         </ul>
       )}
 
-      <div className="flex items-end gap-2">
-        <Select
-          label="Add a reward"
-          className="flex-1"
-          placeholder={available.length === 0 ? 'No further rewards available' : 'Select a reward…'}
-          value={policyId}
-          disabled={disabled || available.length === 0}
-          options={available.map((option) => ({
-            value: String(option.rewardPolicyId),
-            label: `${option.policyName} (${option.rewardName})`,
-          }))}
-          onChange={setPolicyId}
-        />
-        <Button
-          type="button"
-          variant="secondary"
-          disabled={disabled || policyId === null}
-          onClick={() => {
-            if (policyId === null) return;
-            onAttach(level, refId, Number(policyId));
-            setPolicyId(null);
-          }}
-        >
-          <Plus className="size-4" aria-hidden="true" />
-          Attach
-        </Button>
+      <div className="grid gap-3">
+        <div className="flex items-end gap-2">
+          <Select
+            label="Add a reward"
+            className="flex-1"
+            placeholder={
+              available.length === 0 ? 'No further rewards available' : 'Select a reward…'
+            }
+            value={policyId}
+            disabled={disabled || available.length === 0}
+            options={available.map((option) => ({
+              value: String(option.rewardPolicyId),
+              label: `${option.policyName} (${option.rewardName})`,
+            }))}
+            onChange={(next) => {
+              setPolicyId(next);
+              // A config picked for one reward means nothing for the next one.
+              setPromoCodeConfig(null);
+            }}
+          />
+          <Button
+            type="button"
+            variant="secondary"
+            disabled={disabled || policyId === null}
+            onClick={() => {
+              if (policyId === null) return;
+              onAttach(
+                level,
+                refId,
+                Number(policyId),
+                needsPromoCodeConfig ? promoCodeConfig : null,
+              );
+              setPolicyId(null);
+              setPromoCodeConfig(null);
+            }}
+          >
+            <Plus className="size-4" aria-hidden="true" />
+            Attach
+          </Button>
+        </div>
+
+        {/* Rendered only for a PROMO_CODE reward, and identically at all three levels — the Kind
+            decides, never the level (TC-3/TC-4). Attaching without a pick stays allowed: today
+            the provider is `planned`, so there is nothing to pick. */}
+        {needsPromoCodeConfig && (
+          <PromoCodeConfigPicker
+            value={promoCodeConfig}
+            onChange={setPromoCodeConfig}
+            disabled={disabled}
+          />
+        )}
       </div>
     </div>
   );

@@ -15,7 +15,7 @@
  * `@IsObject()` is still worth having: it turns `values: "5"` into a 400 with a field-level
  * detail rather than a confusing schema error about every key at once.
  */
-import { IsIn, IsInt, IsObject, IsOptional, IsPositive } from 'class-validator';
+import { IsIn, IsInt, IsObject, IsOptional, IsPositive, IsString, Length } from 'class-validator';
 import {
   attachRewardRequestSchema,
   bindComponentRuleRequestSchema,
@@ -87,4 +87,18 @@ export class AttachRewardDto {
   @IsInt()
   @IsPositive()
   rewardPolicyId!: number;
+
+  /**
+   * T-127 — the Promo Code Config the maker picked (`13-REWARD-MASTER-VALUE-SOURCES.md` §5).
+   *
+   * Optional, and absent on almost every attach today: `PROMO_CODE_CONFIG_SERVICE` is seeded
+   * `planned`, so the picker has nothing to offer and the maker attaches without one. Whether it
+   * is *allowed* at all depends on the reward's live version — a question no decorator can answer,
+   * so `BindingsService` answers it (`PromoCodeConfigNotApplicableError`), the same division of
+   * labour this file's header describes for `values`.
+   */
+  @IsOptional()
+  @IsString()
+  @Length(1, 200)
+  promoCodeConfig?: string;
 }

@@ -19,6 +19,10 @@ const RULE_OPTION: RuleOption = {
   ruleId: 3,
   ruleCode: 'MIN_SPEND',
   name: 'Minimum spend',
+  // T-112 — `categoryId`/`subCategoryId` added to `ruleOptionSchema`; this fixture is a plain
+  // literal typed against it, not owned by T-112, so it needs the same two fields to type-check.
+  categoryId: 1,
+  subCategoryId: 2,
   categoryName: 'Transaction',
   subCategoryName: 'General',
   ruleVersionId: 55,
@@ -55,6 +59,10 @@ const REWARD_OPTION: RewardOption = {
   unitType: 'currency',
   unitCode: 'MYR',
   amount: '10.00',
+  // T-127 added both keys to `rewardOptionSchema`. A cashback reward answers `null` to each:
+  // its live version declares no Kind, so "where may a promo code be bound" does not apply.
+  rewardKind: null,
+  promoCodeBindLevels: null,
 };
 
 function makeTool(rows: Map<unknown, unknown[]> = new Map(), bindingOverrides = {}) {

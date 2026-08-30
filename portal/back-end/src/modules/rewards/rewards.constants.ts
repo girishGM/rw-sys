@@ -15,6 +15,19 @@ export const REWARD_ENTITY = 'reward';
 /** `role_entity_permissions.entity` for country assignment writes/reads. */
 export const REWARD_ASSIGNMENT_ENTITY = 'reward_assignment';
 
+/**
+ * T-116 — `role_entity_permissions.entity` for `reward_category`/`reward_sub_category` writes
+ * (`T116_002`'s seed). `view` is available to every role via `@Roles(...ALL_PORTAL_ROLES)` on
+ * `RewardCategoriesController`, matching `rules.constants.ts`'s own `RULE_CATEGORY_ENTITY`/
+ * `RULE_SUB_CATEGORY_ENTITY` precedent (T-106).
+ */
+export const REWARD_CATEGORY_ENTITY = 'reward_category';
+export const REWARD_SUB_CATEGORY_ENTITY = 'reward_sub_category';
+
+export const REWARD_CATEGORY_CODE_MAX_LENGTH = 50;
+export const REWARD_CATEGORY_NAME_MAX_LENGTH = 200;
+export const REWARD_CATEGORY_DESCRIPTION_MAX_LENGTH = 500;
+
 export const REWARD_SYSTEM_CODE_MAX_LENGTH = 50;
 export const REWARD_NAME_MAX_LENGTH = 200;
 export const REWARD_DESCRIPTION_MAX_LENGTH = 500;

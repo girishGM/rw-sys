@@ -14,6 +14,7 @@ import { RequireAuth } from '../auth/RequireAuth';
 import { RequireBootstrap } from '../auth/RequireBootstrap';
 import { AppShell } from '../layouts/AppShell';
 import { Skeleton } from '../components';
+import { ThemeProvider } from './ThemeProvider';
 
 /** A stand-in for every screen no Wave-2/3 task has built yet. Never fetches data itself. */
 export function RouteStub({ label }: { label: string }) {
@@ -62,13 +63,22 @@ export function RouteChunkFallback() {
  * before that data has actually arrived (04-FRONTEND.md §2: RequireBootstrap "blocks rendering
  * of its children until `/me/bootstrap` has resolved... never flashes a menu... the caller is
  * not entitled to").
+ *
+ * T-129 — `ThemeProvider` sits in the same spot for the same reason: its own `GET
+ * /users/me/preferences` genuinely needs the live session `RequireAuth`/`RequireBootstrap`
+ * already guarantee by this point, and `AppShell`'s `TopBar` renders the `ThemeSwitcher` this
+ * provider feeds. It re-mounts (and so re-fetches the persisted preference) exactly when this
+ * whole layout does — on login, and on a full page reload of any protected route (T-129 TC-2,
+ * TC-4) — which is the correct moment for "load the user's saved preference" to mean.
  */
 export function ProtectedLayout({ children }: { children: ReactNode }) {
   return (
     <BootstrapProvider>
       <RequireAuth>
         <RequireBootstrap>
-          <AppShell>{children}</AppShell>
+          <ThemeProvider>
+            <AppShell>{children}</AppShell>
+          </ThemeProvider>
         </RequireBootstrap>
       </RequireAuth>
     </BootstrapProvider>

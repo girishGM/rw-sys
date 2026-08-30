@@ -236,8 +236,13 @@ describe('T-064: back button after logout never resurrects authenticated content
     await waitFor(() => expect(screen.getByText('Dashboard')).toBeInTheDocument());
 
     // The real UI path (mirrors e2e `session.spec.ts` TC-3): avatar menu -> "Log out".
-    const avatarButton = document.querySelector('button[aria-haspopup="menu"]');
-    if (!avatarButton) throw new Error('avatar menu button not found');
+    // T-129 — `screen.getByRole('button', { name: /Ada SuperAdmin/ })` replaces a bare
+    // `document.querySelector('button[aria-haspopup="menu"]')` here: `TopBar` now renders a
+    // second `aria-haspopup="menu"` button (the theme switcher, `ThemeSwitcher.tsx`) ahead of
+    // the avatar menu in DOM order, so the old selector silently started returning the wrong
+    // button. Matching on the user's own display name is unambiguous regardless of how many
+    // other popover buttons `TopBar` grows in the future.
+    const avatarButton = screen.getByRole('button', { name: /Ada SuperAdmin/ });
     await userEvent.click(avatarButton);
     await userEvent.click(screen.getByRole('menuitem', { name: 'Log out' }));
     await waitFor(() => expect(router.state.location.pathname).toBe('/login'));
@@ -268,8 +273,9 @@ describe('T-064: back button after logout never resurrects authenticated content
     const router = renderRouterAt(['/dashboard']);
     await waitFor(() => expect(screen.getByText('Dashboard')).toBeInTheDocument());
 
-    const avatarButton = document.querySelector('button[aria-haspopup="menu"]');
-    if (!avatarButton) throw new Error('avatar menu button not found');
+    // T-129 — see the identical fix's comment in the test above for why this can no longer be
+    // a bare `document.querySelector('button[aria-haspopup="menu"]')`.
+    const avatarButton = screen.getByRole('button', { name: /Ada SuperAdmin/ });
     await userEvent.click(avatarButton);
     await userEvent.click(screen.getByRole('menuitem', { name: 'Log out' }));
     await waitFor(() => expect(router.state.location.pathname).toBe('/login'));

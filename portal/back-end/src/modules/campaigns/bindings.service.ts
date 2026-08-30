@@ -53,6 +53,7 @@ import {
   RuleVersionCountryAssignment,
   TenantCampaign,
   TrackerComponentRule,
+  TrackerTrackerComponent,
 } from '@/database/models';
 import { ScopedRepository } from '@/common/scope/scoped.repository';
 import { assertRole } from '@/common/rbac/assert-role';
@@ -60,7 +61,10 @@ import { ValidationFailedError } from '@/common/errors/app-error';
 import type { AuthenticatedUser } from '@/modules/auth/decorators/current-user.decorator';
 import {
   buildRuleValueSchema,
+  promoCodeValueConfigSchema,
   ruleParametersSchema,
+  type PromoCodeBindLevel,
+  type RewardKind,
   type RewardOption,
   type RewardLevel,
   type RuleOption,
@@ -68,10 +72,13 @@ import {
 } from '@reward-portal/shared';
 import { AUDIT_ACTION, AUDIT_ENTITY, ROW_ACTIVE, ROW_INACTIVE } from './campaigns.constants';
 import {
+  PromoCodeConfigNotApplicableError,
   RewardAlreadyAttachedError,
   RewardNotAssignedToCountryError,
+  RewardNotAttachableAtLevelError,
   RuleAlreadyBoundError,
   RuleNotAssignedToCountryError,
+  SiblingComponentNotEarlierError,
 } from './campaigns.errors';
 import { CampaignAuditService } from './campaign-audit.service';
 import {
@@ -81,7 +88,7 @@ import {
   trackerIdsOfCampaign,
 } from './campaign-membership';
 import type { RewardUnit } from './budget-analysis';
-import { byIdOrNull } from './scoped-lookup';
+import { byIdOrNull, firstOrNull } from './scoped-lookup';
 import type {
   AttachRewardDto,
   BindComponentRuleDto,
@@ -140,6 +147,16 @@ export class BindingsService {
         ruleId: rule.id,
         ruleCode: rule.ruleCode,
         name: rule.name,
+        // T-112/T-138 — every rule has a sub-category (`rule_master.sub_category_id` is `NOT
+        // NULL`), so `rule.subCategoryId` is always correct on its own, with no dependency on
+        // the lookup above having found a row. `categoryId` goes through `subCategory.categoryId`
+        // (its own `NOT NULL` FK) rather than `category?.id`, for the same reason — `category` is
+        // one extra hop that can only ever agree with it, never add information. `?? 0` only
+        // matters for a rule whose `sub_category_id` orphaned its FK (a data-integrity fault
+        // already tolerated by `subCategoryName`'s own `null` above, not a case this endpoint can
+        // repair).
+        categoryId: subCategory?.categoryId ?? 0,
+        subCategoryId: rule.subCategoryId,
         categoryName: category?.name ?? null,
         subCategoryName: subCategory?.name ?? null,
         ruleVersionId: version?.id ?? null,
@@ -153,8 +170,9 @@ export class BindingsService {
    * `POST /campaigns/:id/rules` — bind a rule to a component and supply its values (TC-16).
    *
    * Order matters and is not incidental: membership (TC-21q) → country visibility (TC-15) →
-   * value validation (TC-17/18/19) → duplicate check → insert. Each step refuses with the error
-   * the task file names for it, and no later step can be reached by failing an earlier one.
+   * value validation (TC-17/18/19) → sibling-order guard (T-124/T-141) → duplicate check →
+   * insert. Each step refuses with the error the task file names for it, and no later step can
+   * be reached by failing an earlier one.
    */
   async bindRule(
     actor: AuthenticatedUser,
@@ -164,10 +182,22 @@ export class BindingsService {
     assertRole(actor, 'maker');
 
     return this.sequelize.transaction(async (transaction) => {
-      await assertComponentInCampaign(this.scoped, campaign.id, dto.componentId, transaction);
+      const componentLink = await assertComponentInCampaign(
+        this.scoped,
+        campaign.id,
+        dto.componentId,
+        transaction,
+      );
 
       const resolved = await this.resolveRule(dto.ruleId, transaction);
       const values = validateRuleValues(resolved.parameters, dto.values ?? {});
+      await assertNoCircularSiblingDependency(
+        this.scoped,
+        resolved.parameters,
+        values,
+        componentLink,
+        transaction,
+      );
 
       const existing = await this.scoped.count(TrackerComponentRule, {
         where: {
@@ -216,7 +246,10 @@ export class BindingsService {
   }
 
   /** `PATCH /campaigns/:id/rules/:bindingId` — step 4 edits values in place, re-validating
-   * against the **pinned** version rather than whatever is current (06-VERSIONING.md §7). */
+   * against the **pinned** version rather than whatever is current (06-VERSIONING.md §7).
+   * Re-runs the same sibling-order guard {@link bindRule} does (T-124/T-141) — a second Maker
+   * mid-edit on the same journey can submit a stale/forged component id here just as easily as
+   * on the original bind. */
   async updateRuleValues(
     actor: AuthenticatedUser,
     campaign: TenantCampaign,
@@ -226,9 +259,20 @@ export class BindingsService {
     assertRole(actor, 'maker');
 
     return this.sequelize.transaction(async (transaction) => {
-      const binding = await this.loadBinding(campaign.id, bindingId, transaction);
+      const { binding, componentLink } = await this.loadBinding(
+        campaign.id,
+        bindingId,
+        transaction,
+      );
       const parameters = await this.parametersForBinding(binding, transaction);
       const values = validateRuleValues(parameters, dto.values);
+      await assertNoCircularSiblingDependency(
+        this.scoped,
+        parameters,
+        values,
+        componentLink,
+        transaction,
+      );
 
       await this.scoped.update(
         TrackerComponentRule,
@@ -263,7 +307,7 @@ export class BindingsService {
     assertRole(actor, 'maker');
 
     await this.sequelize.transaction(async (transaction) => {
-      const binding = await this.loadBinding(campaign.id, bindingId, transaction);
+      const { binding } = await this.loadBinding(campaign.id, bindingId, transaction);
       await this.scoped.update(
         TrackerComponentRule,
         { status: ROW_INACTIVE },
@@ -397,6 +441,11 @@ export class BindingsService {
         unitType: version?.unitType ?? null,
         unitCode: version?.unitCode ?? null,
         amount: readPolicyAmount(policy),
+        // T-127 — the Kind, and (only for `PROMO_CODE`) where it may be attached. Step 5 needs
+        // both *before* the maker picks anything, which is why they ride on the option rather
+        // than being fetched per selection.
+        rewardKind: version?.rewardKind ?? null,
+        promoCodeBindLevels: promoCodeBindLevels(version),
       };
     });
   }
@@ -418,7 +467,15 @@ export class BindingsService {
         await assertComponentInCampaign(this.scoped, campaign.id, dto.refId ?? 0, transaction);
       }
 
+      // T-127 — everything Kind-dependent, decided from the reward's own live version and never
+      // from anything the client said about it.
+      await this.assertPromoCodeAttachable(policy, dto, transaction);
+
       const id = await this.insertRewardAssignment(campaign, dto, policy.id, transaction);
+
+      if (dto.promoCodeConfig !== undefined) {
+        await this.writePromoCodeConfig(policy, dto.promoCodeConfig, transaction);
+      }
 
       await this.audit.record(
         actor,
@@ -432,12 +489,92 @@ export class BindingsService {
             level: dto.level,
             refId: dto.refId ?? null,
             rewardPolicyId: policy.id,
+            // Recorded only when it was actually supplied, so the audit trail of the ordinary
+            // attach is byte-for-byte what T-037 already wrote (TC-6).
+            ...(dto.promoCodeConfig === undefined ? {} : { promoCodeConfig: dto.promoCodeConfig }),
           },
         },
         transaction,
       );
 
       return id;
+    });
+  }
+
+  /**
+   * T-127 — the two Kind-dependent gates on `POST /campaigns/:id/rewards`.
+   *
+   * Both read the reward's **live** version, never the request: the client tells us which policy
+   * and which level, and the server decides what that policy is allowed to do. Step 5 filters the
+   * same rewards out of its picker, but a picker is not a control — this endpoint is reachable
+   * without it, and R6's negative case is precisely a caller that skips the SPA.
+   *
+   * A reward with no live version, or one authored before T-119, has `rewardKind === null` and is
+   * unaffected by either gate — that is every reward in the system today.
+   */
+  private async assertPromoCodeAttachable(
+    policy: RewardPolicy,
+    dto: AttachRewardDto,
+    transaction: Transaction,
+  ): Promise<void> {
+    const version =
+      (await this.activeRewardVersionsByReward([policy.rewardSystemId], transaction)).get(
+        policy.rewardSystemId,
+      ) ?? null;
+    const kind: RewardKind | null = version?.rewardKind ?? null;
+
+    if (kind !== 'PROMO_CODE') {
+      // Sending a promo code config for something that is not a promo code is a mistake worth
+      // reporting, not one worth quietly absorbing — see `PromoCodeConfigNotApplicableError`.
+      if (dto.promoCodeConfig !== undefined) {
+        throw new PromoCodeConfigNotApplicableError(policy.id);
+      }
+      return;
+    }
+
+    const levels = promoCodeBindLevels(version);
+    // `null` = the version stated no restriction (an unparseable config, or one written before
+    // this field existed). Treated as "any level", identically to how step 5 reads it — the two
+    // must agree, or the UI offers what the server refuses.
+    if (levels !== null && !levels.includes(dto.level)) {
+      throw new RewardNotAttachableAtLevelError(policy.id, dto.level);
+    }
+  }
+
+  /**
+   * T-127 — persists the maker's pick into the attached policy's own `config` JSON
+   * (`13-REWARD-MASTER-VALUE-SOURCES.md` §5: *"not a new column anywhere"*).
+   *
+   * Merged into the existing config rather than replacing it: `config` is free-form and already
+   * carries whatever the reward author put there (`readPolicyAmount` reads `amount`/`value`/
+   * `points` out of the same object), so a blind overwrite would silently destroy an unrelated
+   * key. See this task's completion report for the one thing this design cannot do — a policy
+   * attached to two campaigns has one `config`, so the second attach's pick wins.
+   *
+   * ### Why the row instance and not `ScopedRepository.update`
+   *
+   * `RewardPolicy`'s scope rule is a `subquery(...)` (scope-strategy.ts: *"a policy follows its
+   * reward system's visibility"*), so for any actor below `super_admin` the compiled scope clause
+   * carries `replacements`. Sequelize's `Model.update` binds the SET values with `bind`, and
+   * refuses outright when both are present: *"Both `replacements` and `bind` cannot be set at the
+   * same time"*. Every existing `scoped.update` on a subquery-scoped model is on a Super-Admin-only
+   * path, whose scope clause is empty — this is the first write of that shape by a maker, and it
+   * fails with a 500 before reaching Postgres. Found by `t127-promo-code-attach.e2e-spec.ts`, which
+   * is exactly the kind of thing a faked repository cannot see (AGENT-PROTOCOL §3); filed against
+   * `ScopedRepository` as its own defect, since the limitation is not this module's to fix.
+   *
+   * **This is not a scope bypass.** `policy` was loaded moments ago through `resolveRewardPolicy`
+   * → `byIdOrNull(this.scoped, …)`, so the tenancy clause has already decided that this actor may
+   * see this row; the write below addresses that same row by primary key. R2 forbids reaching a
+   * row *without* the scope having been applied, which is not what happens here.
+   */
+  private async writePromoCodeConfig(
+    policy: RewardPolicy,
+    promoCodeConfig: string,
+    transaction: Transaction,
+  ): Promise<void> {
+    await policy.update({ config: { ...policy.config, promoCodeConfig } } as never, {
+      transaction,
     });
   }
 
@@ -704,21 +841,24 @@ export class BindingsService {
     return policy;
   }
 
+  /** The binding, and its own component's `tracker_tracker_components` link — the latter is what
+   * {@link assertNoCircularSiblingDependency} compares a `SIBLING_COMPONENTS` value's target
+   * against (T-124/T-141), so it is returned here rather than re-derived by every caller. */
   private async loadBinding(
     campaignId: number,
     bindingId: number,
     transaction: Transaction,
-  ): Promise<TrackerComponentRule> {
+  ): Promise<{ binding: TrackerComponentRule; componentLink: TrackerTrackerComponent }> {
     const binding = await this.scoped.findByPkOrFail(TrackerComponentRule, bindingId, {
       transaction,
     });
-    await assertComponentInCampaign(
+    const componentLink = await assertComponentInCampaign(
       this.scoped,
       campaignId,
       binding.trackerComponentId,
       transaction,
     );
-    return binding;
+    return { binding, componentLink };
   }
 
   private async parametersForBinding(
@@ -914,6 +1054,70 @@ function issueCode(code: string): string {
 }
 
 /**
+ * T-122/T-124's one real context provider — see `field-value-source-lookup.service.ts`'s own
+ * copy of this same literal (T-123) for the dropdown-filtering half of this rule. Not shared as
+ * an export: each file's copy is a private literal, not a registry, and duplicating one string
+ * constant is simpler than minting a shared name for it.
+ */
+const SIBLING_COMPONENTS_PROVIDER_CODE = 'SIBLING_COMPONENTS';
+
+/**
+ * T-124/T-141 — defense in depth for a `SIBLING_COMPONENTS` field
+ * (`13-REWARD-MASTER-VALUE-SOURCES.md` §3): the Maker's chosen target component must have a
+ * strictly **earlier** `sequence_order` than the component this binding itself sits on, within
+ * the same tracker. T-123's dropdown already filters to legal choices; this is the control a
+ * stale UI, a forged request, or a second Maker mid-edit on the same journey still has to pass —
+ * implementation note 2's *"the engine doesn't know or care how the value was picked"* applies
+ * here just as much as it does to the runtime engine.
+ *
+ * Runs after {@link validateRuleValues}, on its **output**: T-136's `selectFieldSchema` already
+ * normalised every `valueSource`-backed value to a single string form, so a provider's own
+ * numeric id and the SPA's `String(option.value)` are byte-identical by the time they reach here.
+ *
+ * `>=`, not `>`: `13-REWARD-MASTER-VALUE-SOURCES.md` §3 restricts to *strictly* earlier so this
+ * one comparison blocks both a forward reference and a direct cycle without a general
+ * graph-cycle check, and a self-reference (TC-4) is simply the degenerate case of a tie against
+ * one's own link row — no separate check is needed for it.
+ */
+async function assertNoCircularSiblingDependency(
+  scoped: ScopedRepository,
+  parameters: RuleParameters,
+  values: Record<string, unknown>,
+  ownComponentLink: TrackerTrackerComponent,
+  transaction: Transaction,
+): Promise<void> {
+  for (const field of parameters.fields) {
+    if (field.valueSource?.kind !== 'CONTEXT_LOOKUP') continue; // TC-5: not this provider's kind
+    if (field.valueSource.contextProvider !== SIBLING_COMPONENTS_PROVIDER_CODE) continue;
+
+    const raw = values[field.key];
+    if (raw === undefined) continue; // an optional field the maker left unset — nothing to check
+
+    const targetComponentId = Number(raw);
+    if (!Number.isInteger(targetComponentId)) continue; // shape already rejected upstream
+
+    // Sequential rather than `Promise.all`'d: at most `RULE_PARAMETERS_MAX_FIELDS` (50) fields,
+    // each lookup independent of the others, and a rule with more than one `SIBLING_COMPONENTS`
+    // field is rare enough that clarity wins over the (unmeasurable) parallelism gain.
+    const targetLink = await firstOrNull(scoped, TrackerTrackerComponent, {
+      where: { componentId: targetComponentId, trackerId: ownComponentLink.trackerId },
+      transaction,
+    });
+
+    // No link at all (TC-6: wrong tracker, or an id that is not a component here) and a
+    // same-or-later `sequence_order` (TC-2 later, TC-3 tied, TC-4 self) are rejected identically:
+    // neither is a valid backward edge.
+    if (targetLink === null || targetLink.sequenceOrder >= ownComponentLink.sequenceOrder) {
+      throw new SiblingComponentNotEarlierError(
+        field.key,
+        ownComponentLink.componentId,
+        targetComponentId,
+      );
+    }
+  }
+}
+
+/**
  * The per-grant amount a reward policy pays, when its `config` exposes one.
  *
  * `reward_policies.config` is free-form `text` holding JSON that this portal does not own the
@@ -923,6 +1127,27 @@ function issueCode(code: string): string {
  * worse than admitting ignorance: a payout line that is confidently wrong is the one a maker
  * would act on.
  */
+/**
+ * T-127 — the `bindLevels` of a `PROMO_CODE` reward version, or `null` for *no restriction*.
+ *
+ * `null` covers three genuinely different cases that all mean the same thing to a caller: no live
+ * version, a version of some other Kind, and a `PROMO_CODE` version whose `value_config` does not
+ * parse. The last one is the interesting one, and it is deliberately permissive rather than
+ * closed: `value_config` is JSON in a `text` column, T-119 validates it on write but nothing stops
+ * a row that predates that validation, and refusing every attach of such a reward would break a
+ * maker's campaign over a field they never filled in. The gate exists to honour an author's stated
+ * restriction — where none was stated, there is nothing to honour.
+ *
+ * Parsed with the **shared** `promoCodeValueConfigSchema`, the same one T-120's editor builds the
+ * value with and `rewards.service.ts` validates it against, so "what counts as a bind level" is
+ * written down exactly once.
+ */
+function promoCodeBindLevels(version: RewardVersion | null): PromoCodeBindLevel[] | null {
+  if (version === null || version.rewardKind !== 'PROMO_CODE') return null;
+  const parsed = promoCodeValueConfigSchema.safeParse(version.valueConfig);
+  return parsed.success ? [...parsed.data.bindLevels] : null;
+}
+
 function readPolicyAmount(policy: RewardPolicy): string | null {
   const config = policy.config;
   if (config === null || typeof config !== 'object') return null;

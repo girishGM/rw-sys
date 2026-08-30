@@ -1,5 +1,6 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { BootstrapContext, type BootstrapContextValue } from '../../auth/useBootstrap';
@@ -38,7 +39,15 @@ const rule = {
   subCategoryName: 'General',
   expression: 'amount >= :minSpend',
   parameters: {
-    fields: [{ key: 'minSpend', label: 'Minimum spend', type: 'number' as const, required: true }],
+    fields: [
+      {
+        key: 'minSpend',
+        label: 'Minimum spend',
+        type: 'number' as const,
+        required: true,
+        role: 'compare_value' as const,
+      },
+    ],
   },
   status: 'active' as const,
   createdBy: null,
@@ -116,6 +125,41 @@ describe('RuleDetailPage', () => {
     expect(screen.queryByRole('button', { name: /assign countries/i })).not.toBeInTheDocument();
     // Still read-only-visible: the rule content itself renders.
     expect(screen.getByText('Minimum spend tier')).toBeInTheDocument();
+  });
+
+  // T-115 TC-5 — the Parameters tab displays the server-computed `role` the `GET /rules/:id`
+  // response already carries (T-114) — no client-side computation on this page.
+  it('TC-5: the Parameters tab shows the correct role per field from the API response', async () => {
+    const wiredRule = {
+      ...rule,
+      parameters: {
+        fields: [
+          {
+            key: 'targetComponentCode',
+            label: 'Target component',
+            type: 'string' as const,
+            required: true,
+            role: 'resolver_input' as const,
+          },
+          {
+            key: 'minSpend',
+            label: 'Minimum spend',
+            type: 'number' as const,
+            required: true,
+            role: 'compare_value' as const,
+          },
+        ],
+      },
+    };
+    mockUseRuleQuery.mockReturnValue({ data: wiredRule, isLoading: false, isError: false });
+
+    const user = userEvent.setup();
+    renderPage({ 'rule:view': true });
+
+    await user.click(screen.getByRole('tab', { name: /parameters/i }));
+
+    expect(screen.getByText('Resolver input')).toBeInTheDocument();
+    expect(screen.getByText('Compared value')).toBeInTheDocument();
   });
 
   it('shows a 404/error state when the rule is not visible to the caller (TC-8)', () => {

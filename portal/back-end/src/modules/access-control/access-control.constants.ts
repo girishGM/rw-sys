@@ -79,6 +79,26 @@ export const ENTITY_ACTION_CATALOGUE: Readonly<Record<string, readonly string[]>
   audit: Object.freeze(['view']),
   notification: Object.freeze(['view', 'update']),
   definition_request: Object.freeze(['view', 'create', 'update', 'withdraw', 'review', 'fulfil']),
+  // T-140 (2026-08-30): 7 entities seeded by later migrations without this catalogue ever being
+  // extended for them — the same "a seed migration grants a new {entity, action} and this map
+  // isn't updated" shape T-062 already fixed once for `campaign` pause/resume (see that entry's
+  // own paragraph above). `isPermissionsMatrix` validates every `PUT /permissions/:role` body
+  // against this map, and that PUT is a full replace (implementation note 5), so an unlisted
+  // entity does not just reject a hand-built payload — it 400s the SPA's own ordinary resave of a
+  // role that legitimately holds one of these grants (every role does, at least `view`), and any
+  // save that *is* accepted silently drops that role's rows for the missing entity entirely.
+  // `super_admin` gets `view/create/update` (no `delete` — each seed migration deliberately
+  // doesn't add one, "retire via status, never remove the row"); every other role gets `view`
+  // only. Matches `T106_001`/`T116_002`/`T121_002`/`T126_002` exactly — see
+  // `access-control.constants.spec.ts`'s "covers every {entity, action} any seed migration
+  // actually grants" test, which now spreads all four migrations' exported permission rows.
+  rule_category: Object.freeze(['view', 'create', 'update']),
+  rule_sub_category: Object.freeze(['view', 'create', 'update']),
+  reward_category: Object.freeze(['view', 'create', 'update']),
+  reward_sub_category: Object.freeze(['view', 'create', 'update']),
+  field_context_provider: Object.freeze(['view', 'create', 'update']),
+  field_api_lookup_provider: Object.freeze(['view', 'create', 'update']),
+  tenant_currency: Object.freeze(['view', 'create', 'update']),
 });
 
 /** Every grantable entity name — for the `GET /entities` catalogue and DTO validation. */

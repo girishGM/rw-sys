@@ -4,6 +4,11 @@
  * `systemCode` is immutable (the same discipline `update-rule.dto.ts` applies to `ruleCode`) —
  * never here. Every field is optional (a partial update), but the *set* of allowed names is
  * fixed: an undeclared key is a 400 (`forbidNonWhitelisted`) under the global `ValidationPipe`.
+ *
+ * `categoryId`/`subCategoryId` are immutable-by-replacement (T-118, task file's own scope note)
+ * — the same discipline as `systemCode` above, never accepted here at all. Changing a reward's
+ * category is a new reward, not an edit to an existing one; this mirrors T-116's own
+ * `update-rule-sub-category.dto.ts` precedent of never letting a linking id move once set.
  */
 import {
   IsBoolean,

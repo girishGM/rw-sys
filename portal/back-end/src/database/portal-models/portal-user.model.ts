@@ -111,6 +111,20 @@ export class PortalUser extends Model<PortalUser> {
   @Column({ type: DataType.STRING(20), allowNull: false, defaultValue: 'pending_activation' })
   declare status: string;
 
+  /**
+   * T-128 (13-REWARD-MASTER-VALUE-SOURCES.md §6) — self-service UI theme preference, one of
+   * `light-blue` / `yellow-black` / `red-white` (`ck_portal_users_ui_theme`, `T128_001`).
+   * Written only through `PATCH /users/me/preferences`, by the caller for their own row — see
+   * that route's own header for why it is deliberately not gated by `users:update`.
+   */
+  @Column({
+    type: DataType.STRING(20),
+    allowNull: true,
+    defaultValue: 'light-blue',
+    field: 'ui_theme',
+  })
+  declare uiTheme: string;
+
   @Column({
     type: DataType.BOOLEAN,
     allowNull: false,
