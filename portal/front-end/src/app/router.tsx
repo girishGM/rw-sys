@@ -102,6 +102,8 @@ const RuleDetailPage = lazyPage(() => import('../features/rules'), 'RuleDetailPa
 // T-107 — categories/sub-categories management, same deviation as RulesListPage's own comment
 // above: this screen is this task's own scope, built directly rather than behind a stub.
 const CategoriesPage = lazyPage(() => import('../features/rules'), 'CategoriesPage');
+// T-146 — Value Sources (registries), same deviation: this screen is this task's own scope.
+const ValueSourcesPage = lazyPage(() => import('../features/rules'), 'ValueSourcesPage');
 // T-032 — `RewardsListPage`/`RewardDetailPage` replace the generic `RouteStub` for `/rewards`
 // and `/rewards/:id`, the same kind of deviation T-031/T-045/T-023/T-030/T-040 made: these
 // screens are this task's own scope (`front-end/src/features/rewards/**`), so building them
@@ -231,6 +233,15 @@ export const PROTECTED_ROUTE_SPECS: readonly ProtectedRouteSpec[] = [
   {
     path: '/rule-categories',
     label: 'Categories',
+    entity: 'rule_category',
+    action: 'view',
+  },
+  // T-146 — reuses the `rule_category`/`view` grant: a read-only reference page with no write
+  // action of its own doesn't need a new permission entity, same reasoning T-108 gave for
+  // skipping `@RequirePermission` on `/rule-resolvers`/`/rule-operators` server-side.
+  {
+    path: '/rule-value-sources',
+    label: 'Value Sources',
     entity: 'rule_category',
     action: 'view',
   },
@@ -370,6 +381,8 @@ function buildProtectedChild(spec: ProtectedRouteSpec): RouteObject {
       <RuleDetailPage />
     ) : spec.path === '/rule-categories' ? (
       <CategoriesPage />
+    ) : spec.path === '/rule-value-sources' ? (
+      <ValueSourcesPage />
     ) : spec.path === '/rewards' ? (
       <RewardsListPage />
     ) : spec.path === '/rewards/:id' ? (

@@ -93,6 +93,7 @@ import { FIELD_VALUE_SOURCE_PERMISSIONS } from '@/database/migrations/T121_002_s
 import { TENANT_CURRENCY_PERMISSIONS } from '@/database/migrations/T126_002_seed_tenant_currency_permissions';
 import { RULE_CATEGORY_NAV_CONFIGS } from '@/database/migrations/T107_001_seed_rule_category_nav';
 import { REWARD_CATEGORY_NAV_CONFIGS } from '@/database/migrations/T117_001_seed_reward_category_nav';
+import { RULE_VALUE_SOURCES_NAV_CONFIGS } from '@/database/migrations/T146_001_seed_rule_value_sources_nav';
 // T-056 — `portal_users.email` is encrypted; keys must exist before the CLI child process runs,
 // and the fixture row must be found by something other than a plaintext `email` comparison.
 import { ensureEncryptionKeys, removeEncryptionKeys } from '../auth/support/portal-user-fixture';
@@ -210,6 +211,7 @@ const NAV_SEED_MIGRATIONS: { readonly file: string; readonly rows: readonly NavR
   { file: 'T049_001_seed_agent_nav.ts', rows: AGENT_NAV_CONFIGS },
   { file: 'T107_001_seed_rule_category_nav.ts', rows: RULE_CATEGORY_NAV_CONFIGS },
   { file: 'T117_001_seed_reward_category_nav.ts', rows: REWARD_CATEGORY_NAV_CONFIGS },
+  { file: 'T146_001_seed_rule_value_sources_nav.ts', rows: RULE_VALUE_SOURCES_NAV_CONFIGS },
 ];
 const SEEDED_NAV_ROWS: readonly NavRow[] = NAV_SEED_MIGRATIONS.flatMap((m) => m.rows);
 
