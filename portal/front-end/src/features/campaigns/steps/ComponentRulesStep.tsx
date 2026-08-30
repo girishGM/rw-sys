@@ -18,6 +18,7 @@ import { useMemo, useState } from 'react';
 import { Plus, Trash2 } from 'lucide-react';
 import type {
   Journey,
+  JourneyComponent,
   RuleOption,
   RuleParameterField,
   RuleParameters,
@@ -26,6 +27,7 @@ import { Badge } from '../../../components/Badge';
 import { Button } from '../../../components/Button';
 import { Card, CardBody, CardHeader } from '../../../components/Card';
 import { EmptyState } from '../../../components/EmptyState';
+import { Input } from '../../../components/Input';
 import { Select, type SelectOption } from '../../../components/Select';
 import { DynamicParameterForm } from '../DynamicParameterForm';
 import {
@@ -33,11 +35,16 @@ import {
   useContextLookupOptions,
   FIELD_LOOKUP_NOT_AVAILABLE_STATUS,
 } from '../ruleValues';
+import { componentErrorKey, OPERATOR_ERROR_FIELD } from './ruleErrorKeys';
 
 /** Sentinel `Select` value meaning "no filter" — `SelectProps.value` is `string | null`, and an
  * unset filter renders as the placeholder rather than a real option, so this never collides with
  * a real `categoryId`/`subCategoryId` (both always positive integers). */
 const NO_FILTER = '';
+
+/** T-148 — the component-level "rules combine" values, the same three `trackers.completion_logic`
+ * already uses one level up (`JourneyStep`'s own Completion logic picker). */
+export type RuleLogic = NonNullable<JourneyComponent['ruleLogic']>;
 
 export interface ComponentRulesStepProps {
   readonly journey: Journey | undefined;
@@ -46,8 +53,26 @@ export interface ComponentRulesStepProps {
   readonly onBindRule: (componentId: number, ruleId: number) => void;
   readonly onUnbindRule: (bindingId: number) => void;
   readonly onSaveValues: (bindingId: number, values: Record<string, unknown>) => void;
+  /**
+   * T-148 — the comparison operator for one bound rule (`tracker_component_rules.operator`).
+   * Saved on selection rather than through `onSaveValues`' dirty/save cycle: it is one atomic
+   * choice from a fixed list, with nothing to type and nothing to confirm.
+   */
+  readonly onSaveOperator: (bindingId: number, operator: string) => void;
+  /**
+   * T-148 — how one component's own bound rules combine. `ruleThreshold` is `null` for anything
+   * but `'n_of'` and is always sent **with** `ruleLogic`, never on its own: the shared contract's
+   * two-sided refine ("n_of requires a threshold, anything else forbids one") can only judge a
+   * request that carries both.
+   */
+  readonly onSaveRuleLogic: (
+    componentId: number,
+    ruleLogic: RuleLogic,
+    ruleThreshold: number | null,
+  ) => void;
   /** Server-side field errors, keyed `${bindingId}.${parameterKey}` — TC-17's 400 rendered on
-   * the field that caused it rather than as a toast with no context. */
+   * the field that caused it rather than as a toast with no context. T-148 adds two more keys in
+   * the same record: `${bindingId}.operator` and {@link componentErrorKey}. */
   readonly serverErrors?: Readonly<Record<string, string>>;
 }
 
@@ -58,6 +83,8 @@ export function ComponentRulesStep({
   onBindRule,
   onUnbindRule,
   onSaveValues,
+  onSaveOperator,
+  onSaveRuleLogic,
   serverErrors,
 }: ComponentRulesStepProps) {
   const trackers = journey?.trackers ?? [];
@@ -84,11 +111,22 @@ export function ComponentRulesStep({
             )}
             {tracker.components.map((component) => (
               <section key={component.id} className="rounded-lg border border-slate-200 p-4">
-                <header className="mb-3 flex items-center justify-between gap-2">
+                <header className="mb-3 flex flex-wrap items-start justify-between gap-3">
                   <h4 className="text-sm font-medium text-slate-800">
                     {component.sequenceOrder}. {component.name}
                   </h4>
-                  {component.rules.length === 0 && <Badge tone="warning">no rule</Badge>}
+                  <div className="flex items-center gap-2">
+                    {component.rules.length === 0 && <Badge tone="warning">no rule</Badge>}
+                    <ComponentRuleLogic
+                      componentId={component.id}
+                      ruleLogic={component.ruleLogic}
+                      ruleThreshold={component.ruleThreshold}
+                      ruleCount={component.rules.length}
+                      disabled={disabled}
+                      error={serverErrors?.[componentErrorKey(component.id)]}
+                      onSave={onSaveRuleLogic}
+                    />
+                  </div>
                 </header>
 
                 {component.rules.length === 0 && (
@@ -107,12 +145,17 @@ export function ComponentRulesStep({
                       versionNo={rule.ruleVersionNo}
                       parameters={rule.parameters}
                       values={rule.values}
+                      operator={rule.operator}
+                      operatorOptions={operatorsFor(ruleOptions, rule.ruleId)}
                       trackerId={tracker.id}
                       componentId={component.id}
                       disabled={disabled}
                       serverErrors={pickErrors(serverErrors, rule.id)}
                       onSave={(values) => {
                         onSaveValues(rule.id, values);
+                      }}
+                      onSaveOperator={(operator) => {
+                        onSaveOperator(rule.id, operator);
                       }}
                       onRemove={() => {
                         onUnbindRule(rule.id);
@@ -152,12 +195,134 @@ function pickErrors(
   return picked;
 }
 
+/**
+ * T-148 — the operators a bound rule may be compared with, read off the rule picker's own row for
+ * that rule (`ruleOptionSchema.defaultOperators`, T-147).
+ *
+ * A rule the picker no longer offers — unbound from this country since it was bound, or bound
+ * against a version that has since been superseded — yields an empty list, which renders as the
+ * disabled "no operators" state rather than as a missing control (TC-2).
+ *
+ * **Known limitation, by contract.** `defaultOperators` here belongs to the rule's *currently
+ * active* version for this country, while the server validates against the version *pinned to
+ * this binding* (`BindingsService#assertOperatorAllowed`). The two are the same version until a
+ * new one is assigned mid-campaign, and `ComponentRule` carries no `defaultOperators` of its own
+ * to close the gap. That divergence is exactly what the operator's own server-error slot below is
+ * for: the 400 lands on this control, not in a toast (TC-7).
+ */
+function operatorsFor(options: readonly RuleOption[], ruleId: number): readonly string[] {
+  return options.find((option) => option.ruleId === ruleId)?.defaultOperators ?? [];
+}
+
+/**
+ * T-148 — *"Rules combine: ALL must pass / ANY may pass / N of X must pass"*, per component
+ * (`maker-apply-rule-mockup.html`'s `new`-badged component header control).
+ *
+ * `null` reads as `'all'`, which is what T-147's own backend does with the same column: a
+ * component nobody has set a combination rule on behaves exactly as it always has (TC-4).
+ *
+ * Draft-then-save, mirroring `RuleValues`' own dirty/save cycle in this file rather than
+ * `JourneyStep`'s save-per-keystroke tracker picker: `'n_of'` is only a legal request once it has
+ * a threshold, so firing on the `Select` alone would send a request the shared contract's refine
+ * is guaranteed to reject. All state is per instance, so one component's draft can never reach a
+ * sibling's (TC-8) — the same isolation `AddRule`'s filter state already has.
+ */
+function ComponentRuleLogic({
+  componentId,
+  ruleLogic,
+  ruleThreshold,
+  ruleCount,
+  disabled,
+  error,
+  onSave,
+}: {
+  readonly componentId: number;
+  readonly ruleLogic: RuleLogic | null;
+  readonly ruleThreshold: number | null;
+  readonly ruleCount: number;
+  readonly disabled?: boolean;
+  readonly error?: string;
+  readonly onSave: (
+    componentId: number,
+    ruleLogic: RuleLogic,
+    ruleThreshold: number | null,
+  ) => void;
+}) {
+  const savedLogic: RuleLogic = ruleLogic ?? 'all';
+  const [logic, setLogic] = useState<RuleLogic>(savedLogic);
+  // Held as text, not a number: an `<input type="number">` legitimately passes through the empty
+  // string while the maker clears it to retype, and `Number('')` is `0` — a value the contract
+  // rejects and the maker never typed.
+  const [threshold, setThreshold] = useState<string>(
+    ruleThreshold === null ? '' : String(ruleThreshold),
+  );
+
+  const parsedThreshold = /^\d+$/.test(threshold) ? Number(threshold) : null;
+  const thresholdValid = logic !== 'n_of' || (parsedThreshold !== null && parsedThreshold >= 1);
+  const dirty =
+    logic !== savedLogic || (logic === 'n_of' && parsedThreshold !== (ruleThreshold ?? null));
+
+  return (
+    <div className="flex flex-wrap items-end justify-end gap-2">
+      <Select
+        label="Rules combine"
+        className="w-56"
+        value={logic}
+        disabled={disabled}
+        error={error}
+        options={[
+          { value: 'all', label: 'ALL must pass' },
+          { value: 'any', label: 'ANY may pass' },
+          { value: 'n_of', label: `N of ${String(ruleCount)} must pass` },
+        ]}
+        onChange={(value) => {
+          const next = value as RuleLogic;
+          setLogic(next);
+          // Anything but `n_of` forbids a threshold, so leaving the old one in the draft would
+          // make the next save unrepresentable rather than merely hidden (TC-5).
+          if (next !== 'n_of') setThreshold('');
+        }}
+      />
+      {logic === 'n_of' && (
+        <Input
+          type="number"
+          min={1}
+          max={Math.max(ruleCount, 1)}
+          className="w-24"
+          label="N"
+          value={threshold}
+          disabled={disabled}
+          onChange={(event) => {
+            setThreshold(event.target.value);
+          }}
+        />
+      )}
+      {dirty && thresholdValid && (
+        <Button
+          type="button"
+          size="sm"
+          disabled={disabled}
+          onClick={() => {
+            onSave(componentId, logic, logic === 'n_of' ? parsedThreshold : null);
+          }}
+        >
+          Save rule logic
+        </Button>
+      )}
+    </div>
+  );
+}
+
 interface RuleValuesProps {
   readonly bindingId: number;
   readonly title: string;
   readonly versionNo: number | null;
   readonly parameters: RuleParameters;
   readonly values: Record<string, unknown>;
+  /** T-148 — the comparison operator already saved on this binding, `null` until one is chosen. */
+  readonly operator: string | null;
+  /** T-148 — what this rule's pinned version allows; empty renders the control disabled. */
+  readonly operatorOptions: readonly string[];
   /** T-125 — a `CONTEXT_LOOKUP` field's own context (`SIBLING_COMPONENTS`'s "only earlier
    * components" filter, `13-REWARD-MASTER-VALUE-SOURCES.md` §3): which tracker this binding's
    * component sits in, and which component to exclude from its own dropdown. Every component
@@ -168,6 +333,7 @@ interface RuleValuesProps {
   readonly disabled?: boolean;
   readonly serverErrors: Record<string, string>;
   readonly onSave: (values: Record<string, unknown>) => void;
+  readonly onSaveOperator: (operator: string) => void;
   readonly onRemove: () => void;
 }
 
@@ -177,15 +343,25 @@ function RuleValues({
   versionNo,
   parameters,
   values,
+  operator,
+  operatorOptions,
   trackerId,
   componentId,
   disabled,
   serverErrors,
   onSave,
+  onSaveOperator,
   onRemove,
 }: RuleValuesProps) {
   const [draft, setDraft] = useState<Record<string, unknown>>(values);
   const dirty = JSON.stringify(draft) !== JSON.stringify(values);
+  /**
+   * T-148 — the operator the maker has chosen, which is not necessarily the one the server has
+   * accepted yet. Held locally so the control shows the choice immediately (the save is a round
+   * trip) and, crucially, still shows it when the save is *rejected* — a select that snapped back
+   * to the old value would leave `serverErrors.operator` pointing at a choice no longer on screen.
+   */
+  const [operatorDraft, setOperatorDraft] = useState<string | null>(operator);
 
   // T-125 — a field with a `valueSource` (T-122) is rendered by `ValueSourceField` below, never
   // by `DynamicParameterForm`: that component's own `select` case only knows the hand-typed
@@ -223,6 +399,31 @@ function RuleValues({
           <Trash2 className="size-4" aria-hidden="true" />
           Remove
         </Button>
+      </div>
+
+      {/* T-148 — the comparison operator, a row of its own above the parameter fields rather than
+          a fourth field type inside `DynamicParameterForm`: it is not one of the rule's own
+          `parameters`, it is the comparison the runtime engine applies to them. Disabled with an
+          explanatory placeholder rather than hidden when the pinned version allows none, so a
+          maker can see *why* nothing is selectable — the same choice `ApiLookupField` makes for
+          its own "Not available yet" state (TC-2). */}
+      <div className="grid gap-4 sm:grid-cols-2">
+        <Select
+          label="Operator"
+          value={operatorDraft}
+          disabled={disabled || operatorOptions.length === 0}
+          error={serverErrors[OPERATOR_ERROR_FIELD]}
+          placeholder={
+            operatorOptions.length === 0
+              ? "No operators configured for this rule's version"
+              : 'Select…'
+          }
+          options={operatorOptions.map((code) => ({ value: code, label: code }))}
+          onChange={(value) => {
+            setOperatorDraft(value);
+            onSaveOperator(value);
+          }}
+        />
       </div>
 
       {parameters.fields.length === 0 && (

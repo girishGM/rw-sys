@@ -53,7 +53,7 @@
  */
 import { useEffect, useState } from 'react';
 import { useLocation, useNavigate, useParams, type Location } from 'react-router-dom';
-import type { CampaignCapInput, RewardLevel } from '@reward-portal/shared';
+import type { CampaignCapInput, Journey, RewardLevel } from '@reward-portal/shared';
 import { Button } from '../../components/Button';
 import { PageHeader } from '../../components/PageHeader';
 import { Stepper } from '../../components/Stepper';
@@ -90,7 +90,8 @@ import { BasicsStep } from './steps/BasicsStep';
 import { basicsFrom, emptyBasics, toCreateRequest, type BasicsValues } from './steps/basicsValues';
 import { MerchantsStep } from './steps/MerchantsStep';
 import { JourneyStep } from './steps/JourneyStep';
-import { ComponentRulesStep } from './steps/ComponentRulesStep';
+import { ComponentRulesStep, type RuleLogic } from './steps/ComponentRulesStep';
+import { componentErrorKey, operatorErrorKey, OPERATOR_ERROR_FIELD } from './steps/ruleErrorKeys';
 import { RewardsStep } from './steps/RewardsStep';
 import { BudgetsStep } from './steps/BudgetsStep';
 import { ReviewStep } from './steps/ReviewStep';
@@ -182,6 +183,12 @@ function ruleValueFieldErrors(bindingId: number, cause: unknown): Record<string,
 
   const errors: Record<string, string> = {};
   for (const detail of cause.details ?? []) {
+    // T-148 — `{ field: 'operator' }` (`OperatorNotAllowedError`), the one detail this endpoint
+    // returns that names a control outside the parameter form, and so carries no `values.` prefix.
+    if (detail.field === OPERATOR_ERROR_FIELD) {
+      errors[operatorErrorKey(bindingId)] ??= cause.message;
+      continue;
+    }
     if (!detail.field.startsWith(RULE_VALUE_FIELD_PREFIX)) continue;
     // `values.a.b` (a nested path a future field type could produce) attaches to `a`, the control
     // the maker can actually see; `values.` alone names no field and is dropped.
@@ -190,6 +197,25 @@ function ruleValueFieldErrors(bindingId: number, cause: unknown): Record<string,
     errors[`${String(bindingId)}.${parameterKey}`] ??= cause.message;
   }
   return errors;
+}
+
+/**
+ * T-148 — the values currently stored against one binding, or `null` when the journey has not
+ * loaded or no longer holds that binding (it was unbound in another tab, say). Returning `null`
+ * rather than `{}` matters: `{}` is a legitimate "this rule takes no parameters" body, so sending
+ * it for a binding this page cannot see would silently erase whatever the server does hold.
+ */
+function boundRuleValues(
+  journey: Journey | undefined,
+  bindingId: number,
+): Record<string, unknown> | null {
+  for (const tracker of journey?.trackers ?? []) {
+    for (const component of tracker.components) {
+      const rule = component.rules.find((entry) => entry.id === bindingId);
+      if (rule !== undefined) return rule.values;
+    }
+  }
+  return null;
 }
 
 export function CampaignWizardPage() {
@@ -202,10 +228,14 @@ export function CampaignWizardPage() {
   const [basics, setBasics] = useState<BasicsValues>(emptyBasics);
   const [error, setError] = useState<string | undefined>(undefined);
   /**
-   * T-136 — the field-level half of a rejected rule-value save, keyed exactly as
+   * T-136 — the field-level half of a rejected step-3 save, keyed exactly as
    * `ComponentRulesStep` reads it (`${bindingId}.${parameterKey}`). Held as state rather than
    * derived: which binding a 400 belongs to is only known at the moment the save that caused it
    * rejects, and no query result carries it.
+   *
+   * T-148 widens it to two more members of the same namespace — a binding's `operator` and a
+   * component's own `ruleLogic` — rather than adding a second parallel map, so the step keeps one
+   * `serverErrors` prop and one "clear before every attempt" rule. See `steps/ruleErrorKeys.ts`.
    */
   const [ruleValueErrors, setRuleValueErrors] = useState<Record<string, string>>({});
 
@@ -303,6 +333,59 @@ export function CampaignWizardPage() {
       report(cause);
       setRuleValueErrors(ruleValueFieldErrors(bindingId, cause));
     });
+  }
+
+  /**
+   * T-148 — save one binding's comparison operator.
+   *
+   * It rides the same `PATCH /campaigns/:id/rules/:bindingId` as the values (T-147: *"`operator`
+   * travels in the same request as `values` rather than its own endpoint"*), whose `values` is
+   * **required** — so the values already on the server are resent unchanged. They are read from
+   * the journey rather than from the step's own draft on purpose: an unsaved draft is not what the
+   * maker asked to save here, and echoing it back would turn an operator click into a silent
+   * commit of half-typed parameter values.
+   */
+  function saveRuleOperator(bindingId: number, operator: string): void {
+    const values = boundRuleValues(journey, bindingId);
+    if (values === null) return;
+    setError(undefined);
+    setRuleValueErrors({});
+    updateRuleValues
+      .mutateAsync({ bindingId, input: { values, operator } })
+      .catch((cause: unknown) => {
+        report(cause);
+        setRuleValueErrors(ruleValueFieldErrors(bindingId, cause));
+      });
+  }
+
+  /**
+   * T-148 — save one component's "rules combine" setting, through the same
+   * `PATCH /campaigns/:id/components/:componentId` the journey builder already uses for a
+   * component's name and activity (T-147 deviation 2).
+   *
+   * Both fields always travel together, `ruleThreshold: null` included: the shared contract's
+   * refine can only judge "n_of needs a threshold, anything else forbids one" when the request
+   * carries what it is actually setting, not a mix of new and stored values.
+   *
+   * A rejection lands on the component's own control rather than only in the step-level sentence,
+   * for the same reason `saveRuleValues` maps a field error back onto its field.
+   */
+  function saveComponentRuleLogic(
+    componentId: number,
+    ruleLogic: RuleLogic,
+    ruleThreshold: number | null,
+  ): void {
+    setError(undefined);
+    setRuleValueErrors({});
+    updateComponent
+      .mutateAsync({ componentId, input: { ruleLogic, ruleThreshold } })
+      .catch((cause: unknown) => {
+        report(cause);
+        setRuleValueErrors({
+          [componentErrorKey(componentId)]:
+            cause instanceof ApiError ? cause.message : 'Something went wrong. Please try again.',
+        });
+      });
   }
 
   function saveBasics(): void {
@@ -455,6 +538,8 @@ export function CampaignWizardPage() {
                 run(unbindRule.mutateAsync(bindingId));
               }}
               onSaveValues={saveRuleValues}
+              onSaveOperator={saveRuleOperator}
+              onSaveRuleLogic={saveComponentRuleLogic}
             />
           </>
         )}

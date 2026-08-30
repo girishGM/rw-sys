@@ -73,6 +73,11 @@ function journeyWith(
     name: string;
     sequenceOrder: number;
     ruleIds: readonly number[];
+    /** T-148 — what the server already holds for this component's "rules combine" setting. */
+    ruleLogic?: 'all' | 'any' | 'n_of' | null;
+    ruleThreshold?: number | null;
+    /** T-148 — the operator already saved against a binding, by that binding's id. */
+    operators?: Readonly<Record<number, string>>;
   }[],
 ): Journey {
   return {
@@ -101,8 +106,8 @@ function journeyWith(
           sequenceOrder: component.sequenceOrder,
           isMandatory: true,
           status: 'active',
-          ruleLogic: null,
-          ruleThreshold: null,
+          ruleLogic: component.ruleLogic ?? null,
+          ruleThreshold: component.ruleThreshold ?? null,
           rewards: [],
           rules: component.ruleIds.map((ruleId) => ({
             id: ruleId,
@@ -113,7 +118,7 @@ function journeyWith(
             ruleVersionNo: null,
             parameters: { fields: [] },
             values: {},
-            operator: null,
+            operator: component.operators?.[ruleId] ?? null,
             value: null,
             status: 'active',
           })),
@@ -137,6 +142,8 @@ function renderStep(
         onBindRule={vi.fn()}
         onUnbindRule={vi.fn()}
         onSaveValues={vi.fn()}
+        onSaveOperator={vi.fn()}
+        onSaveRuleLogic={vi.fn()}
         {...overrides}
       />
     </QueryClientProvider>,
@@ -347,6 +354,8 @@ describe('ComponentRulesStep — Add-a-rule category/sub-category filter (T-112)
         onBindRule={onBindRule}
         onUnbindRule={vi.fn()}
         onSaveValues={vi.fn()}
+        onSaveOperator={vi.fn()}
+        onSaveRuleLogic={vi.fn()}
       />,
     );
 
@@ -376,6 +385,8 @@ describe('ComponentRulesStep — Add-a-rule category/sub-category filter (T-112)
         onBindRule={vi.fn()}
         onUnbindRule={onUnbindRule}
         onSaveValues={vi.fn()}
+        onSaveOperator={vi.fn()}
+        onSaveRuleLogic={vi.fn()}
       />,
     );
 
@@ -448,6 +459,8 @@ describe('ComponentRulesStep — Add-a-rule category/sub-category filter (T-112)
         onBindRule={vi.fn()}
         onUnbindRule={vi.fn()}
         onSaveValues={onSaveValues}
+        onSaveOperator={vi.fn()}
+        onSaveRuleLogic={vi.fn()}
       />,
     );
 
@@ -572,7 +585,7 @@ describe('ComponentRulesStep — value-source-aware fields (T-125)', () => {
     ).toBeInTheDocument();
   });
 
-  it('TC-7: an existing fixed-list select field (no valueSource) is completely unaffected', () => {
+  it('TC-7 (T-125): an existing fixed-list select field (no valueSource) is completely unaffected', () => {
     const fields: RuleParameterField[] = [
       {
         key: 'txnType',
@@ -587,5 +600,251 @@ describe('ComponentRulesStep — value-source-aware fields (T-125)', () => {
     expect(mockGet).not.toHaveBeenCalled();
     const combobox = screen.getByRole('combobox', { name: /transaction type/i });
     expect(combobox).not.toBeDisabled();
+  });
+});
+
+/**
+ * T-148 — the operator dropdown per bound rule and the "Rules combine" picker per component
+ * (`maker-apply-rule-mockup.html`'s two `new`-badged controls).
+ *
+ * Both are pure presentation over T-147's contract: this component never calls the API itself, it
+ * reports the maker's choice through `onSaveOperator`/`onSaveRuleLogic`. So these assert what the
+ * maker sees and what those callbacks receive — the two things `CampaignWizardPage` then turns
+ * into one `PATCH` (its own tests cover that half).
+ */
+describe('ComponentRulesStep — operator + rules-combine (T-148)', () => {
+  const OPERATORS = ['equals', 'in', 'at_least'];
+
+  /** `journeyWith` gives a binding the same id as its rule, so 101 is both here. */
+  const BINDING_ID = RULE_COMPONENT.ruleId;
+
+  const RULE_WITH_OPERATORS = ruleOption({ ...RULE_COMPONENT, defaultOperators: OPERATORS });
+  const RULE_WITHOUT_OPERATORS = ruleOption({ ...RULE_COMPONENT, defaultOperators: [] });
+
+  function oneBoundRule(overrides: Partial<Parameters<typeof journeyWith>[0][number]> = {}) {
+    return journeyWith([
+      { id: 1, name: 'Step 1', sequenceOrder: 1, ruleIds: [RULE_COMPONENT.ruleId], ...overrides },
+    ]);
+  }
+
+  it('TC-1: the operator dropdown offers exactly the rule version’s defaultOperators, and nothing else', async () => {
+    const user = userEvent.setup();
+    renderStep(oneBoundRule(), [RULE_WITH_OPERATORS]);
+
+    await user.click(screen.getByRole('combobox', { name: /^operator$/i }));
+
+    const listbox = screen.getByRole('listbox');
+    expect(
+      within(listbox)
+        .getAllByRole('option')
+        .map((option) => option.textContent),
+    ).toEqual(OPERATORS);
+  });
+
+  it('TC-2: a rule whose version configures no operators renders the control disabled, with the reason', () => {
+    renderStep(oneBoundRule(), [RULE_WITHOUT_OPERATORS]);
+
+    const combobox = screen.getByRole('combobox', { name: /^operator$/i });
+    expect(combobox).toBeDisabled();
+    expect(combobox).toHaveTextContent("No operators configured for this rule's version");
+  });
+
+  it('TC-3: selecting an operator reports it against that binding and shows it on the control', async () => {
+    const user = userEvent.setup();
+    const onSaveOperator = vi.fn();
+    renderStep(oneBoundRule(), [RULE_WITH_OPERATORS], { onSaveOperator });
+
+    const combobox = screen.getByRole('combobox', { name: /^operator$/i });
+    await user.click(combobox);
+    await user.click(screen.getByRole('option', { name: 'in' }));
+
+    expect(onSaveOperator).toHaveBeenCalledTimes(1);
+    expect(onSaveOperator).toHaveBeenCalledWith(BINDING_ID, 'in');
+    // The save is a round trip; the maker's choice must be visible before it lands.
+    expect(combobox).toHaveTextContent('in');
+  });
+
+  it('TC-4: "Rules combine" reads ALL when the server holds null, matching T-147’s null handling', () => {
+    renderStep(oneBoundRule({ ruleLogic: null }), [RULE_WITH_OPERATORS]);
+
+    expect(screen.getByRole('combobox', { name: /rules combine/i })).toHaveTextContent(
+      'ALL must pass',
+    );
+    // Nothing has changed, so there is nothing to save — rendering provokes no request.
+    expect(screen.queryByRole('button', { name: /save rule logic/i })).not.toBeInTheDocument();
+  });
+
+  it('TC-5: choosing "N of X" reveals the threshold input; choosing ALL again hides and clears it', async () => {
+    const user = userEvent.setup();
+    const onSaveRuleLogic = vi.fn();
+    renderStep(oneBoundRule(), [RULE_WITH_OPERATORS], { onSaveRuleLogic });
+
+    expect(screen.queryByLabelText(/^n$/i)).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('combobox', { name: /rules combine/i }));
+    await user.click(screen.getByRole('option', { name: /n of 1 must pass/i }));
+
+    const threshold = screen.getByLabelText(/^n$/i);
+    expect(threshold).toBeInTheDocument();
+    // `n_of` with no threshold is a request the shared contract refuses, so it is not offered.
+    expect(screen.queryByRole('button', { name: /save rule logic/i })).not.toBeInTheDocument();
+    await user.type(threshold, '1');
+
+    await user.click(screen.getByRole('combobox', { name: /rules combine/i }));
+    await user.click(screen.getByRole('option', { name: 'ALL must pass' }));
+
+    expect(screen.queryByLabelText(/^n$/i)).not.toBeInTheDocument();
+    // Cleared, not merely hidden: switching back must not resurrect the old threshold.
+    await user.click(screen.getByRole('combobox', { name: /rules combine/i }));
+    await user.click(screen.getByRole('option', { name: /n of 1 must pass/i }));
+    expect(screen.getByLabelText(/^n$/i)).toHaveValue(null);
+    expect(onSaveRuleLogic).not.toHaveBeenCalled();
+  });
+
+  it('TC-6: saving "N of X" with a threshold of 2 reports (componentId, n_of, 2)', async () => {
+    const user = userEvent.setup();
+    const onSaveRuleLogic = vi.fn();
+    const journey = journeyWith([
+      {
+        id: 42,
+        name: 'Step 1',
+        sequenceOrder: 1,
+        ruleIds: [RULE_COMPONENT.ruleId, RULE_COMPONENT_2.ruleId],
+      },
+    ]);
+    renderStep(journey, [RULE_WITH_OPERATORS], { onSaveRuleLogic });
+
+    await user.click(screen.getByRole('combobox', { name: /rules combine/i }));
+    await user.click(screen.getByRole('option', { name: /n of 2 must pass/i }));
+    await user.type(screen.getByLabelText(/^n$/i), '2');
+    await user.click(screen.getByRole('button', { name: /save rule logic/i }));
+
+    expect(onSaveRuleLogic).toHaveBeenCalledTimes(1);
+    expect(onSaveRuleLogic).toHaveBeenCalledWith(42, 'n_of', 2);
+  });
+
+  it('TC-6b: switching away from "N of X" sends the threshold back as null, never as a leftover', async () => {
+    const user = userEvent.setup();
+    const onSaveRuleLogic = vi.fn();
+    renderStep(
+      oneBoundRule({ id: 9, ruleLogic: 'n_of', ruleThreshold: 1 }),
+      [RULE_WITH_OPERATORS],
+      {
+        onSaveRuleLogic,
+      },
+    );
+
+    await user.click(screen.getByRole('combobox', { name: /rules combine/i }));
+    await user.click(screen.getByRole('option', { name: 'ANY may pass' }));
+    await user.click(screen.getByRole('button', { name: /save rule logic/i }));
+
+    expect(onSaveRuleLogic).toHaveBeenCalledWith(9, 'any', null);
+  });
+
+  it('TC-7: a rejected operator is announced on the operator control itself, not just somewhere on the page', () => {
+    renderStep(oneBoundRule(), [RULE_WITH_OPERATORS], {
+      serverErrors: {
+        [`${String(BINDING_ID)}.operator`]: "This rule's version does not allow that operator.",
+      },
+    });
+
+    const combobox = screen.getByRole('combobox', { name: /^operator$/i });
+    expect(combobox).toHaveAttribute('aria-invalid', 'true');
+    // Asserted through the accessibility wiring rather than "the text is on screen somewhere":
+    // an error a screen reader cannot attribute to this control is the defect, not the copy.
+    const describedBy = combobox.getAttribute('aria-describedby');
+    expect(describedBy).not.toBeNull();
+    expect(document.getElementById(describedBy ?? '')).toHaveTextContent(
+      "This rule's version does not allow that operator.",
+    );
+  });
+
+  it('TC-7b: a rejected rules-combine change is announced on that component’s own control', () => {
+    renderStep(oneBoundRule({ id: 5 }), [RULE_WITH_OPERATORS], {
+      serverErrors: { 'component-5.ruleLogic': 'That combination is not allowed.' },
+    });
+
+    const combobox = screen.getByRole('combobox', { name: /rules combine/i });
+    expect(combobox).toHaveAttribute('aria-invalid', 'true');
+    expect(
+      document.getElementById(combobox.getAttribute('aria-describedby') ?? ''),
+    ).toHaveTextContent('That combination is not allowed.');
+  });
+
+  it('TC-8: one component’s rules-combine draft never reaches a sibling component', async () => {
+    const user = userEvent.setup();
+    const journey = journeyWith([
+      { id: 1, name: 'Step 1', sequenceOrder: 1, ruleIds: [RULE_COMPONENT.ruleId] },
+      { id: 2, name: 'Step 2', sequenceOrder: 2, ruleIds: [RULE_COMPONENT_2.ruleId] },
+    ]);
+    renderStep(journey, [RULE_WITH_OPERATORS]);
+
+    const pickers = screen.getAllByRole('combobox', { name: /rules combine/i });
+    expect(pickers).toHaveLength(2);
+
+    await user.click(pickers[0]);
+    await user.click(screen.getByRole('option', { name: 'ANY may pass' }));
+
+    expect(pickers[0]).toHaveTextContent('ANY may pass');
+    expect(pickers[1]).toHaveTextContent('ALL must pass');
+    // The sibling has nothing pending either — one draft, one Save button.
+    expect(screen.getAllByRole('button', { name: /save rule logic/i })).toHaveLength(1);
+  });
+
+  it('TC-8b: one binding’s operator choice never reaches another binding on the same component', async () => {
+    const user = userEvent.setup();
+    const journey = journeyWith([
+      {
+        id: 1,
+        name: 'Step 1',
+        sequenceOrder: 1,
+        ruleIds: [RULE_COMPONENT.ruleId, RULE_COMPONENT_2.ruleId],
+      },
+    ]);
+    renderStep(journey, [
+      RULE_WITH_OPERATORS,
+      ruleOption({ ...RULE_COMPONENT_2, defaultOperators: OPERATORS }),
+    ]);
+
+    const operators = screen.getAllByRole('combobox', { name: /^operator$/i });
+    await user.click(operators[0]);
+    await user.click(screen.getByRole('option', { name: 'at_least' }));
+
+    expect(operators[0]).toHaveTextContent('at_least');
+    expect(operators[1]).toHaveTextContent('Select…');
+  });
+
+  it('TC-9: both controls pre-populate from what GET /journey returns, with nothing pending', () => {
+    renderStep(
+      oneBoundRule({
+        ruleLogic: 'n_of',
+        ruleThreshold: 2,
+        operators: { [BINDING_ID]: 'at_least' },
+      }),
+      [RULE_WITH_OPERATORS],
+    );
+
+    expect(screen.getByRole('combobox', { name: /^operator$/i })).toHaveTextContent('at_least');
+    expect(screen.getByRole('combobox', { name: /rules combine/i })).toHaveTextContent(
+      'N of 1 must pass',
+    );
+    expect(screen.getByLabelText(/^n$/i)).toHaveValue(2);
+    expect(screen.queryByRole('button', { name: /save rule logic/i })).not.toBeInTheDocument();
+  });
+
+  it('a bound rule the picker no longer offers falls back to the disabled "no operators" state', () => {
+    // The binding survives; its rule is simply not in `ruleOptions` any more.
+    renderStep(oneBoundRule(), [RULE_AGGREGATE]);
+
+    const combobox = screen.getByRole('combobox', { name: /^operator$/i });
+    expect(combobox).toBeDisabled();
+    expect(combobox).toHaveTextContent("No operators configured for this rule's version");
+  });
+
+  it('both controls are read-only when the campaign is', () => {
+    renderStep(oneBoundRule(), [RULE_WITH_OPERATORS], { disabled: true });
+
+    expect(screen.getByRole('combobox', { name: /^operator$/i })).toBeDisabled();
+    expect(screen.getByRole('combobox', { name: /rules combine/i })).toBeDisabled();
   });
 });

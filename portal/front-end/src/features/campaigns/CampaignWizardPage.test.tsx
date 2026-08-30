@@ -21,7 +21,7 @@ import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { RouterProvider, createMemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import type { Bootstrap, Campaign } from '@reward-portal/shared';
+import type { Bootstrap, Campaign, Journey, RuleOption } from '@reward-portal/shared';
 
 const { mockGet, mockPost, mockPatch, mockPut, mockDelete } = vi.hoisted(() => ({
   mockGet: vi.fn(),
@@ -725,5 +725,288 @@ describe('T-136 — a rejected rule-value save is visible on step 3', () => {
       expect(combobox).not.toHaveAttribute('aria-invalid');
     });
     expect(screen.queryByRole('alert')).toBeNull();
+  });
+});
+
+// --- T-148: the operator + rules-combine controls, wired to T-147's two PATCHes -----------------
+//
+// `ComponentRulesStep.test.tsx` covers what the maker sees and what the two new callbacks are
+// handed. What only this file can prove is the other half: that those callbacks turn into the
+// exact requests T-147 published — `operator` folded into the values PATCH (whose `values` is
+// required, so the stored values have to be resent), and `ruleLogic`/`ruleThreshold` always sent
+// together on the component PATCH.
+
+const BINDING_ID = 501;
+const COMPONENT_ID = 11;
+const STORED_VALUES = { minSpend: 30 };
+
+/** One tracker/component/binding with the binding's values already saved, and both of T-147's new
+ * fields set to whatever a given test needs to start from. Typed as the real `Journey` so a
+ * fixture that drifts from the shared contract fails to compile rather than at runtime. */
+function journeyWithOperatorRule(
+  overrides: {
+    operator?: string | null;
+    ruleLogic?: 'all' | 'any' | 'n_of' | null;
+    ruleThreshold?: number | null;
+  } = {},
+): Journey {
+  return {
+    campaignId: CAMPAIGN_ID,
+    campaignRewards: [],
+    trackers: [
+      {
+        id: 1,
+        linkId: 1,
+        trackerCode: 'TRK_1',
+        name: 'Tracker 1',
+        description: null,
+        completionLogic: 'all',
+        completionThreshold: null,
+        isPrimary: true,
+        status: 'active',
+        rewards: [],
+        components: [
+          {
+            id: COMPONENT_ID,
+            linkId: COMPONENT_ID,
+            componentCode: `CMP_${String(COMPONENT_ID)}`,
+            name: 'Step 2',
+            description: null,
+            activityId: null,
+            activityName: null,
+            sequenceOrder: 2,
+            isMandatory: true,
+            status: 'active',
+            ruleLogic: overrides.ruleLogic ?? null,
+            ruleThreshold: overrides.ruleThreshold ?? null,
+            rewards: [],
+            rules: [
+              {
+                id: BINDING_ID,
+                ruleId: RULE_OPTION_ROW.ruleId,
+                ruleCode: RULE_OPTION_ROW.ruleCode,
+                ruleName: RULE_OPTION_ROW.name,
+                ruleVersionId: RULE_OPTION_ROW.ruleVersionId,
+                ruleVersionNo: RULE_OPTION_ROW.ruleVersionNo,
+                parameters: RULE_OPTION_ROW.parameters,
+                values: { ...STORED_VALUES },
+                operator: overrides.operator ?? null,
+                value: null,
+                status: 'active',
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+}
+
+/** The rule picker's row for the bound rule, carrying the operators its pinned version allows. */
+const RULE_OPTION_ROW: RuleOption = {
+  ruleId: 101,
+  ruleCode: 'RULE_COMP_AFTER_001',
+  name: 'Completed after another step',
+  categoryId: 1,
+  subCategoryId: 1,
+  categoryName: 'COMPONENT',
+  subCategoryName: 'GENERAL',
+  ruleVersionId: 9,
+  ruleVersionNo: 3,
+  parameters: {
+    fields: [{ key: 'minSpend', label: 'Minimum spend', type: 'number', required: true }],
+  },
+  defaultOperators: ['equals', 'at_least'],
+};
+
+function stubGetsWithOperatorRule(
+  overrides: Parameters<typeof journeyWithOperatorRule>[0] = {},
+): void {
+  const campaign = draft();
+  mockGet.mockImplementation((url: string) => {
+    if (url === '/me/bootstrap') return Promise.resolve({ data: { data: makerBootstrap } });
+    if (url === `/campaigns/${String(CAMPAIGN_ID)}`) {
+      return Promise.resolve({ data: { data: campaign } });
+    }
+    if (url === `/campaigns/${String(CAMPAIGN_ID)}/journey`) {
+      return Promise.resolve({ data: { data: journeyWithOperatorRule(overrides) } });
+    }
+    if (url === `/campaigns/${String(CAMPAIGN_ID)}/rule-options`) {
+      return Promise.resolve({ data: { data: [RULE_OPTION_ROW] } });
+    }
+    return Promise.resolve({ data: { data: [] } });
+  });
+}
+
+const OPERATOR_MESSAGE = "This rule's version does not allow that operator.";
+
+/** The 400 `OperatorNotAllowedError` produces: `details[].field` is the bare `operator`. */
+function operatorRejection() {
+  return {
+    isAxiosError: true,
+    response: {
+      status: 400,
+      data: {
+        error: {
+          code: 'OPERATOR_NOT_ALLOWED',
+          message: OPERATOR_MESSAGE,
+          details: [{ field: 'operator', code: 'OPERATOR_AT_LEAST' }],
+          traceId: '01J8F3K9QP2M7N00000000',
+        },
+      },
+    },
+    message: 'Request failed with status code 400',
+  };
+}
+
+describe('T-148 — the operator control on step 3', () => {
+  it('sends the operator alongside the values already stored for that binding', async () => {
+    stubGetsWithOperatorRule();
+    mockPatch.mockResolvedValue({
+      data: { data: journeyWithOperatorRule({ operator: 'at_least' }) },
+    });
+    const user = userEvent.setup();
+
+    renderAt({ pathname: `/campaigns/${String(CAMPAIGN_ID)}`, state: { wizardStep: 3 } });
+
+    await user.click(await screen.findByRole('combobox', { name: /^operator$/i }));
+    await user.click(await screen.findByRole('option', { name: 'at_least' }));
+
+    // `values` is required by the shared contract, so an operator-only change still has to carry
+    // them — and must carry the *stored* ones, not an empty object that would erase them.
+    await waitFor(() => {
+      expect(mockPatch).toHaveBeenCalledWith(
+        `/campaigns/${String(CAMPAIGN_ID)}/rules/${String(BINDING_ID)}`,
+        { values: STORED_VALUES, operator: 'at_least' },
+      );
+    });
+  });
+
+  it('offers exactly the operators the rule’s pinned version allows', async () => {
+    stubGetsWithOperatorRule();
+    const user = userEvent.setup();
+
+    renderAt({ pathname: `/campaigns/${String(CAMPAIGN_ID)}`, state: { wizardStep: 3 } });
+    await user.click(await screen.findByRole('combobox', { name: /^operator$/i }));
+
+    const listbox = screen.getByRole('listbox');
+    expect(
+      within(listbox)
+        .getAllByRole('option')
+        .map((option) => option.textContent),
+    ).toEqual(RULE_OPTION_ROW.defaultOperators);
+  });
+
+  it('attaches a rejected operator to the operator control, not only to the step', async () => {
+    stubGetsWithOperatorRule();
+    mockPatch.mockRejectedValue(operatorRejection());
+    const user = userEvent.setup();
+
+    renderAt({ pathname: `/campaigns/${String(CAMPAIGN_ID)}`, state: { wizardStep: 3 } });
+
+    const combobox = await screen.findByRole('combobox', { name: /^operator$/i });
+    await user.click(combobox);
+    await user.click(await screen.findByRole('option', { name: 'at_least' }));
+
+    await waitFor(() => {
+      expect(combobox).toHaveAttribute('aria-invalid', 'true');
+    });
+    expect(
+      document.getElementById(combobox.getAttribute('aria-describedby') ?? ''),
+    ).toHaveTextContent(OPERATOR_MESSAGE);
+    // The rejected choice stays on screen: an error about an operator the control no longer shows
+    // would be unattributable.
+    expect(combobox).toHaveTextContent('at_least');
+  });
+
+  it('pre-populates the operator the journey already holds', async () => {
+    stubGetsWithOperatorRule({ operator: 'equals' });
+
+    renderAt({ pathname: `/campaigns/${String(CAMPAIGN_ID)}`, state: { wizardStep: 3 } });
+
+    expect(await screen.findByRole('combobox', { name: /^operator$/i })).toHaveTextContent(
+      'equals',
+    );
+    expect(mockPatch).not.toHaveBeenCalled();
+  });
+});
+
+describe('T-148 — the rules-combine control on step 3', () => {
+  it('sends ruleLogic and ruleThreshold together on the component PATCH', async () => {
+    stubGetsWithOperatorRule();
+    mockPatch.mockResolvedValue({
+      data: { data: journeyWithOperatorRule({ ruleLogic: 'n_of', ruleThreshold: 1 }) },
+    });
+    const user = userEvent.setup();
+
+    renderAt({ pathname: `/campaigns/${String(CAMPAIGN_ID)}`, state: { wizardStep: 3 } });
+
+    await user.click(await screen.findByRole('combobox', { name: /rules combine/i }));
+    await user.click(await screen.findByRole('option', { name: /n of 1 must pass/i }));
+    await user.type(screen.getByLabelText(/^n$/i), '1');
+    await user.click(screen.getByRole('button', { name: /save rule logic/i }));
+
+    await waitFor(() => {
+      expect(mockPatch).toHaveBeenCalledWith(
+        `/campaigns/${String(CAMPAIGN_ID)}/components/${String(COMPONENT_ID)}`,
+        { ruleLogic: 'n_of', ruleThreshold: 1 },
+      );
+    });
+  });
+
+  it('sends ruleThreshold: null when the maker moves off "N of X"', async () => {
+    stubGetsWithOperatorRule({ ruleLogic: 'n_of', ruleThreshold: 1 });
+    mockPatch.mockResolvedValue({ data: { data: journeyWithOperatorRule({ ruleLogic: 'all' }) } });
+    const user = userEvent.setup();
+
+    renderAt({ pathname: `/campaigns/${String(CAMPAIGN_ID)}`, state: { wizardStep: 3 } });
+
+    await user.click(await screen.findByRole('combobox', { name: /rules combine/i }));
+    await user.click(await screen.findByRole('option', { name: 'ALL must pass' }));
+    await user.click(screen.getByRole('button', { name: /save rule logic/i }));
+
+    // Omitting `ruleThreshold` would leave the stored `1` behind an `all` the contract forbids it
+    // with; `null` is what actually clears it.
+    await waitFor(() => {
+      expect(mockPatch).toHaveBeenCalledWith(
+        `/campaigns/${String(CAMPAIGN_ID)}/components/${String(COMPONENT_ID)}`,
+        { ruleLogic: 'all', ruleThreshold: null },
+      );
+    });
+  });
+
+  it('attaches a rejected rules-combine change to that component’s own control', async () => {
+    stubGetsWithOperatorRule();
+    mockPatch.mockRejectedValue(
+      axiosError(400, 'VALIDATION_FAILED', 'That combination is not allowed.'),
+    );
+    const user = userEvent.setup();
+
+    renderAt({ pathname: `/campaigns/${String(CAMPAIGN_ID)}`, state: { wizardStep: 3 } });
+
+    const combobox = await screen.findByRole('combobox', { name: /rules combine/i });
+    await user.click(combobox);
+    await user.click(await screen.findByRole('option', { name: 'ANY may pass' }));
+    await user.click(screen.getByRole('button', { name: /save rule logic/i }));
+
+    await waitFor(() => {
+      expect(combobox).toHaveAttribute('aria-invalid', 'true');
+    });
+    expect(
+      document.getElementById(combobox.getAttribute('aria-describedby') ?? ''),
+    ).toHaveTextContent('That combination is not allowed.');
+  });
+
+  it('pre-populates "N of X" and its threshold from the journey, and asks for nothing', async () => {
+    stubGetsWithOperatorRule({ ruleLogic: 'n_of', ruleThreshold: 1 });
+
+    renderAt({ pathname: `/campaigns/${String(CAMPAIGN_ID)}`, state: { wizardStep: 3 } });
+
+    expect(await screen.findByRole('combobox', { name: /rules combine/i })).toHaveTextContent(
+      'N of 1 must pass',
+    );
+    expect(screen.getByLabelText(/^n$/i)).toHaveValue(1);
+    expect(screen.queryByRole('button', { name: /save rule logic/i })).not.toBeInTheDocument();
+    expect(mockPatch).not.toHaveBeenCalled();
   });
 });
