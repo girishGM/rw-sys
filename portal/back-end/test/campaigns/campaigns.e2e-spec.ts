@@ -1723,6 +1723,53 @@ describe('T-147 · rule operator and component combination logic', () => {
     expect(row.rule_threshold).toBe(1);
   });
 
+  it('a partial PATCH — ruleThreshold alone, ruleLogic omitted — never leaves a threshold stored on a non-n_of component', async () => {
+    // The gap an independent review of T-147 found: `updateComponentRequestSchema`'s own
+    // cross-field refine only sees the fields *this* request sends, so a request naming
+    // `ruleThreshold` alone (no `ruleLogic`) passes it untouched. The invariant must still hold
+    // in the stored row — this proves `journey.service.ts#updateComponent` merges against the
+    // component's current `ruleLogic` rather than trusting the refine alone.
+    const { id, componentId } = await buildSubmittableCampaign();
+    // Confirm the starting state really is non-n_of (the untouched default).
+    const [before] = await sql<{ rule_logic: string | null }>(
+      'SELECT rule_logic FROM reward_config.tracker_components WHERE id = :id',
+      { id: componentId },
+    );
+    expect(before.rule_logic).toBeNull();
+
+    await patch('makerA', `/campaigns/${String(id)}/components/${String(componentId)}`, {
+      ruleThreshold: 5,
+    }).expect(200);
+
+    const [after] = await sql<{ rule_logic: string | null; rule_threshold: number | null }>(
+      'SELECT rule_logic, rule_threshold FROM reward_config.tracker_components WHERE id = :id',
+      { id: componentId },
+    );
+    expect(after.rule_logic).toBeNull();
+    // The attempted threshold is discarded, not stored — the same "clear rather than leave a
+    // stale value" choice `updateTracker`'s own `completionThreshold` handling already makes.
+    expect(after.rule_threshold).toBeNull();
+  });
+
+  it('switching ruleLogic away from n_of, alone, clears a previously stored threshold', async () => {
+    const { id, componentId } = await buildSubmittableCampaign();
+    await patch('makerA', `/campaigns/${String(id)}/components/${String(componentId)}`, {
+      ruleLogic: 'n_of',
+      ruleThreshold: 3,
+    }).expect(200);
+
+    await patch('makerA', `/campaigns/${String(id)}/components/${String(componentId)}`, {
+      ruleLogic: 'any',
+    }).expect(200);
+
+    const [row] = await sql<{ rule_logic: string; rule_threshold: number | null }>(
+      'SELECT rule_logic, rule_threshold FROM reward_config.tracker_components WHERE id = :id',
+      { id: componentId },
+    );
+    expect(row.rule_logic).toBe('any');
+    expect(row.rule_threshold).toBeNull();
+  });
+
   it("ruleLogic defaults to null (reads as 'all') until a Maker sets one", async () => {
     const { id, componentId } = await buildSubmittableCampaign();
     const journey = await get('makerA', `/campaigns/${String(id)}/journey`).expect(200);
