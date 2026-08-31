@@ -4,7 +4,16 @@
  * model instances the services load, never by spreading a Sequelize row — the same
  * construction rule `rule-response.dto.ts` records. Mirrored field-for-field by
  * `packages/shared/src/version.schema.ts`.
+ *
+ * T-109 — `resolverId`/`resolverConfig`/`evaluationContext`/`defaultOperators` (T-103) are now
+ * included on `RuleVersionDto`, closing the gap T-105's own architect review found ("resolver
+ * fields silently dropped"). `resolverConfig`/`defaultOperators` are `text` columns holding
+ * JSON, read verbatim by the model (`rule-version.model.ts`'s own doc comment) — this file
+ * parses them the same tolerant way `parameters` is parsed at the model layer, via the shared
+ * `parseJsonColumn` helper, falling back to `null` (not `{}`/`[]`) so an absent/malformed value
+ * reads as "not wired" rather than "wired to an empty config".
  */
+import { parseJsonColumn } from '@/database/util/json-text.util';
 import type { RuleVersion } from '@/database/models/rule-version.model';
 import type { RewardVersion } from '@/database/models/reward-version.model';
 import type { RuleVersionCountryAssignment } from '@/database/models/rule-version-country-assignment.model';
@@ -52,6 +61,11 @@ export interface RuleVersionDto {
   readonly retiredAt: string | null;
   readonly updatedAt: string;
   readonly suggestedIsBreaking: boolean | null;
+  /** T-109/T-103 — `null` reads as "not yet wired to the registry-driven rule engine". */
+  readonly resolverId: number | null;
+  readonly resolverConfig: Record<string, unknown> | null;
+  readonly evaluationContext: string | null;
+  readonly defaultOperators: readonly string[] | null;
 }
 
 export function toRuleVersionDto(
@@ -77,6 +91,10 @@ export function toRuleVersionDto(
     retiredAt: version.retiredAt?.toISOString() ?? null,
     updatedAt: version.updatedAt.toISOString(),
     suggestedIsBreaking,
+    resolverId: version.resolverId,
+    resolverConfig: parseJsonColumn<Record<string, unknown> | null>(version.resolverConfig, null),
+    evaluationContext: version.evaluationContext,
+    defaultOperators: parseJsonColumn<readonly string[] | null>(version.defaultOperators, null),
   };
 }
 

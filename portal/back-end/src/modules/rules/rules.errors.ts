@@ -20,7 +20,12 @@
  * already has (or can fetch) the country/campaign list separately. `logContext` carries the
  * richer, human-readable form for the server log only — never serialised to a client.
  */
-import { BusinessRuleError, ConflictError, type AppErrorOptions } from '@/common/errors/app-error';
+import {
+  AppError,
+  BusinessRuleError,
+  ConflictError,
+  type AppErrorOptions,
+} from '@/common/errors/app-error';
 
 /**
  * `INVALID_RULE_PARAMETERS`/TC-14 is **not** one of these: `parameters` is validated entirely
@@ -36,12 +41,33 @@ export const RULE_ERROR_CODE = Object.freeze({
   RULE_HAS_COUNTRY_ASSIGNMENTS: 'RULE_HAS_COUNTRY_ASSIGNMENTS',
   /** Unassigning a rule a campaign is actively bound to (implementation note 6, TC-12). */
   RULE_IN_USE_BY_CAMPAIGN: 'RULE_IN_USE_BY_CAMPAIGN',
+  /** T-106 — `uq_rc_tenant_code` — a category code is already in use. */
+  RULE_CATEGORY_CODE_EXISTS: 'RULE_CATEGORY_CODE_EXISTS',
+  /** T-106 — `uq_rsc_category_code` — a sub-category code is already in use under that category. */
+  RULE_SUB_CATEGORY_CODE_EXISTS: 'RULE_SUB_CATEGORY_CODE_EXISTS',
+  /** T-122 — a parameter field's `valueSource` names a provider code no registry holds (TC-4). */
+  UNKNOWN_FIELD_VALUE_SOURCE_PROVIDER: 'UNKNOWN_FIELD_VALUE_SOURCE_PROVIDER',
 });
 
 /** 409 — `POST /rules` with a `ruleCode` already in use by another global rule (TC-18). */
 export class RuleCodeExistsError extends ConflictError {
   constructor(options: AppErrorOptions = {}) {
     super(RULE_ERROR_CODE.RULE_CODE_EXISTS, options);
+  }
+}
+
+/** T-106 — 409 — `POST /rule-categories` with a `categoryCode` already in use. */
+export class RuleCategoryCodeExistsError extends ConflictError {
+  constructor(options: AppErrorOptions = {}) {
+    super(RULE_ERROR_CODE.RULE_CATEGORY_CODE_EXISTS, options);
+  }
+}
+
+/** T-106 — 409 — `POST /rule-sub-categories` with a `subCategoryCode` already in use under
+ * that category. */
+export class RuleSubCategoryCodeExistsError extends ConflictError {
+  constructor(options: AppErrorOptions = {}) {
+    super(RULE_ERROR_CODE.RULE_SUB_CATEGORY_CODE_EXISTS, options);
   }
 }
 
@@ -53,6 +79,37 @@ export class RuleHasCountryAssignmentsError extends BusinessRuleError {
       ...options,
       details: countryIds.map((id) => ({ field: 'countryId', code: `COUNTRY_${id}` })),
       logContext: { ...options.logContext, countryIds },
+    });
+  }
+}
+
+/**
+ * 400 — T-122: a parameter field's `valueSource` references a provider code that does not exist
+ * in `field_context_providers`/`field_api_lookup_providers` (TC-4).
+ *
+ * **400, not 404.** The thing being addressed by the request is the rule; the bad code is one
+ * value *inside* the body, which is the same reading `RuleNotAssignedToCountryError` (400) applies
+ * in `campaigns.errors.ts` rather than the 404 a missing top-level resource would get. A 404 here
+ * would also be actively misleading on `PATCH /rules/:id`, where it is indistinguishable from "no
+ * such rule".
+ *
+ * A provider whose `status` is `planned` is **not** an error and never reaches this class — see
+ * `rules.service.ts#assertValueSourceProvidersExist`. Only a code no row carries at all does.
+ *
+ * `details` is `{ field: 'parameters.<fieldKey>', code: 'PROVIDER_<CODE>' }`. Both halves are
+ * bounded by patterns that already fit `SAFE_FIELD_PATTERN`/`SAFE_ERROR_CODE_PATTERN`: a field
+ * `key` is at most 64 identifier chars (`rule.schema.ts`) so `parameters.` + key is at most 75 of
+ * the 80 allowed, and a provider code is at most 50 upper-snake chars so `PROVIDER_` + code is at
+ * most 59 of the 60 allowed. Neither can be silently dropped by `ErrorNormalizationFilter` for
+ * length — which matters, because a dropped detail would leave the caller with no way to tell
+ * *which* field was wrong.
+ */
+export class UnknownFieldValueSourceProviderError extends AppError {
+  constructor(fieldKey: string, providerCode: string, options: AppErrorOptions = {}) {
+    super(RULE_ERROR_CODE.UNKNOWN_FIELD_VALUE_SOURCE_PROVIDER, 400, {
+      ...options,
+      details: [{ field: `parameters.${fieldKey}`, code: `PROVIDER_${providerCode}` }],
+      logContext: { ...options.logContext, fieldKey, providerCode },
     });
   }
 }

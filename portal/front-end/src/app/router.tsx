@@ -99,12 +99,21 @@ const AuditViewerPage = lazyPage(
 // immediately swap it out in the same task would be pure churn.
 const RulesListPage = lazyPage(() => import('../features/rules'), 'RulesListPage');
 const RuleDetailPage = lazyPage(() => import('../features/rules'), 'RuleDetailPage');
+// T-107 — categories/sub-categories management, same deviation as RulesListPage's own comment
+// above: this screen is this task's own scope, built directly rather than behind a stub.
+const CategoriesPage = lazyPage(() => import('../features/rules'), 'CategoriesPage');
+// T-146 — Value Sources (registries), same deviation: this screen is this task's own scope.
+const ValueSourcesPage = lazyPage(() => import('../features/rules'), 'ValueSourcesPage');
 // T-032 — `RewardsListPage`/`RewardDetailPage` replace the generic `RouteStub` for `/rewards`
 // and `/rewards/:id`, the same kind of deviation T-031/T-045/T-023/T-030/T-040 made: these
 // screens are this task's own scope (`front-end/src/features/rewards/**`), so building them
 // behind a stub only to immediately swap it out in the same task would be pure churn.
 const RewardsListPage = lazyPage(() => import('../features/rewards'), 'RewardsListPage');
 const RewardDetailPage = lazyPage(() => import('../features/rewards'), 'RewardDetailPage');
+// T-117 — categories/sub-categories management for Rewards, the same deviation
+// `CategoriesPage`'s own comment above documents for Rules: this screen is this task's own
+// scope, built directly rather than behind a stub.
+const RewardCategoriesPage = lazyPage(() => import('../features/rewards'), 'RewardCategoriesPage');
 // T-033 — `AccessControlPage` replaces the generic `RouteStub` for `/admin/access-control`, the
 // same kind of deviation T-031/T-032/T-045/T-023/T-030/T-040 made: this screen is this task's own
 // scope (`front-end/src/features/access-control/**`), so building it behind a stub only to
@@ -221,12 +230,34 @@ export const PROTECTED_ROUTE_SPECS: readonly ProtectedRouteSpec[] = [
     entity: 'rule',
     action: 'view',
   },
+  {
+    path: '/rule-categories',
+    label: 'Categories',
+    entity: 'rule_category',
+    action: 'view',
+  },
+  // T-146 — reuses the `rule_category`/`view` grant: a read-only reference page with no write
+  // action of its own doesn't need a new permission entity, same reasoning T-108 gave for
+  // skipping `@RequirePermission` on `/rule-resolvers`/`/rule-operators` server-side.
+  {
+    path: '/rule-value-sources',
+    label: 'Value Sources',
+    entity: 'rule_category',
+    action: 'view',
+  },
   { path: '/rewards', label: 'Rewards', entity: 'reward', action: 'view' },
   {
     path: '/rewards/:id',
     testPath: '/rewards/1',
     label: 'Reward detail',
     entity: 'reward',
+    action: 'view',
+  },
+  // T-117 — mirrors `/rule-categories` above, one row up (same entity-pair pattern, reward side).
+  {
+    path: '/reward-categories',
+    label: 'Categories',
+    entity: 'reward_category',
     action: 'view',
   },
   { path: '/tenants', label: 'Tenants', entity: 'tenant', action: 'view' },
@@ -348,10 +379,16 @@ function buildProtectedChild(spec: ProtectedRouteSpec): RouteObject {
       <RulesListPage />
     ) : spec.path === '/rules/:id' ? (
       <RuleDetailPage />
+    ) : spec.path === '/rule-categories' ? (
+      <CategoriesPage />
+    ) : spec.path === '/rule-value-sources' ? (
+      <ValueSourcesPage />
     ) : spec.path === '/rewards' ? (
       <RewardsListPage />
     ) : spec.path === '/rewards/:id' ? (
       <RewardDetailPage />
+    ) : spec.path === '/reward-categories' ? (
+      <RewardCategoriesPage />
     ) : spec.path === '/admin/access-control' ? (
       <AccessControlPage />
     ) : spec.path === '/tenants' ? (

@@ -9,7 +9,7 @@
  * than only inferred from controller metadata.
  */
 import { UniqueConstraintError } from 'sequelize';
-import { Tenant, TenantBudgetCeiling } from '@/database/models';
+import { Country, Tenant, TenantBudgetCeiling, TenantCurrency } from '@/database/models';
 import { PortalUser } from '@/database/portal-models';
 import { ScopeViolationError } from '@/common/scope/scope.exceptions';
 import { PermissionDeniedHttpException } from '@/common/rbac/rbac.exceptions';
@@ -40,6 +40,7 @@ import {
   asSequelize,
   asSessionService,
   budgetCeilingRow,
+  countryRow,
   portalUserRow,
   requestContext,
   tenantRow,
@@ -77,6 +78,11 @@ describe('TenantsService', () => {
 
   beforeEach(() => {
     scoped = new FakeScopedRepository();
+    // T-143: every `create()` call goes through `insertTenant`, which now looks up the tenant's
+    // own country to seed its default currency row — seeded here, once, so every existing
+    // `create`-path test below keeps working unchanged; tests that care about the country's own
+    // shape (e.g. its `currencyCode`) override it explicitly with `scoped.setByPk(Country, …)`.
+    scoped.setByPk(Country, countryRow());
     sequelize = new FakeSequelize();
     credentials = new FakeCredentialService();
     credentialStore = new FakeCredentialProvisioner();
@@ -252,8 +258,14 @@ describe('TenantsService', () => {
 
       // T-059 (TC-2/TC-8): the credential no longer goes through `ScopedRepository.create` at
       // all — `PortalUserCredential` is `deny()` for every scoped role, so a call here would
-      // always have thrown. Only `Tenant` and `PortalUser` go through the scoped path.
-      expect(scoped.callsTo('create').map((c) => c.model)).toEqual([Tenant.name, PortalUser.name]);
+      // always have thrown. `Tenant`, `TenantCurrency` (T-143) and `PortalUser` go through the
+      // scoped path, in that order — the default currency row is seeded as part of tenant
+      // creation itself, before admin provisioning ever starts.
+      expect(scoped.callsTo('create').map((c) => c.model)).toEqual([
+        Tenant.name,
+        TenantCurrency.name,
+        PortalUser.name,
+      ]);
       // The credential is instead routed through `CredentialProvisioner` (the fix's own route).
       expect(credentialStore.created).toHaveLength(1);
       expect(credentialStore.created[0]).toMatchObject({
@@ -353,6 +365,89 @@ describe('TenantsService', () => {
 
       expect(result.email).toBe('sa-provisioned@example.invalid');
       expect(credentialStore.created).toHaveLength(1);
+    });
+  });
+
+  // --- T-143 — insertTenant seeds a default tenant_currencies row --------------------------
+
+  describe('T-143 — a new tenant gets a default tenant_currencies row (TC-2)', () => {
+    it('inserts one is_default=true, active row carrying the tenant’s own country’s currency', async () => {
+      scoped.setByPk(Country, countryRow({ id: 7, currencyCode: 'SGD' }));
+
+      await service.create(actor(), newTenantDto());
+
+      const call = scoped.callsTo('create').find((c) => c.model === TenantCurrency.name);
+      expect(call?.values).toMatchObject({
+        currencyCode: 'SGD',
+        isDefault: true,
+        status: 'active',
+      });
+    });
+
+    it('is not a hard-coded currency — a different country’s currency_code is what gets written', async () => {
+      scoped.setByPk(Country, countryRow({ currencyCode: 'MYR' }));
+      await service.create(actor(), newTenantDto());
+      expect(
+        scoped.callsTo('create').find((c) => c.model === TenantCurrency.name)?.values,
+      ).toMatchObject({ currencyCode: 'MYR' });
+
+      scoped.setByPk(Country, countryRow({ currencyCode: 'PHP' }));
+      await service.create(actor(), newTenantDto({ code: 'T002' }));
+      expect(
+        scoped
+          .callsTo('create')
+          .filter((c) => c.model === TenantCurrency.name)
+          .at(-1)?.values,
+      ).toMatchObject({ currencyCode: 'PHP' });
+    });
+
+    it('carries the tenant id the Tenant insert just produced, not a stale or hard-coded one', async () => {
+      const result = await service.create(actor(), newTenantDto());
+      const call = scoped.callsTo('create').find((c) => c.model === TenantCurrency.name);
+      expect((call?.values as Record<string, unknown> | undefined)?.['tenantId']).toBe(
+        result.tenant.id,
+      );
+    });
+
+    it('looks the tenant’s own country up through the scoped repository, never a hard-coded row (R3)', async () => {
+      // `FakeScopedRepository.create()` (this suite's own fake, unlike the real `ScopedRepository`)
+      // does not simulate `forcedWriteValues` merging `country_id` onto the returned `Tenant`
+      // instance — that mechanism is `scope-strategy.spec.ts`/`scoped.repository.spec.ts`'s own
+      // 100% branch-covered territory (this file's header, "never reads a countryId off the dto"
+      // test, makes the same point). What this test proves at this layer is only that the lookup
+      // goes through `this.scoped.findByPkOrFail(Country, …)` — i.e. through the one path scope
+      // actually gets enforced on — rather than, say, `actor.countryId` read directly. The
+      // *value* a `country_admin`'s own country id ends up being is proven against the real
+      // database in `tenants.e2e-spec.ts`'s T-143 suite (`currencyCode: 'USD'`, this file's own
+      // fixture country), which a fake cannot prove no matter how it is shaped.
+      await service.create(actor(), newTenantDto());
+      const call = scoped.callsTo('findByPkOrFail').find((c) => c.model === Country.name);
+      expect(call).toBeDefined();
+    });
+
+    it('the Tenant, its default currency and (when requested) its admin all share one transaction (TC-14 shape, extended)', async () => {
+      await service.create(actor(), newTenantDto({ admin: newAdminDto() }));
+      const transactions = new Set(
+        scoped.callsTo('create').map((c) => (c.options as { transaction: unknown }).transaction),
+      );
+      expect(transactions.size).toBe(1);
+    });
+
+    it('a failure inserting the default currency row propagates out of the transaction — no half-created tenant left behind', async () => {
+      scoped.failNextCreate(TenantCurrency, new Error('simulated currency insert failure'));
+      await expect(service.create(actor(), newTenantDto())).rejects.toThrow(
+        'simulated currency insert failure',
+      );
+      // The admin step (and its credential) must never have been reached either.
+      expect(credentialStore.created).toHaveLength(0);
+    });
+
+    it('creating a tenant with no nested admin still gets its default currency row (the bug this task fixes)', async () => {
+      const result = await service.create(actor(), newTenantDto());
+      expect(result.admin).toBeNull();
+      const call = scoped.callsTo('create').find((c) => c.model === TenantCurrency.name);
+      expect(call).toBeDefined();
+      expect(call?.values).toMatchObject({ tenantId: result.tenant.id, isDefault: true });
     });
   });
 

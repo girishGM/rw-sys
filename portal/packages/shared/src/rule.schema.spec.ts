@@ -11,8 +11,15 @@ import {
   ruleCategorySchema,
   ruleCountryAssignmentSchema,
   ruleEnvelopeSchema,
+  ruleFieldRoleSchema,
+  ruleFieldValueSourceSchema,
   ruleListEnvelopeSchema,
+  ruleParameterFieldSchema,
+  ruleParameterFieldWithRoleSchema,
+  ruleParametersEnvelopeSchema,
   ruleParametersSchema,
+  ruleParametersWithRoleSchema,
+  ruleResolverSchema,
   ruleSchema,
   ruleSubCategorySchema,
   updateRuleRequestSchema,
@@ -280,5 +287,446 @@ describe('reference data schemas', () => {
         status: 'active',
       }).success,
     ).toBe(true);
+  });
+
+  it('ruleResolverSchema accepts resolverInputFieldKeys (T-114)', () => {
+    expect(
+      ruleResolverSchema.safeParse({
+        id: 1,
+        resolverCode: 'TRACKER_STATE_LOOKUP',
+        name: 'Sibling Tracker Component Lookup',
+        description: null,
+        status: 'active',
+        resolverInputFieldKeys: ['targetComponentCode'],
+      }).success,
+    ).toBe(true);
+  });
+
+  it('ruleResolverSchema rejects a row missing resolverInputFieldKeys — strict', () => {
+    expect(
+      ruleResolverSchema.safeParse({
+        id: 1,
+        resolverCode: 'JSONPATH_PAYLOAD',
+        name: 'Incoming Event Payload',
+        description: null,
+        status: 'active',
+      }).success,
+    ).toBe(false);
+  });
+});
+
+/**
+ * T-114 — `13-REWARD-MASTER-VALUE-SOURCES.md` §2: a parameter field's `role` is server-computed
+ * and response-only. `ruleParameterFieldSchema` (the write shape `createRuleRequestSchema`/
+ * `updateRuleRequestSchema` embed) never gains a `role` key — a request that supplies one 400s
+ * (TC-6). `ruleParameterFieldWithRoleSchema`/`ruleParametersWithRoleSchema` (the response shape
+ * `ruleSchema`/`ruleParametersEnvelopeSchema` embed) require it on every field.
+ */
+describe('T-114 — resolver-driven parameter-field role', () => {
+  it('ruleFieldRoleSchema accepts exactly compare_value / resolver_input', () => {
+    expect(ruleFieldRoleSchema.safeParse('compare_value').success).toBe(true);
+    expect(ruleFieldRoleSchema.safeParse('resolver_input').success).toBe(true);
+    expect(ruleFieldRoleSchema.safeParse('resolver_output').success).toBe(false);
+  });
+
+  describe('the write shape (ruleParameterFieldSchema) never accepts role — TC-6', () => {
+    it('rejects a field body that supplies role', () => {
+      const result = ruleParameterFieldSchema.safeParse({
+        key: 'targetComponentCode',
+        label: 'Sibling Component Code',
+        type: 'string',
+        required: true,
+        role: 'resolver_input',
+      });
+      expect(result.success).toBe(false);
+    });
+
+    it('createRuleRequestSchema 400s a parameters.fields[].role from the client (TC-6)', () => {
+      const result = createRuleRequestSchema.safeParse({
+        ruleCode: 'RULE_X',
+        name: 'x',
+        subCategoryId: 1,
+        parameters: {
+          fields: [
+            {
+              key: 'targetComponentCode',
+              label: 'Sibling Component Code',
+              type: 'string',
+              required: true,
+              role: 'resolver_input',
+            },
+          ],
+        },
+      });
+      expect(result.success).toBe(false);
+    });
+
+    it('updateRuleRequestSchema 400s a parameters.fields[].role from the client (TC-6)', () => {
+      const result = updateRuleRequestSchema.safeParse({
+        parameters: {
+          fields: [
+            { key: 'value', label: 'Value', type: 'string', required: true, role: 'compare_value' },
+          ],
+        },
+      });
+      expect(result.success).toBe(false);
+    });
+
+    it('a plain field with no role key is still accepted — role is additive, not required here', () => {
+      expect(
+        ruleParameterFieldSchema.safeParse({
+          key: 'value',
+          label: 'Value',
+          type: 'string',
+          required: true,
+        }).success,
+      ).toBe(true);
+    });
+  });
+
+  describe('the response shape (ruleParameterFieldWithRoleSchema / ruleParametersWithRoleSchema)', () => {
+    it('accepts a field with role: resolver_input', () => {
+      expect(
+        ruleParameterFieldWithRoleSchema.safeParse({
+          key: 'targetComponentCode',
+          label: 'Sibling Component Code',
+          type: 'string',
+          required: true,
+          role: 'resolver_input',
+        }).success,
+      ).toBe(true);
+    });
+
+    it('rejects a field missing role — response shape requires it', () => {
+      expect(
+        ruleParameterFieldWithRoleSchema.safeParse({
+          key: 'value',
+          label: 'Value',
+          type: 'string',
+          required: true,
+        }).success,
+      ).toBe(false);
+    });
+
+    it('rejects an unrecognised role value', () => {
+      expect(
+        ruleParameterFieldWithRoleSchema.safeParse({
+          key: 'value',
+          label: 'Value',
+          type: 'string',
+          required: true,
+          role: 'not_a_role',
+        }).success,
+      ).toBe(false);
+    });
+
+    it('still requires options on a select field, role notwithstanding', () => {
+      expect(
+        ruleParameterFieldWithRoleSchema.safeParse({
+          key: 'tier',
+          label: 'Tier',
+          type: 'select',
+          required: true,
+          role: 'compare_value',
+        }).success,
+      ).toBe(false);
+    });
+
+    it('ruleParametersWithRoleSchema accepts a mix of resolver_input and compare_value fields', () => {
+      const result = ruleParametersWithRoleSchema.safeParse({
+        fields: [
+          {
+            key: 'targetComponentCode',
+            label: 'Sibling Component Code',
+            type: 'string',
+            required: true,
+            role: 'resolver_input',
+          },
+          {
+            key: 'value',
+            label: 'Expected Status',
+            type: 'select',
+            required: true,
+            options: ['COMPLETED'],
+            role: 'compare_value',
+          },
+        ],
+      });
+      expect(result.success).toBe(true);
+    });
+
+    it('ruleParametersWithRoleSchema still normalises a bare {} to { fields: [] } (T-074 parity)', () => {
+      const result = ruleParametersWithRoleSchema.safeParse({});
+      expect(result.success).toBe(true);
+      if (result.success) expect(result.data).toEqual({ fields: [] });
+    });
+
+    it('ruleParametersWithRoleSchema still rejects duplicate keys', () => {
+      const result = ruleParametersWithRoleSchema.safeParse({
+        fields: [
+          { key: 'a', label: 'A', type: 'string', required: true, role: 'compare_value' },
+          { key: 'a', label: 'A again', type: 'string', required: false, role: 'compare_value' },
+        ],
+      });
+      expect(result.success).toBe(false);
+    });
+  });
+
+  describe('ruleSchema / ruleParametersEnvelopeSchema — the response paths that embed the with-role shape', () => {
+    it('ruleSchema accepts a rule whose parameters fields all carry role', () => {
+      const rule = {
+        ...validRule(),
+        parameters: {
+          fields: [
+            {
+              key: 'targetComponentCode',
+              label: 'Sibling Component Code',
+              type: 'string',
+              required: true,
+              role: 'resolver_input',
+            },
+          ],
+        },
+      };
+      expect(ruleSchema.safeParse(rule).success).toBe(true);
+    });
+
+    it('ruleSchema rejects a rule whose parameters field is missing role', () => {
+      const rule = {
+        ...validRule(),
+        parameters: {
+          fields: [{ key: 'value', label: 'Value', type: 'string', required: true }],
+        },
+      };
+      expect(ruleSchema.safeParse(rule).success).toBe(false);
+    });
+
+    it('ruleParametersEnvelopeSchema wraps the role-annotated parameters shape', () => {
+      expect(
+        ruleParametersEnvelopeSchema.safeParse({
+          data: {
+            fields: [
+              {
+                key: 'value',
+                label: 'Value',
+                type: 'string',
+                required: true,
+                role: 'compare_value',
+              },
+            ],
+          },
+        }).success,
+      ).toBe(true);
+    });
+  });
+});
+
+/**
+ * T-122 — `13-REWARD-MASTER-VALUE-SOURCES.md` §3: a `select` parameter field may take its options
+ * from a registered context/API lookup provider instead of a hand-typed `options` array.
+ *
+ * The schema decides *shape* only. Whether the referenced provider code actually exists is a live
+ * registry read and belongs to `rules.service.ts` (TC-4/TC-5) — nothing here can or should assert
+ * it, which is why every code below is well-formed and none of these cases is about existence.
+ */
+describe('T-122 — rule parameter-field value source', () => {
+  function selectField(overrides: Record<string, unknown> = {}) {
+    return { key: 'tier', label: 'Tier', type: 'select', required: true, ...overrides };
+  }
+
+  const CONTEXT_SOURCE = { kind: 'CONTEXT_LOOKUP', contextProvider: 'SIBLING_COMPONENTS' };
+  const API_SOURCE = { kind: 'API_LOOKUP', apiProvider: 'PRODUCT_CATALOG' };
+
+  describe('ruleFieldValueSourceSchema — the discriminated union itself', () => {
+    it('accepts a CONTEXT_LOOKUP naming a context provider', () => {
+      expect(ruleFieldValueSourceSchema.safeParse(CONTEXT_SOURCE).success).toBe(true);
+    });
+
+    it('accepts an API_LOOKUP naming an api provider', () => {
+      expect(ruleFieldValueSourceSchema.safeParse(API_SOURCE).success).toBe(true);
+    });
+
+    it('rejects a STATIC_LIST kind — a plain select with options already is the fixed-list case', () => {
+      expect(
+        ruleFieldValueSourceSchema.safeParse({ kind: 'STATIC_LIST', options: ['a'] }).success,
+      ).toBe(false);
+    });
+
+    it('rejects the wrong provider key for the kind (each variant is .strict())', () => {
+      expect(
+        ruleFieldValueSourceSchema.safeParse({
+          kind: 'CONTEXT_LOOKUP',
+          apiProvider: 'PRODUCT_CATALOG',
+        }).success,
+      ).toBe(false);
+      expect(
+        ruleFieldValueSourceSchema.safeParse({
+          kind: 'API_LOOKUP',
+          contextProvider: 'SIBLING_COMPONENTS',
+        }).success,
+      ).toBe(false);
+    });
+
+    it('rejects an extra key alongside a valid variant', () => {
+      expect(
+        ruleFieldValueSourceSchema.safeParse({ ...CONTEXT_SOURCE, endpointUrl: 'http://x' })
+          .success,
+      ).toBe(false);
+    });
+
+    it('rejects a provider code that is not upper snake case, and an empty one', () => {
+      expect(
+        ruleFieldValueSourceSchema.safeParse({
+          kind: 'CONTEXT_LOOKUP',
+          contextProvider: 'sibling components',
+        }).success,
+      ).toBe(false);
+      expect(
+        ruleFieldValueSourceSchema.safeParse({ kind: 'CONTEXT_LOOKUP', contextProvider: '' })
+          .success,
+      ).toBe(false);
+    });
+  });
+
+  describe('the select refinement — options OR valueSource, never both required', () => {
+    it('TC-1 — a select field with options and no valueSource is still valid (unchanged)', () => {
+      expect(ruleParameterFieldSchema.safeParse(selectField({ options: ['gold'] })).success).toBe(
+        true,
+      );
+    });
+
+    it('TC-2 — a select field with a valueSource and no options is valid', () => {
+      expect(
+        ruleParameterFieldSchema.safeParse(selectField({ valueSource: CONTEXT_SOURCE })).success,
+      ).toBe(true);
+      expect(
+        ruleParameterFieldSchema.safeParse(selectField({ valueSource: API_SOURCE })).success,
+      ).toBe(true);
+    });
+
+    it('TC-3 — a select field with neither options nor valueSource is rejected', () => {
+      expect(ruleParameterFieldSchema.safeParse(selectField()).success).toBe(false);
+    });
+
+    it('TC-3 — an empty options array with no valueSource is still rejected', () => {
+      expect(ruleParameterFieldSchema.safeParse(selectField({ options: [] })).success).toBe(false);
+    });
+
+    it('accepts both together — a fixed list plus a provider is a meaningful authoring state', () => {
+      expect(
+        ruleParameterFieldSchema.safeParse(
+          selectField({ options: ['gold'], valueSource: CONTEXT_SOURCE }),
+        ).success,
+      ).toBe(true);
+    });
+  });
+
+  describe('TC-6 — a valueSource only makes sense on a select field', () => {
+    it.each(['string', 'number', 'boolean', 'date'])(
+      'rejects a %s field that declares a valueSource',
+      (type) => {
+        const result = ruleParameterFieldSchema.safeParse({
+          key: 'targetComponentCode',
+          label: 'Target component',
+          type,
+          required: true,
+          valueSource: CONTEXT_SOURCE,
+        });
+        expect(result.success).toBe(false);
+      },
+    );
+
+    it('still accepts a non-select field with no valueSource', () => {
+      expect(
+        ruleParameterFieldSchema.safeParse({
+          key: 'minSpend',
+          label: 'Minimum spend',
+          type: 'number',
+          required: true,
+        }).success,
+      ).toBe(true);
+    });
+  });
+
+  describe('the request schemas embed the same rules', () => {
+    it('createRuleRequestSchema accepts a sourced select field (TC-2)', () => {
+      expect(
+        createRuleRequestSchema.safeParse({
+          ruleCode: 'RULE_X',
+          name: 'x',
+          subCategoryId: 1,
+          parameters: { fields: [selectField({ valueSource: CONTEXT_SOURCE })] },
+        }).success,
+      ).toBe(true);
+    });
+
+    it('createRuleRequestSchema rejects an optionless, sourceless select field (TC-3)', () => {
+      expect(
+        createRuleRequestSchema.safeParse({
+          ruleCode: 'RULE_X',
+          name: 'x',
+          subCategoryId: 1,
+          parameters: { fields: [selectField()] },
+        }).success,
+      ).toBe(false);
+    });
+
+    it('updateRuleRequestSchema rejects a valueSource on a non-select field (TC-6)', () => {
+      expect(
+        updateRuleRequestSchema.safeParse({
+          parameters: {
+            fields: [
+              {
+                key: 'targetComponentCode',
+                label: 'Target component',
+                type: 'string',
+                required: true,
+                valueSource: CONTEXT_SOURCE,
+              },
+            ],
+          },
+        }).success,
+      ).toBe(false);
+    });
+  });
+
+  describe('the response shape carries valueSource too — T-125 has to render it back', () => {
+    it('ruleParameterFieldWithRoleSchema accepts a sourced select field', () => {
+      expect(
+        ruleParameterFieldWithRoleSchema.safeParse(
+          selectField({ valueSource: CONTEXT_SOURCE, role: 'resolver_input' }),
+        ).success,
+      ).toBe(true);
+    });
+
+    it('ruleParameterFieldWithRoleSchema applies the same two refinements', () => {
+      expect(
+        ruleParameterFieldWithRoleSchema.safeParse(selectField({ role: 'compare_value' })).success,
+      ).toBe(false);
+      expect(
+        ruleParameterFieldWithRoleSchema.safeParse({
+          key: 'targetComponentCode',
+          label: 'Target component',
+          type: 'string',
+          required: true,
+          role: 'resolver_input',
+          valueSource: CONTEXT_SOURCE,
+        }).success,
+      ).toBe(false);
+    });
+
+    it('ruleSchema round-trips a rule whose parameters carry a valueSource', () => {
+      const rule = {
+        ...validRule(),
+        parameters: {
+          fields: [selectField({ valueSource: CONTEXT_SOURCE, role: 'resolver_input' })],
+        },
+      };
+      const result = ruleSchema.safeParse(rule);
+      expect(result.success).toBe(true);
+      expect(result.success && result.data.parameters.fields[0]?.valueSource).toEqual(
+        CONTEXT_SOURCE,
+      );
+    });
   });
 });

@@ -2,7 +2,7 @@ import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import type { Reward } from '@reward-portal/shared';
+import { rewardSchema, type Reward } from '@reward-portal/shared';
 import { ApiError } from '../../lib/apiError';
 
 const {
@@ -30,6 +30,10 @@ vi.mock('./api', () => ({
 
 import { AssignCountriesModal } from './AssignCountriesModal';
 
+/** T-133 — carries the four category fields T-118 made part of every `/rewards` response.
+ * This modal never parses the reward itself, so nothing here fails at runtime when the fixture
+ * drifts; the contract case at the bottom of this file is what makes that drift visible to
+ * `npm test` rather than only to `tsc`. */
 const reward: Reward = {
   id: 1,
   systemCode: 'CASHBACK_STANDARD',
@@ -44,6 +48,10 @@ const reward: Reward = {
   retryEnabled: true,
   retryConfig: {},
   merchantId: null,
+  categoryId: 4,
+  categoryName: 'Cashback',
+  subCategoryId: null,
+  subCategoryName: null,
   status: 'active',
   createdAt: '2026-01-01T00:00:00.000Z',
   updatedAt: '2026-01-01T00:00:00.000Z',
@@ -111,6 +119,13 @@ beforeEach(() => {
 });
 
 describe('AssignCountriesModal', () => {
+  it('T-133: the reward fixture is a shape the server can actually return', () => {
+    // Vitest strips the `: Reward` annotation at transform time, so a fixture that no longer
+    // matches the shared schema still runs green here and only fails `npm run typecheck`.
+    // Re-judging it with zod puts the drift in front of the test suite as well.
+    expect(rewardSchema.parse(reward)).toEqual(reward);
+  });
+
   it('pre-selects the currently-assigned countries', () => {
     renderModal();
     expect(screen.getByText('1 selected')).toBeInTheDocument();

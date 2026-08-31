@@ -60,3 +60,16 @@ export const TENANT_BUDGET_CEILING_FRACTION_DIGITS = 4;
  * `SessionService.revokeAllForUser`, which accepts any string reason/event. */
 export const TENANT_SESSION_REVOCATION_REASON = 'tenant_suspended';
 export const TENANT_SESSION_REVOCATION_AUDIT_EVENT = 'tenant_suspended';
+
+/**
+ * T-126 — `role_entity_permissions.entity` for `tenant_currencies`
+ * (13-REWARD-MASTER-VALUE-SOURCES.md §4, `T126_002` seed).
+ */
+export const TENANT_CURRENCY_ENTITY = 'tenant_currency';
+
+/** `char(3)` — an ISO-4217-shaped code, same width as `countries.currency_code`. */
+export const TENANT_CURRENCY_CODE_LENGTH = 3;
+
+/** `ck_tc_status`. */
+export const TENANT_CURRENCY_STATUSES = ['active', 'inactive'] as const;
+export type TenantCurrencyStatusValue = (typeof TENANT_CURRENCY_STATUSES)[number];

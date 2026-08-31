@@ -10,15 +10,43 @@
  * edit of one already drafted), so a plain, validated JSON textarea — with the same
  * `RuleParameters`/`connectorConfig` shape the server itself validates — is the pragmatic
  * choice here rather than re-deriving that editor's full UI a second time.
+ *
+ * T-110 — resolver wiring (T-102/T-103/T-109) is editable here too, rule versions only
+ * (implementation note 3): a Resolver `Select`, a Resolver config JSON `textarea` (same pattern
+ * as the parameters/connectorConfig textarea above), an Evaluation context `Select` sourced from
+ * a fixed client-side list (implementation note 1 — these five values are resolver *semantics*,
+ * not registry data), and a Default operators `MultiSelect` sourced from `GET /rule-operators`
+ * (T-108). Every one of the four is optional and nullable (implementation note 4) — each `Select`
+ * carries an explicit "None" option (the same pattern `RulesListPage.tsx`'s
+ * `ALL_CATEGORIES_OPTION` already uses) so a previously-wired draft can be cleared back to inert,
+ * not just left unset.
  */
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { RewardVersion, RuleVersion } from '@reward-portal/shared';
 import { Button } from '../../components/Button';
 import { Input } from '../../components/Input';
 import { Modal } from '../../components/Modal';
+import { MultiSelect, type MultiSelectOption } from '../../components/MultiSelect';
+import { Select, type SelectOption } from '../../components/Select';
 import { Toggle } from '../../components/Toggle';
 import { ApiError } from '../../lib/apiError';
+import { useRuleOperatorsQuery, useRuleResolversQuery } from '../rules/api';
 import { useUpdateDraftMutation, type VersionEntityType } from './api';
+
+const NONE_RESOLVER_OPTION: SelectOption = {
+  value: '',
+  label: 'None — not wired to the rule engine',
+};
+
+/** Resolver semantics, not registry data — implementation note 1. */
+const EVALUATION_CONTEXT_OPTIONS: SelectOption[] = [
+  { value: '', label: 'None' },
+  { value: 'transaction_payload', label: 'Transaction payload' },
+  { value: 'tracker_state', label: 'Tracker state' },
+  { value: 'customer_profile', label: 'Customer profile' },
+  { value: 'aggregate', label: 'Aggregate' },
+  { value: 'schedule', label: 'Schedule' },
+];
 
 export interface EditVersionDraftModalProps {
   open: boolean;
@@ -43,6 +71,13 @@ export function EditVersionDraftModal({
   version,
 }: EditVersionDraftModalProps) {
   const mutation = useUpdateDraftMutation(entityType, entityId, version.id);
+  // T-110 — fetched unconditionally (same call-unconditionally-render-conditionally pattern
+  // `AddRuleModal.tsx`'s own `resolversQuery` uses): the fields these back are only rendered
+  // for `entityType === 'rule'`, but the two `useQuery` calls themselves can't be conditional
+  // (rules of hooks) and the extra request is harmless — react-query caches it by key, so a
+  // rewards-only session pays for it once, not per open.
+  const resolversQuery = useRuleResolversQuery();
+  const operatorsQuery = useRuleOperatorsQuery();
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [changeSummary, setChangeSummary] = useState(version.changeSummary ?? '');
   const [expression, setExpression] = useState(
@@ -52,17 +87,49 @@ export function EditVersionDraftModal({
   const [payloadError, setPayloadError] = useState<string | null>(null);
   const [isBreaking, setIsBreaking] = useState(version.isBreaking);
   const [confirmOverride, setConfirmOverride] = useState(false);
+  const [resolverId, setResolverId] = useState('');
+  const [resolverConfigText, setResolverConfigText] = useState('');
+  const [resolverConfigError, setResolverConfigError] = useState<string | null>(null);
+  const [evaluationContext, setEvaluationContext] = useState('');
+  const [defaultOperators, setDefaultOperators] = useState<string[]>([]);
+
+  const resolverOptions: SelectOption[] = useMemo(
+    () => [
+      NONE_RESOLVER_OPTION,
+      ...(resolversQuery.data ?? []).map((resolver) => ({
+        value: String(resolver.id),
+        label: `${resolver.name} (${resolver.resolverCode})`,
+      })),
+    ],
+    [resolversQuery.data],
+  );
+
+  const operatorOptions: MultiSelectOption[] = useMemo(
+    () =>
+      (operatorsQuery.data ?? []).map((operator) => ({
+        value: operator.operatorCode,
+        label: operator.displayName,
+      })),
+    [operatorsQuery.data],
+  );
 
   useEffect(() => {
     if (!open) return;
     setSubmitError(null);
     setPayloadError(null);
+    setResolverConfigError(null);
     setConfirmOverride(false);
     setChangeSummary(version.changeSummary ?? '');
     setIsBreaking(version.isBreaking);
     if (isRuleVersion(entityType, version)) {
       setExpression(version.expression ?? '');
       setPayloadText(JSON.stringify(version.parameters, null, 2));
+      setResolverId(version.resolverId != null ? String(version.resolverId) : '');
+      setResolverConfigText(
+        version.resolverConfig != null ? JSON.stringify(version.resolverConfig, null, 2) : '',
+      );
+      setEvaluationContext(version.evaluationContext ?? '');
+      setDefaultOperators(version.defaultOperators ? [...version.defaultOperators] : []);
     } else {
       setPayloadText(JSON.stringify(version.connectorConfig, null, 2));
     }
@@ -77,6 +144,7 @@ export function EditVersionDraftModal({
   async function handleSubmit(): Promise<void> {
     setSubmitError(null);
     setPayloadError(null);
+    setResolverConfigError(null);
 
     let payload: Record<string, unknown>;
     try {
@@ -84,6 +152,16 @@ export function EditVersionDraftModal({
     } catch {
       setPayloadError('Must be valid JSON.');
       return;
+    }
+
+    let resolverConfig: Record<string, unknown> | null = null;
+    if (entityType === 'rule' && resolverConfigText.trim() !== '') {
+      try {
+        resolverConfig = JSON.parse(resolverConfigText) as Record<string, unknown>;
+      } catch {
+        setResolverConfigError('Must be valid JSON.');
+        return;
+      }
     }
 
     try {
@@ -94,6 +172,10 @@ export function EditVersionDraftModal({
           changeSummary: changeSummary === '' ? null : changeSummary,
           isBreaking,
           confirmBreakingOverride: confirmOverride || undefined,
+          resolverId: resolverId === '' ? null : Number(resolverId),
+          resolverConfig,
+          evaluationContext: evaluationContext === '' ? null : evaluationContext,
+          defaultOperators: defaultOperators.length === 0 ? null : defaultOperators,
         });
       } else {
         await mutation.mutateAsync({
@@ -173,6 +255,52 @@ export function EditVersionDraftModal({
             </p>
           )}
         </div>
+
+        {entityType === 'rule' && (
+          <>
+            <Select
+              label="Resolver"
+              options={resolverOptions}
+              value={resolverId}
+              onChange={setResolverId}
+            />
+
+            <div className="flex flex-col gap-1.5">
+              <label
+                htmlFor="edit-version-resolver-config"
+                className="text-sm font-medium text-slate-700"
+              >
+                Resolver config (JSON)
+              </label>
+              <textarea
+                id="edit-version-resolver-config"
+                rows={4}
+                value={resolverConfigText}
+                onChange={(event) => setResolverConfigText(event.target.value)}
+                className="rounded-control border border-slate-300 px-3 py-2 text-sm font-mono focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary-500"
+              />
+              {resolverConfigError && (
+                <p role="alert" className="text-xs text-danger-600">
+                  {resolverConfigError}
+                </p>
+              )}
+            </div>
+
+            <Select
+              label="Evaluation context"
+              options={EVALUATION_CONTEXT_OPTIONS}
+              value={evaluationContext}
+              onChange={setEvaluationContext}
+            />
+
+            <MultiSelect
+              label="Default operators"
+              options={operatorOptions}
+              value={defaultOperators}
+              onChange={setDefaultOperators}
+            />
+          </>
+        )}
 
         <Toggle
           label="Breaking change"

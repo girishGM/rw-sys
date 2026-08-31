@@ -143,6 +143,10 @@ export class FakeCredentialStore implements CredentialStore {
     credential.passwordHash = update.passwordHash;
     credential.passwordAlgo = update.passwordAlgo;
     credential.previousHashes = [...update.previousHashes];
+    // T-161. Mirrors the repository's conditional `password_expires_at` write. Without this the
+    // double would keep a stale expiry that the real table clears, so a unit test asserting the
+    // post-change login no longer prompts would pass against the fake and lie about Postgres.
+    if (update.clearPasswordExpiry === true) credential.passwordExpiresAt = null;
   }
 
   async runInTransaction<T>(fn: (tx: AuthTransaction) => Promise<T>): Promise<T> {

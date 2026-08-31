@@ -204,9 +204,10 @@ What happens, in order:
    (creates the `reward_app` login role — the real, non-Docker Postgres this project also
    targets already has this role provisioned by hand, see the repo root `CLAUDE.md`; a
    from-scratch compose environment has no such human step, so this script is it) and then
-   `database/reward_config_postgres.sql` (repo root, one level above `portal/` — mounted
-   read-only; this is *not* a second source of truth for that schema, purely what makes this
-   file self-contained on a clean checkout that has no real `reward_config` to point at). A
+   `database/reward_config/reward_config_postgres.sql` (repo root, one level above `portal/`,
+   under `database/reward_config/` since the 2026-08-29 restructuring — mounted read-only; this
+   is *not* a second source of truth for that schema, purely what makes this file self-contained
+   on a clean checkout that has no real `reward_config` to point at). A
    `pg_isready` healthcheck gates everything downstream.
 2. **`migrate`** runs once (`restart: "no"`) against a **different build target** than `api` —
    `back-end/Dockerfile`'s `migrator` stage, not `runtime`. See "A defect this compose file

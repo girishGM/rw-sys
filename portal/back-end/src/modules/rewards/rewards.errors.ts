@@ -8,7 +8,13 @@
  * records for T-031's own new codes. Seed migrations are outside this module's file scope
  * (`back-end/src/database/migrations/**`).
  */
-import { BusinessRuleError, ConflictError, type AppErrorOptions } from '@/common/errors/app-error';
+import {
+  BusinessRuleError,
+  ConflictError,
+  ValidationFailedError,
+  type AppErrorOptions,
+  type ErrorDetail,
+} from '@/common/errors/app-error';
 
 export const REWARD_ERROR_CODE = Object.freeze({
   /** `uc_reward_system_code` — a global reward's `systemCode` is already in use (TC-16). */
@@ -19,6 +25,14 @@ export const REWARD_ERROR_CODE = Object.freeze({
   REWARD_IN_USE_BY_CAMPAIGN: 'REWARD_IN_USE_BY_CAMPAIGN',
   /** `uq_rp_system_code` — a policy's `policyCode` is already in use on this reward (TC-18). */
   REWARD_POLICY_CODE_EXISTS: 'REWARD_POLICY_CODE_EXISTS',
+  /** T-116 — `uq_rwc_tenant_code` — a `categoryCode` is already in use. */
+  REWARD_CATEGORY_CODE_EXISTS: 'REWARD_CATEGORY_CODE_EXISTS',
+  /** T-116 — `uq_rwsc_category_code` — a sub-category code is already in use under that
+   * category. */
+  REWARD_SUB_CATEGORY_CODE_EXISTS: 'REWARD_SUB_CATEGORY_CODE_EXISTS',
+  /** T-118 — `POST /rewards` with a `subCategoryId` that exists but belongs to a different
+   * `categoryId` (TC-3). */
+  REWARD_SUB_CATEGORY_CATEGORY_MISMATCH: 'REWARD_SUB_CATEGORY_CATEGORY_MISMATCH',
 });
 
 /** 409 — `POST /rewards` with a `systemCode` already in use by another global reward (TC-16). */
@@ -67,4 +81,31 @@ export class RewardPolicyCodeExistsError extends ConflictError {
   constructor(options: AppErrorOptions = {}) {
     super(REWARD_ERROR_CODE.REWARD_POLICY_CODE_EXISTS, options);
   }
+}
+
+/** T-116 — 409 — `POST /reward-categories` with a `categoryCode` already in use (TC-3). */
+export class RewardCategoryCodeExistsError extends ConflictError {
+  constructor(options: AppErrorOptions = {}) {
+    super(REWARD_ERROR_CODE.REWARD_CATEGORY_CODE_EXISTS, options);
+  }
+}
+
+/** T-116 — 409 — `POST /reward-sub-categories` with a `subCategoryCode` already in use under
+ * that category. */
+export class RewardSubCategoryCodeExistsError extends ConflictError {
+  constructor(options: AppErrorOptions = {}) {
+    super(REWARD_ERROR_CODE.REWARD_SUB_CATEGORY_CODE_EXISTS, options);
+  }
+}
+
+/** T-118 — 400 — `POST /rewards` with a `subCategoryId` that exists but does not belong to the
+ * request's own `categoryId` (TC-3). Built from the generic {@link ValidationFailedError} rather
+ * than a new class, the same precedent `merchants.errors.ts#merchantCountryMismatchError`
+ * documents: 03-API-CONTRACT.md §1 reserves `details` for exactly this shape. */
+export function rewardSubCategoryCategoryMismatchError(): ValidationFailedError {
+  const detail: ErrorDetail = {
+    field: 'subCategoryId',
+    code: REWARD_ERROR_CODE.REWARD_SUB_CATEGORY_CATEGORY_MISMATCH,
+  };
+  return new ValidationFailedError([detail]);
 }

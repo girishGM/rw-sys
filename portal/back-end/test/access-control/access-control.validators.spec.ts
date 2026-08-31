@@ -37,6 +37,28 @@ describe('isPermissionsMatrix', () => {
   it('rejects a non-string action', () => {
     expect(isPermissionsMatrix({ campaign: [1] })).toBe(false);
   });
+
+  // T-140 regression: `rule_category`, `rule_sub_category`, `reward_category`,
+  // `reward_sub_category`, `field_context_provider`, `field_api_lookup_provider` and
+  // `tenant_currency` are all seeded into `role_entity_permissions` (T106_001/T116_002/
+  // T121_002/T126_002) but were absent from `ENTITY_ACTION_CATALOGUE`, so a matrix containing any
+  // of them — including one `GET /permissions/:role` itself would have just returned — was
+  // rejected here, 400ing every ordinary Save for every role (all 6 hold at least `view` on all
+  // 7). This is the real client (`isPermissionsMatrix`, exactly what the DTO decorator and the
+  // PUT controller call) exercising the actual bug, not a restatement of the catalogue constant.
+  it('accepts a matrix containing each of the 7 entities T-140 found missing from the catalogue', () => {
+    expect(
+      isPermissionsMatrix({
+        rule_category: ['view', 'create', 'update'],
+        rule_sub_category: ['view'],
+        reward_category: ['view', 'create', 'update'],
+        reward_sub_category: ['view'],
+        field_context_provider: ['view', 'create', 'update'],
+        field_api_lookup_provider: ['view'],
+        tenant_currency: ['view', 'create', 'update'],
+      }),
+    ).toBe(true);
+  });
 });
 
 describe('isWidgetConfig', () => {

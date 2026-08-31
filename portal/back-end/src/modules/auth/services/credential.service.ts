@@ -295,7 +295,20 @@ export class CredentialService implements OnModuleInit {
 
     await this.store.replacePassword(
       credential.id,
-      { passwordHash, passwordAlgo: PASSWORD_ALGO, previousHashes },
+      {
+        passwordHash,
+        passwordAlgo: PASSWORD_ALGO,
+        previousHashes,
+        // T-161. The forced-change deadline is satisfied by this write, so it must not survive it.
+        // `authenticate()` below folds a past `password_expires_at` into `mustChangePassword`, and
+        // `AuthService.login` persists that derived value onto `portal_users`; leaving the stale
+        // timestamp behind made every later login re-raise the forced change the user had just
+        // completed, permanently confining the account to `/auth/change-password`.
+        //
+        // Set here rather than inside `replacePassword` because this method is the only caller
+        // that represents an actual change of password — see `PasswordUpdate.clearPasswordExpiry`.
+        clearPasswordExpiry: true,
+      },
       tx,
     );
   }

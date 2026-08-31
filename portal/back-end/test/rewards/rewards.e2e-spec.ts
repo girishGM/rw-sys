@@ -52,6 +52,17 @@ let countryA: number;
 let countryB: number;
 let tenantA: number;
 let merchantA: number;
+/** T-118 — every `POST /rewards` body needs a `categoryId` now that `reward_systems.category_id`
+ * is `NOT NULL`; resolved once against T-116's seeded `UNCATEGORIZED` category rather than
+ * hard-coded (its id is a deployment detail, same reasoning `T118_001`'s own migration uses). */
+let uncategorizedCategoryId: number;
+/** T-118's own describe block's fixture category/sub-category ids — cleaned up in the file's
+ * one root `afterAll`, not that describe block's own, so the delete always runs *after* every
+ * `reward_systems` row referencing them has already been removed (see that `afterAll`'s own
+ * comment on ordering). */
+let t118CategoryId: number | undefined;
+let t118SubCategoryId: number | undefined;
+let t118OtherCategoryId: number | undefined;
 /** Every `reward_systems.id` this suite creates, deleted in `afterAll` regardless of outcome. */
 const createdRewardIds = new Set<number>();
 
@@ -251,6 +262,15 @@ beforeAll(async () => {
   db = app.get<Sequelize>(SEQUELIZE);
   emailCrypto = emailCryptoOf(app);
 
+  const [uncategorized] = await sql<{ id: number }>(
+    `SELECT id FROM reward_config.reward_categories
+      WHERE tenant_id = 1 AND category_code = 'UNCATEGORIZED'`,
+  );
+  if (uncategorized === undefined) {
+    throw new Error('T-116 UNCATEGORIZED reward category not found — run db:migrate first');
+  }
+  uncategorizedCategoryId = uncategorized.id;
+
   countryA = await ensureCountry(COUNTRY_A_CODE, 'T-032 e2e country A');
   countryB = await ensureCountry(COUNTRY_B_CODE, 'T-032 e2e country B');
   tenantA = await ensureTenant('T032E2E_TENANT_A', countryA);
@@ -331,6 +351,19 @@ afterAll(async () => {
           ids: [...createdRewardIds],
         });
       }
+      // T-118's own fixture rows — deleted only now, after every `reward_systems` row that
+      // might reference them (above) is already gone, so this never trips
+      // `fk_rws_category`/`fk_rws_sub_category`.
+      if (t118SubCategoryId !== undefined) {
+        await exec('DELETE FROM reward_config.reward_sub_categories WHERE id = :id', {
+          id: t118SubCategoryId,
+        });
+      }
+      if (t118CategoryId !== undefined || t118OtherCategoryId !== undefined) {
+        await exec('DELETE FROM reward_config.reward_categories WHERE id IN (:ids)', {
+          ids: [t118CategoryId, t118OtherCategoryId].filter((id): id is number => id !== undefined),
+        });
+      }
       for (const actor of actors.values()) {
         await exec('DELETE FROM reward_portal.portal_users WHERE id = :id', { id: actor.userId });
       }
@@ -355,6 +388,7 @@ async function createReward(
     name: overrides.name ?? 'T-032 e2e reward',
     rewardType: 'monetary',
     connectorType: 'internal_api',
+    categoryId: uncategorizedCategoryId,
     ...(overrides.connectorConfig === undefined
       ? {}
       : { connectorConfig: overrides.connectorConfig }),
@@ -375,6 +409,7 @@ describe('T-032 — POST /rewards — authorship', () => {
       name: 'TC-1 reward',
       rewardType: 'monetary',
       connectorType: 'internal_api',
+      categoryId: uncategorizedCategoryId,
     });
 
     expect(response.status).toBe(201);
@@ -430,6 +465,7 @@ describe('T-032 — POST /rewards — authorship', () => {
       name: 'first',
       rewardType: 'monetary',
       connectorType: 'internal_api',
+      categoryId: uncategorizedCategoryId,
     });
     expect(first.status).toBe(201);
     createdRewardIds.add(first.body.data.id as number);
@@ -439,6 +475,7 @@ describe('T-032 — POST /rewards — authorship', () => {
       name: 'second',
       rewardType: 'monetary',
       connectorType: 'internal_api',
+      categoryId: uncategorizedCategoryId,
     });
     expect(second.status).toBe(409);
     expectErrorEnvelope(second.body, 'REWARD_SYSTEM_CODE_EXISTS');
@@ -460,6 +497,7 @@ describe('T-032 — POST /rewards — authorship', () => {
       name: 'bad connector',
       rewardType: 'monetary',
       connectorType: 'carrier_pigeon',
+      categoryId: uncategorizedCategoryId,
     });
     expect(response.status).toBe(400);
     expectErrorEnvelope(response.body, 'VALIDATION_FAILED');
@@ -472,6 +510,7 @@ describe('T-032 — POST /rewards — authorship', () => {
       name: 'free text reward type',
       rewardType: 'brand_new_reward_type',
       connectorType: 'internal_api',
+      categoryId: uncategorizedCategoryId,
     });
     expect(response.status).toBe(201);
     createdRewardIds.add(response.body.data.id as number);
@@ -509,6 +548,10 @@ describe('T-032 — TC-3/verification step 6 — the service-layer assertion ove
         name: 'should never exist',
         rewardType: 'monetary',
         connectorType: 'internal_api',
+        // A valid body all the way through the `ValidationPipe` (categoryId is required, T-118)
+        // is what makes this test actually exercise the service-layer assertion it's named for
+        // — a request that 400s on a missing field never reaches `assertRole` at all.
+        categoryId: uncategorizedCategoryId,
       });
 
       expect(response.status).toBe(403);
@@ -929,5 +972,142 @@ describe('T-032 — PATCH /rewards/:id (TC-22)', () => {
       { id },
     );
     expect(rows).toHaveLength(1);
+  });
+});
+
+describe('T-118 — reward_systems.category_id/sub_category_id', () => {
+  let categoryId: number;
+  let subCategoryId: number;
+  let otherCategoryId: number;
+
+  beforeAll(async () => {
+    const [category] = await sql<{ id: number }>(
+      `INSERT INTO reward_config.reward_categories (tenant_id, category_code, name, status)
+       VALUES (1, :code, :code, 'active') RETURNING id`,
+      { code: `T118_CAT_${String(Date.now())}` },
+    );
+    categoryId = category.id;
+    t118CategoryId = categoryId;
+
+    const [subCategory] = await sql<{ id: number }>(
+      `INSERT INTO reward_config.reward_sub_categories (category_id, sub_category_code, name, status)
+       VALUES (:categoryId, :code, :code, 'active') RETURNING id`,
+      { categoryId, code: `T118_SUB_${String(Date.now())}` },
+    );
+    subCategoryId = subCategory.id;
+    t118SubCategoryId = subCategoryId;
+
+    const [otherCategory] = await sql<{ id: number }>(
+      `INSERT INTO reward_config.reward_categories (tenant_id, category_code, name, status)
+       VALUES (1, :code, :code, 'active') RETURNING id`,
+      { code: `T118_CAT_OTHER_${String(Date.now())}` },
+    );
+    otherCategoryId = otherCategory.id;
+    t118OtherCategoryId = otherCategoryId;
+  });
+
+  // Cleanup for these three rows lives in the file's one root `afterAll`, not here — see that
+  // hook's own comment for why (it must run after every `reward_systems` row created by any
+  // describe block, including this one, is already deleted).
+
+  it('TC-2/TC-5: creates a reward with a categoryId and subCategoryId — 201, GET resolves both', async () => {
+    const response = await post('super', '/rewards', {
+      systemCode: systemCode('T118_2'),
+      name: 'has category and sub-category',
+      rewardType: 'monetary',
+      connectorType: 'internal_api',
+      categoryId,
+      subCategoryId,
+    });
+    expect(response.status).toBe(201);
+    const id = response.body.data.id as number;
+    createdRewardIds.add(id);
+    expect(response.body.data.categoryId).toBe(categoryId);
+    expect(response.body.data.subCategoryId).toBe(subCategoryId);
+
+    const detail = await get('super', `/rewards/${String(id)}`);
+    expect(detail.status).toBe(200);
+    expect(detail.body.data.categoryId).toBe(categoryId);
+    expect(detail.body.data.subCategoryId).toBe(subCategoryId);
+    expect(typeof detail.body.data.categoryName).toBe('string');
+    expect(typeof detail.body.data.subCategoryName).toBe('string');
+  });
+
+  it('creates a reward with a categoryId and no subCategoryId — 201, subCategoryId/subCategoryName null', async () => {
+    const response = await post('super', '/rewards', {
+      systemCode: systemCode('T118_NOSUB'),
+      name: 'category only',
+      rewardType: 'monetary',
+      connectorType: 'internal_api',
+      categoryId,
+    });
+    expect(response.status).toBe(201);
+    createdRewardIds.add(response.body.data.id as number);
+    expect(response.body.data.categoryId).toBe(categoryId);
+    expect(response.body.data.subCategoryId).toBeNull();
+    expect(response.body.data.subCategoryName).toBeNull();
+  });
+
+  it('TC-3: a subCategoryId belonging to a different category → 400', async () => {
+    const response = await post('super', '/rewards', {
+      systemCode: systemCode('T118_3'),
+      name: 'mismatched sub-category',
+      rewardType: 'monetary',
+      connectorType: 'internal_api',
+      categoryId: otherCategoryId,
+      subCategoryId,
+    });
+    expect(response.status).toBe(400);
+    expectErrorEnvelope(response.body, 'VALIDATION_FAILED');
+    expect(response.body.error.details).toEqual([
+      { field: 'subCategoryId', code: 'REWARD_SUB_CATEGORY_CATEGORY_MISMATCH' },
+    ]);
+  });
+
+  it('TC-4: no categoryId at all → 400', async () => {
+    const response = await post('super', '/rewards', {
+      systemCode: systemCode('T118_4'),
+      name: 'no category',
+      rewardType: 'monetary',
+      connectorType: 'internal_api',
+    });
+    expect(response.status).toBe(400);
+    expectErrorEnvelope(response.body, 'VALIDATION_FAILED');
+    expect(response.body.error.details).toEqual([{ field: 'categoryId', code: 'IS_INT' }]);
+  });
+
+  it('a categoryId that does not reference a real category → 404', async () => {
+    const response = await post('super', '/rewards', {
+      systemCode: systemCode('T118_404'),
+      name: 'bogus category',
+      rewardType: 'monetary',
+      connectorType: 'internal_api',
+      categoryId: 999_999_999,
+    });
+    expect(response.status).toBe(404);
+  });
+
+  it('categoryId/subCategoryId are immutable-by-replacement — rejected on PATCH', async () => {
+    const { id } = await createReward({ name: 'immutable category' });
+    const response = await patch('super', `/rewards/${String(id)}`, {
+      categoryId: otherCategoryId,
+    });
+    expect(response.status).toBe(400);
+    expect(response.body.error.details).toEqual([
+      { field: 'categoryId', code: 'UNEXPECTED_FIELD' },
+    ]);
+  });
+
+  it('TC-6: verification step — existing connector-config test cases from T-032 are unaffected', async () => {
+    const { id } = await createReward({
+      name: 'still works post-T-118',
+      connectorConfig: { apiKey: TEST_API_KEY },
+    });
+    const detail = await get('super', `/rewards/${String(id)}`);
+    expect(detail.status).toBe(200);
+    expect(detail.body.data.connectorConfigPreview).toEqual({
+      apiKey: `••••${TEST_API_KEY.slice(-4)}`,
+    });
+    expect(detail.body.data.categoryId).toBe(uncategorizedCategoryId);
   });
 });

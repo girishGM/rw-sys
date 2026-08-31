@@ -40,6 +40,13 @@ describe('UpdateRewardDto', () => {
     expect(flat['systemCode']).toHaveProperty('whitelistValidation');
   });
 
+  it('rejects categoryId/subCategoryId — immutable-by-replacement (T-118), never accepted here', async () => {
+    const errors = await errorsFor({ categoryId: 2, subCategoryId: 3 });
+    const flat = Object.fromEntries(errors.map((error) => [error.property, error.constraints]));
+    expect(flat['categoryId']).toHaveProperty('whitelistValidation');
+    expect(flat['subCategoryId']).toHaveProperty('whitelistValidation');
+  });
+
   it('rejects an unknown status', async () => {
     const errors = await errorsFor({ status: 'archived' });
     expect(errors.some((error) => error.property === 'status')).toBe(true);
@@ -53,5 +60,6 @@ describe('UpdateRewardDto', () => {
   it('is a subset of the shared Zod request schema', () => {
     expect(updateRewardRequestSchema.safeParse({ status: 'inactive' }).success).toBe(true);
     expect(updateRewardRequestSchema.safeParse({ systemCode: 'X' }).success).toBe(false);
+    expect(updateRewardRequestSchema.safeParse({ categoryId: 1 }).success).toBe(false);
   });
 });

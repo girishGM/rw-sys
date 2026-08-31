@@ -281,6 +281,32 @@ describe('AuthService.login — opportunistic rehash', () => {
     expect(harness.credentialStore.passwordWrites).toHaveLength(0);
   });
 
+  /**
+   * T-161. A rehash re-writes the *same* password at a stronger work factor during an ordinary
+   * login — it is not a password change, so it must not satisfy a pending forced change.
+   *
+   * This is the trap in the T-161 fix: the obvious implementation clears `password_expires_at`
+   * unconditionally inside `CredentialRepository.replacePassword`, which this path also calls. That
+   * version would disarm a freshly-issued temporary password's 72-hour deadline the moment the
+   * account logged in, for any account whose stored hash happened to be due an upgrade — turning a
+   * bug fix into a quiet weakening of the forced-change control.
+   */
+  it('does not clear a pending password expiry — a rehash is not a password change', async () => {
+    const harness = await build();
+    const user = await seedAccount(harness);
+
+    const credential = harness.credentialStore.credentialFor(user.id);
+    const expiry = new Date(NOW.getTime() + 60 * 60 * 1000);
+    credential.passwordExpiresAt = expiry;
+    jest.spyOn(harness.credentials, 'needsRehash').mockReturnValue(true);
+
+    await harness.auth.login({ email: 'operator@example.com', password: PASSWORD }, CONTEXT, NOW);
+
+    expect(harness.credentialStore.passwordWrites).toHaveLength(1);
+    expect(harness.credentialStore.passwordWrites[0].clearPasswordExpiry).not.toBe(true);
+    expect(harness.credentialStore.credentialFor(user.id).passwordExpiresAt).toEqual(expiry);
+  });
+
   it('never fails a login because the rehash failed', async () => {
     const harness = await build();
     await seedAccount(harness);

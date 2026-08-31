@@ -136,6 +136,11 @@ module.exports = {
     // same folder is, as above, not matched by `testRegex` and runs under `test/jest-e2e.json`
     // against the real database.
     '<rootDir>/../test/dashboard',
+    // T-121: same arrangement once more for `src/modules/field-value-sources/**`, whose unit
+    // specs live in `test/field-value-sources/` — the directory that task file grants it.
+    // `field-value-source-registries.e2e-spec.ts` in the same folder is, as above, not matched by
+    // `testRegex` and runs under `test/jest-e2e.json` against the real database.
+    '<rootDir>/../test/field-value-sources',
   ],
   testRegex: '.*\\.spec\\.ts$',
   transform: {

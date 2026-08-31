@@ -1,17 +1,65 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { RewardVersion, RuleVersion } from '@reward-portal/shared';
+import type { RewardVersion, RuleOperator, RuleResolver, RuleVersion } from '@reward-portal/shared';
 import { ApiError } from '../../lib/apiError';
 
-const { mockMutateAsync, mockUseUpdateDraftMutation } = vi.hoisted(() => ({
+const {
+  mockMutateAsync,
+  mockUseUpdateDraftMutation,
+  mockUseRuleResolversQuery,
+  mockUseRuleOperatorsQuery,
+} = vi.hoisted(() => ({
   mockMutateAsync: vi.fn(),
   mockUseUpdateDraftMutation: vi.fn(),
+  mockUseRuleResolversQuery: vi.fn(),
+  mockUseRuleOperatorsQuery: vi.fn(),
 }));
 
 vi.mock('./api', () => ({ useUpdateDraftMutation: mockUseUpdateDraftMutation }));
+vi.mock('../rules/api', () => ({
+  useRuleResolversQuery: mockUseRuleResolversQuery,
+  useRuleOperatorsQuery: mockUseRuleOperatorsQuery,
+}));
 
 import { EditVersionDraftModal } from './EditVersionDraftModal';
+
+const resolvers: RuleResolver[] = [
+  {
+    id: 1,
+    resolverCode: 'TRACKER_STATE_LOOKUP',
+    name: 'Tracker State Lookup',
+    description: null,
+    status: 'active',
+    resolverInputFieldKeys: ['targetComponentCode'],
+  },
+  {
+    id: 2,
+    resolverCode: 'JSONPATH_PAYLOAD',
+    name: 'JSON Path Payload',
+    description: null,
+    status: 'active',
+    resolverInputFieldKeys: [],
+  },
+];
+
+const operators: RuleOperator[] = [
+  {
+    id: 1,
+    operatorCode: 'equals',
+    displayName: 'Equals',
+    expectedValueType: 'string',
+    status: 'active',
+  },
+  {
+    id: 2,
+    operatorCode: 'not_equals',
+    displayName: 'Not Equals',
+    expectedValueType: 'string',
+    status: 'active',
+  },
+  { id: 3, operatorCode: 'in', displayName: 'In', expectedValueType: 'array', status: 'active' },
+];
 
 const ruleVersion: RuleVersion = {
   id: 10,
@@ -32,6 +80,11 @@ const ruleVersion: RuleVersion = {
   retiredAt: null,
   updatedAt: '2026-01-01T00:00:00.000Z',
   suggestedIsBreaking: null,
+  // T-110 — a seeded, already-wired draft (mirrors RULE_COMP_COMPLETED_001 from T-105).
+  resolverId: 1,
+  resolverConfig: { statusKey: 'status' },
+  evaluationContext: 'tracker_state',
+  defaultOperators: ['equals', 'not_equals', 'in'],
 };
 
 const rewardVersion: RewardVersion = {
@@ -79,6 +132,10 @@ beforeEach(() => {
   mockMutateAsync.mockReset();
   mockUseUpdateDraftMutation.mockReset();
   mockUseUpdateDraftMutation.mockReturnValue({ mutateAsync: mockMutateAsync, isPending: false });
+  mockUseRuleResolversQuery.mockReset();
+  mockUseRuleResolversQuery.mockReturnValue({ data: resolvers });
+  mockUseRuleOperatorsQuery.mockReset();
+  mockUseRuleOperatorsQuery.mockReturnValue({ data: operators });
 });
 
 describe('EditVersionDraftModal', () => {
@@ -96,6 +153,85 @@ describe('EditVersionDraftModal', () => {
     expect(screen.queryByLabelText(/^expression$/i)).not.toBeInTheDocument();
     expect(screen.getByLabelText(/connector config \(json\)/i)).toHaveValue(
       JSON.stringify(rewardVersion.connectorConfig, null, 2),
+    );
+  });
+
+  it('T-110 TC-1: pre-fills resolver wiring from a seeded, already-wired draft', () => {
+    renderModal(ruleVersion, 'rule');
+
+    // `Select`/`MultiSelect` triggers self-reference their own id in `aria-labelledby`
+    // (alongside the `<label>`'s id) — the accname algorithm's recursion guard against that
+    // self-reference means the *accessible name* is only ever the field's label ("Resolver"),
+    // never the selected value too; the selected value is asserted via `textContent` instead.
+    expect(screen.getByRole('combobox', { name: /^resolver$/i })).toHaveTextContent(
+      'Tracker State Lookup (TRACKER_STATE_LOOKUP)',
+    );
+    expect(screen.getByLabelText(/resolver config \(json\)/i)).toHaveValue(
+      JSON.stringify(ruleVersion.resolverConfig, null, 2),
+    );
+    expect(screen.getByRole('combobox', { name: /^evaluation context$/i })).toHaveTextContent(
+      'Tracker state',
+    );
+    expect(screen.getByRole('button', { name: /^default operators$/i })).toHaveTextContent(
+      '3 selected',
+    );
+  });
+
+  it('T-110 TC-2: changing the resolver and saving sends the new resolverId', async () => {
+    mockMutateAsync.mockResolvedValue(ruleVersion);
+    const user = userEvent.setup();
+    renderModal(ruleVersion, 'rule');
+
+    await user.click(screen.getByRole('combobox', { name: /^resolver/i }));
+    await user.click(screen.getByRole('option', { name: /json path payload/i }));
+    await user.click(screen.getByRole('button', { name: /save draft/i }));
+
+    expect(mockMutateAsync).toHaveBeenCalledWith(expect.objectContaining({ resolverId: 2 }));
+  });
+
+  it('T-110 TC-3: toggling an operator off and saving persists the remaining array', async () => {
+    mockMutateAsync.mockResolvedValue(ruleVersion);
+    const user = userEvent.setup();
+    renderModal(ruleVersion, 'rule');
+
+    await user.click(screen.getByRole('button', { name: /default operators/i }));
+    await user.click(screen.getByRole('option', { name: /^in$/i }));
+    await user.click(screen.getByRole('button', { name: /save draft/i }));
+
+    expect(mockMutateAsync).toHaveBeenCalledWith(
+      expect.objectContaining({ defaultOperators: ['equals', 'not_equals'] }),
+    );
+  });
+
+  it('T-110 TC-4: a reward draft renders no resolver-wiring fields', () => {
+    renderModal(rewardVersion, 'reward');
+
+    expect(screen.queryByRole('combobox', { name: /^resolver/i })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/resolver config/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole('combobox', { name: /evaluation context/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /default operators/i })).not.toBeInTheDocument();
+  });
+
+  it('T-110: clearing resolver/context back to "None" saves the draft inert again', async () => {
+    mockMutateAsync.mockResolvedValue(ruleVersion);
+    const user = userEvent.setup();
+    renderModal(ruleVersion, 'rule');
+
+    await user.click(screen.getByRole('combobox', { name: /^resolver$/i }));
+    await user.click(screen.getByRole('option', { name: /^none/i }));
+    await user.click(screen.getByRole('combobox', { name: /^evaluation context$/i }));
+    await user.click(screen.getByRole('option', { name: /^none$/i }));
+    const resolverConfig = screen.getByLabelText(/resolver config \(json\)/i);
+    await user.clear(resolverConfig);
+
+    await user.click(screen.getByRole('button', { name: /save draft/i }));
+
+    expect(mockMutateAsync).toHaveBeenCalledWith(
+      expect.objectContaining({
+        resolverId: null,
+        resolverConfig: null,
+        evaluationContext: null,
+      }),
     );
   });
 

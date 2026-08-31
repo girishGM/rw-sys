@@ -15,6 +15,7 @@ import {
   isoDateTimeSchema,
   missingRequiredParameterKeys,
   moneySchema,
+  ruleOptionSchema,
 } from './campaign.schema';
 import type { RuleParameters } from './rule.schema';
 
@@ -75,6 +76,26 @@ describe('campaign.schema — dates', () => {
       startDate: inDays(1),
       endDate: inDays(30),
     };
+
+    // T-135 — `createCampaignRequestSchema`'s own `startDate must not be in the past` refinement
+    // calls `isBeforeTodayInItsOwnOffset` with **no** `now` override (`campaign.schema.ts`'s
+    // `refineDates`), so it reads the real wall clock, not this file's `NOW`. Every fixture above
+    // is built relative to `NOW` on the assumption that `NOW` *is* "today" — true only the day
+    // this file was written. Left unfrozen, the suite silently rots the moment the real clock
+    // drifts past `NOW`: `inDays(1)` stops being "tomorrow" and starts being "11 days ago",
+    // exactly the past-dated `startDate` this describe block's own tests exist to reject.
+    // Freezing Jest's clock to `NOW` for this block alone is what T-105/T-111/T-112 and everyone
+    // else who ever runs this file again from a later date needs — it is not a one-off patch for
+    // today's failure, since without it the same rot returns on whatever future date next passes
+    // `NOW` by more than `endDate`'s 30-day margin.
+    beforeAll(() => {
+      jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
+      jest.setSystemTime(NOW);
+    });
+
+    afterAll(() => {
+      jest.useRealTimers();
+    });
 
     it('accepts a well-formed request', () => {
       expect(createCampaignRequestSchema.safeParse(valid).success).toBe(true);
@@ -332,5 +353,189 @@ describe('campaign.schema — missingRequiredParameterKeys', () => {
 
   it('does not count an optional key as missing', () => {
     expect(missingRequiredParameterKeys(parameters, { a: '1', b: '2', c: undefined })).toEqual([]);
+  });
+});
+
+// --- T-112/T-138: ruleOptionSchema carries categoryId/subCategoryId, not just their display
+// names — ComponentRulesStep's category/sub-category filter (T-112 implementation note 3) keys
+// its client-side filtering off the id, since two categories can share a display name across
+// tenants. This block is the regression for T-138: T-112's shared-schema half of that wiring was
+// lost to an uncommitted-work reset and silently regressed `ruleOptionSchema` back to
+// name-only, while its front-end consumer (already reading `.categoryId`) kept compiling only
+// because `ruleOptionSchema` had no `.strict()` violation to report at the type level — a plain
+// `RuleOption` fixture missing the fields is the shape that actually catches it. -------------
+describe('campaign.schema — ruleOptionSchema (T-112/T-138)', () => {
+  const VALID_OPTION = {
+    ruleId: 1,
+    ruleCode: 'RULE_COMP_MIN_SPEND',
+    name: 'Minimum spend',
+    categoryId: 7,
+    subCategoryId: 42,
+    categoryName: 'Component rules',
+    subCategoryName: 'Spend thresholds',
+    ruleVersionId: 9,
+    ruleVersionNo: 1,
+    parameters: { fields: [] },
+    defaultOperators: [],
+  };
+
+  it('TC-1: parses a well-formed option, including categoryId/subCategoryId', () => {
+    const result = ruleOptionSchema.safeParse(VALID_OPTION);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.categoryId).toBe(7);
+      expect(result.data.subCategoryId).toBe(42);
+    }
+  });
+
+  /** `VALID_OPTION` minus one named key — deletion, not destructuring, so no rest sibling lint noise. */
+  function omit(key: keyof typeof VALID_OPTION): Record<string, unknown> {
+    const copy: Record<string, unknown> = { ...VALID_OPTION };
+    delete copy[key];
+    return copy;
+  }
+
+  it('TC-3 regression: refuses an option missing categoryId (the T-138 defect — proven red against the unfixed schema by removing the field again)', () => {
+    expect(ruleOptionSchema.safeParse(omit('categoryId')).success).toBe(false);
+  });
+
+  it('TC-3 regression: refuses an option missing subCategoryId', () => {
+    expect(ruleOptionSchema.safeParse(omit('subCategoryId')).success).toBe(false);
+  });
+
+  it('TC-4: categoryName/subCategoryName stay independently nullable — unrelated to the id fields', () => {
+    const result = ruleOptionSchema.safeParse({
+      ...VALID_OPTION,
+      categoryName: null,
+      subCategoryName: null,
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('TC-4: rejects a non-integer categoryId/subCategoryId, same as every other *Id field here', () => {
+    expect(ruleOptionSchema.safeParse({ ...VALID_OPTION, categoryId: 1.5 }).success).toBe(false);
+    expect(ruleOptionSchema.safeParse({ ...VALID_OPTION, subCategoryId: 'x' }).success).toBe(false);
+  });
+});
+
+// --- T-136: a `select` field sourced from a provider (`valueSource`, T-122) can actually be
+// saved. `buildRuleValueSchema` switched on `field.type` alone and enumerated `field.options` for
+// every `select`, so a provider-sourced field — legal since T-122 with no `options` at all —
+// became `z.enum([NO_OPTIONS_SENTINEL])`: an enum of one value no JSON body can carry. Every
+// value a Maker could pick from T-123's own dropdown was therefore rejected, by this one shared
+// function, on both sides of the wire at once. -----------------------------------------------
+describe('campaign.schema — buildRuleValueSchema and value-source select fields (T-136)', () => {
+  const contextSourced: RuleParameters = {
+    fields: [
+      {
+        key: 'targetComponentCode',
+        label: 'Earlier step',
+        type: 'select',
+        required: true,
+        valueSource: { kind: 'CONTEXT_LOOKUP', contextProvider: 'SIBLING_COMPONENTS' },
+      },
+    ],
+  };
+
+  const apiSourced: RuleParameters = {
+    fields: [
+      {
+        key: 'merchantOutlet',
+        label: 'Outlet',
+        type: 'select',
+        required: false,
+        valueSource: { kind: 'API_LOOKUP', apiProvider: 'OUTLET_DIRECTORY' },
+      },
+    ],
+  };
+
+  it('TC-2/TC-3: accepts a CONTEXT_LOOKUP value the Maker picked from the provider dropdown', () => {
+    // The exact defect: this is a component id `GET /field-value-sources/context/...` returned,
+    // and before the fix it failed with `invalid_enum_value … expected '\0__no_options__'`.
+    const result = buildRuleValueSchema(contextSourced).safeParse({
+      targetComponentCode: '4321',
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('TC-3: accepts an API_LOOKUP value, and treats the optional field as omittable', () => {
+    expect(buildRuleValueSchema(apiSourced).safeParse({ merchantOutlet: 'OUTLET-9' }).success).toBe(
+      true,
+    );
+    expect(buildRuleValueSchema(apiSourced).safeParse({}).success).toBe(true);
+  });
+
+  it('normalises a numeric provider value to its string form — one stored shape per value', () => {
+    // `FieldValueOption.value` is `string | number` on both sides (T-123's lookup service, the
+    // SPA's `ruleValues.ts`). The SPA sends `String(value)`; an API/agent caller forwarding the
+    // provider's raw number must not create a second representation of the same choice.
+    const result = buildRuleValueSchema(contextSourced).safeParse({ targetComponentCode: 4321 });
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data).toEqual({ targetComponentCode: '4321' });
+  });
+
+  it('still refuses an empty string, a wrong type and an undeclared key', () => {
+    expect(
+      buildRuleValueSchema(contextSourced).safeParse({ targetComponentCode: '' }).success,
+    ).toBe(false);
+    expect(
+      buildRuleValueSchema(contextSourced).safeParse({ targetComponentCode: true }).success,
+    ).toBe(false);
+    expect(
+      buildRuleValueSchema(contextSourced).safeParse({ targetComponentCode: '1', sneaky: 'x' })
+        .success,
+    ).toBe(false);
+  });
+
+  it('still refuses a missing required value-source field (TC-18 is unchanged by the fix)', () => {
+    expect(buildRuleValueSchema(contextSourced).safeParse({}).success).toBe(false);
+  });
+
+  it('takes the provider branch when a field carries both options and a valueSource', () => {
+    // `ruleParameterFieldSchema` permits both, and `ComponentRulesStep` renders such a field from
+    // its provider — so validating against the list the Maker was never shown would reject
+    // exactly the values they could pick.
+    const both: RuleParameters = {
+      fields: [
+        {
+          key: 'targetComponentCode',
+          label: 'Earlier step',
+          type: 'select',
+          required: true,
+          options: ['legacy-a', 'legacy-b'],
+          valueSource: { kind: 'CONTEXT_LOOKUP', contextProvider: 'SIBLING_COMPONENTS' },
+        },
+      ],
+    };
+    expect(buildRuleValueSchema(both).safeParse({ targetComponentCode: '4321' }).success).toBe(
+      true,
+    );
+    expect(buildRuleValueSchema(both).safeParse({ targetComponentCode: 'legacy-a' }).success).toBe(
+      true,
+    );
+  });
+
+  it('TC-4: a plain fixed-list select is untouched — its options are still the whole contract', () => {
+    const fixed: RuleParameters = {
+      fields: [
+        {
+          key: 'txnType',
+          label: 'Transaction type',
+          type: 'select',
+          required: true,
+          options: ['purchase', 'refund'],
+        },
+      ],
+    };
+    expect(buildRuleValueSchema(fixed).safeParse({ txnType: 'purchase' }).success).toBe(true);
+    expect(buildRuleValueSchema(fixed).safeParse({ txnType: 'anything-else' }).success).toBe(false);
+    expect(buildRuleValueSchema(fixed).safeParse({ txnType: 4321 }).success).toBe(false);
+  });
+
+  it('TC-4: a select with neither options nor a valueSource still fails closed', () => {
+    const malformed: RuleParameters = {
+      fields: [{ key: 'choice', label: 'Choice', type: 'select', required: true }],
+    };
+    expect(buildRuleValueSchema(malformed).safeParse({ choice: 'anything' }).success).toBe(false);
   });
 });

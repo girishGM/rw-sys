@@ -1,9 +1,15 @@
 /**
  * T-023 — the top bar (04-FRONTEND.md §1): mobile nav trigger, brand, context chip,
  * notification bell, user menu — in that order, left to right.
+ *
+ * T-129 — the theme switcher joins the same right-hand cluster, ahead of the notification bell:
+ * a portal-wide preference reads more naturally next to the account-level controls than buried
+ * in the nav. Requires a `<ThemeProvider>` ancestor (`app/routeStubs.tsx`'s `ProtectedLayout`
+ * already supplies one, the same way it supplies `useBootstrap()`'s `<BootstrapProvider>`).
  */
 import { Menu } from 'lucide-react';
 import { cx } from '../components/internal/cx';
+import { ThemeSwitcher } from '../components/ThemeSwitcher';
 import { ContextChip } from './ContextChip';
 import { NotificationBell } from './NotificationBell';
 import { UserMenu } from './UserMenu';
@@ -31,6 +37,7 @@ export function TopBar({ onOpenMobileNav }: TopBarProps) {
 
       <div className="ml-auto flex min-w-0 items-center gap-2 lg:gap-3">
         <ContextChip />
+        <ThemeSwitcher />
         <NotificationBell />
         <UserMenu />
       </div>

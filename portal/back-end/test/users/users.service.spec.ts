@@ -520,6 +520,61 @@ describe('UsersService', () => {
     });
   });
 
+  // --- T-128: GET/PATCH /users/me/preferences -------------------------------------------------
+
+  describe('getPreferences', () => {
+    it("TC-1: reads the caller's own row (actor.userId), not any parameter", async () => {
+      scoped.setByPk(PortalUser, portalUserRow({ id: 42, uiTheme: 'light-blue' }));
+      const who = actor({ userId: 42 });
+
+      const result = await service.getPreferences(who);
+
+      expect(result).toEqual({ uiTheme: 'light-blue' });
+      expect(scoped.callsTo('findByPkOrFail')[0]).toMatchObject({ options: { id: 42 } });
+    });
+  });
+
+  describe('updatePreferences', () => {
+    it("TC-2: writes uiTheme to the caller's own row and returns the persisted value", async () => {
+      scoped.setByPk(PortalUser, portalUserRow({ id: 42, uiTheme: 'light-blue' }));
+      const who = actor({ userId: 42 });
+
+      const result = await service.updatePreferences(who, 'yellow-black');
+
+      expect(result).toEqual({ uiTheme: 'yellow-black' });
+      const call = scoped.callsTo('update')[0];
+      expect(call.values).toEqual({ uiTheme: 'yellow-black' });
+      expect(call.options).toMatchObject({ where: { id: 42 } });
+    });
+
+    it('TC-4: any role may call this — no role-based branch exists in the method at all', async () => {
+      scoped.setByPk(PortalUser, portalUserRow({ id: 7, uiTheme: 'light-blue' }));
+      const who = actor({ userId: 7, role: 'merchant' });
+
+      const result = await service.updatePreferences(who, 'red-white');
+
+      expect(result).toEqual({ uiTheme: 'red-white' });
+    });
+
+    it('runs inside one transaction', async () => {
+      scoped.setByPk(PortalUser, portalUserRow({ id: 42, uiTheme: 'light-blue' }));
+      const who = actor({ userId: 42 });
+
+      await service.updatePreferences(who, 'yellow-black');
+
+      expect(sequelize.transactionCalls).toBe(1);
+    });
+
+    it("annotates the audit context with the actor's own id", async () => {
+      scoped.setByPk(PortalUser, portalUserRow({ id: 42, uiTheme: 'light-blue' }));
+      const who = actor({ userId: 42 });
+
+      await service.updatePreferences(who, 'yellow-black');
+
+      expect(audit.annotations).toContainEqual({ targetId: 42, detail: { fields: ['uiTheme'] } });
+    });
+  });
+
   // --- update (PATCH) ------------------------------------------------------------------------
 
   describe('update', () => {

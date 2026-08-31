@@ -27,6 +27,16 @@ import { QueryTypes } from 'sequelize';
  * real data from the underlying `reward_config` system, not portal test residue). This
  * seed's `WHERE NOT EXISTS` is scoped to `tenant_id IS NULL` specifically, so it can never
  * collide with, alter, or delete that unrelated row.
+ *
+ * **T-156 investigation note.** T-156 (a truly fresh scratch database has no `tenants` row,
+ * breaking `T105_001`'s hardcoded `tenant_id = 1`) named this file too, from its own evidence
+ * quoting the comment above. Re-verified directly against a genuinely empty `reward_config`
+ * schema (schema.sql + migrations, no other seed) as part of that task: this migration's own
+ * `INSERT` never references `tenant_id = 1` — it always writes `tenant_id = NULL` (the global
+ * default row) — so `fk_ap_tenant` (nullable FK) never fires here regardless of whether any
+ * `tenants` row exists, and this file needed no code change. Confirmed by running the full
+ * migration chain against a fresh scratch database: `T004_006` applies cleanly every time: only
+ * `T105_001` (further down the chain) ever actually hit the FK violation T-156 fixed.
  */
 
 export async function up({ context }: { context: Sequelize }): Promise<void> {

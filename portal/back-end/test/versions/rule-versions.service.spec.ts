@@ -7,7 +7,15 @@
  */
 import { UniqueConstraintError } from 'sequelize';
 import { PermissionDeniedHttpException } from '@/common/rbac/rbac.exceptions';
-import { RuleMaster, RuleVersion, RuleVersionCountryAssignment } from '@/database/models';
+import { ScopeViolationError } from '@/common/scope/scope.exceptions';
+import { ValidationFailedError } from '@/common/errors/app-error';
+import {
+  RuleMaster,
+  RuleOperator,
+  RuleResolver,
+  RuleVersion,
+  RuleVersionCountryAssignment,
+} from '@/database/models';
 import { PortalUser } from '@/database/portal-models';
 import { RuleVersionsService } from '@/modules/versions/rule-versions.service';
 import {
@@ -275,6 +283,127 @@ describe('RuleVersionsService.updateDraft — TC-3/TC-4', () => {
 
     const [call] = scoped.callsTo('update');
     expect((call.values as { isBreaking: boolean }).isBreaking).toBe(false);
+  });
+});
+
+describe('RuleVersionsService.updateDraft — T-109 resolver wiring', () => {
+  it('TC-1: validates resolverId + defaultOperators, then writes the stringified JSON columns', async () => {
+    const { service, scoped } = buildService();
+    scoped.pushByPk(RuleVersion, ruleVersionRow({ id: 1, status: 'draft' }));
+    scoped.setByPk(RuleResolver, { id: 5, resolverCode: 'JSONPATH_PAYLOAD' });
+    scoped.setListRows(RuleOperator, [{ operatorCode: 'equals' }, { operatorCode: 'in' }]);
+    scoped.pushByPk(
+      RuleVersion,
+      ruleVersionRow({
+        id: 1,
+        status: 'draft',
+        resolverId: 5,
+        // The `after` read: `rule-version.model.ts`'s own two `text` columns hold JSON as a
+        // raw string (never a getter/setter pair) — matching that real shape here, rather than
+        // an already-parsed object, is what proves `toRuleVersionDto`'s own `parseJsonColumn`
+        // call actually parses it.
+        resolverConfig: JSON.stringify({ path: 'transaction.amount' }),
+        evaluationContext: 'transaction_payload',
+        defaultOperators: JSON.stringify(['equals', 'in']),
+      }),
+    );
+
+    const dto = await service.updateDraft(actor(), 1, 1, {
+      resolverId: 5,
+      resolverConfig: { path: 'transaction.amount' },
+      evaluationContext: 'transaction_payload',
+      defaultOperators: ['equals', 'in'],
+    });
+
+    expect(dto.resolverId).toBe(5);
+    expect(dto.resolverConfig).toEqual({ path: 'transaction.amount' });
+    expect(dto.evaluationContext).toBe('transaction_payload');
+    expect(dto.defaultOperators).toEqual(['equals', 'in']);
+
+    const [call] = scoped.callsTo('update');
+    expect(call.values).toEqual({
+      resolverId: 5,
+      resolverConfig: JSON.stringify({ path: 'transaction.amount' }),
+      evaluationContext: 'transaction_payload',
+      defaultOperators: JSON.stringify(['equals', 'in']),
+    });
+  });
+
+  it('TC-2: a nonexistent resolverId 404s before any write', async () => {
+    const { service, scoped } = buildService();
+    scoped.setByPk(RuleVersion, ruleVersionRow({ id: 1, status: 'draft' }));
+    scoped.setByPk(RuleResolver, null);
+
+    await expect(service.updateDraft(actor(), 1, 1, { resolverId: 999 })).rejects.toBeInstanceOf(
+      ScopeViolationError,
+    );
+    expect(scoped.callsTo('update')).toHaveLength(0);
+  });
+
+  it('TC-3: an unknown operator code 400s before any write, one IN (...) query regardless of count', async () => {
+    const { service, scoped } = buildService();
+    scoped.setByPk(RuleVersion, ruleVersionRow({ id: 1, status: 'draft' }));
+    scoped.setListRows(RuleOperator, [{ operatorCode: 'equals' }]);
+
+    const error: unknown = await service
+      .updateDraft(actor(), 1, 1, { defaultOperators: ['equals', 'bogus_code'] })
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(ValidationFailedError);
+    expect((error as ValidationFailedError).details).toEqual([
+      { field: 'defaultOperators', code: 'UNKNOWN_OPERATOR' },
+    ]);
+    expect(scoped.callsTo('update')).toHaveLength(0);
+    const operatorLookups = scoped
+      .callsTo('listAll')
+      .filter((recorded) => recorded.model === 'RuleOperator');
+    expect(operatorLookups).toHaveLength(1);
+  });
+
+  it('TC-4: rejected on a published version by the same status check expression already uses (no registry lookup)', async () => {
+    const { service, scoped } = buildService();
+    scoped.setByPk(RuleVersion, ruleVersionRow({ id: 1, status: 'published' }));
+
+    await expect(
+      service.updateDraft(actor(), 1, 1, { resolverConfig: { path: 'x' } }),
+    ).rejects.toBeInstanceOf(VersionInvalidTransitionError);
+    const resolverLookups = scoped
+      .callsTo('findByPkOrFail')
+      .filter((recorded) => recorded.model === 'RuleResolver');
+    expect(resolverLookups).toHaveLength(0);
+    expect(scoped.callsTo('update')).toHaveLength(0);
+  });
+
+  it('TC-6: clears resolverId/defaultOperators back to null with no registry lookup', async () => {
+    const { service, scoped } = buildService();
+    scoped.pushByPk(
+      RuleVersion,
+      ruleVersionRow({
+        id: 1,
+        status: 'draft',
+        resolverId: 5,
+        defaultOperators: JSON.stringify(['equals']),
+      }),
+    );
+    scoped.pushByPk(RuleVersion, ruleVersionRow({ id: 1, status: 'draft' }));
+
+    const dto = await service.updateDraft(actor(), 1, 1, {
+      resolverId: null,
+      defaultOperators: null,
+    });
+
+    expect(dto.resolverId).toBeNull();
+    expect(dto.defaultOperators).toBeNull();
+    const [call] = scoped.callsTo('update');
+    expect(call.values).toEqual({ resolverId: null, defaultOperators: null });
+    const resolverLookups = scoped
+      .callsTo('findByPkOrFail')
+      .filter((recorded) => recorded.model === 'RuleResolver');
+    expect(resolverLookups).toHaveLength(0);
+    const operatorLookups = scoped
+      .callsTo('listAll')
+      .filter((recorded) => recorded.model === 'RuleOperator');
+    expect(operatorLookups).toHaveLength(0);
   });
 });
 

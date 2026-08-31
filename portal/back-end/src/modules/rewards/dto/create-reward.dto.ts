@@ -3,6 +3,12 @@
  *
  * `tenantId`/`status` are never accepted here (AGENT-PROTOCOL R3/R2): the service always writes
  * `tenant_id = NULL` (01-DATABASE.md §4) and `status = 'active'` on create.
+ *
+ * `categoryId`/`subCategoryId` — T-118. `categoryId` is required (`reward_systems.category_id`
+ * is `NOT NULL`, `T118_001`); `subCategoryId` is optional — a reward category may legitimately
+ * have zero sub-categories (T-116's own "Points never needs one" example). The service cross-
+ * checks that a supplied `subCategoryId` actually belongs to `categoryId` — see
+ * `rewards.service.ts#create`.
  */
 import {
   IsBoolean,
@@ -82,4 +88,11 @@ export class CreateRewardDto {
   @IsOptional()
   @IsInt()
   merchantId?: number;
+
+  @IsInt()
+  categoryId!: number;
+
+  @IsOptional()
+  @IsInt()
+  subCategoryId?: number;
 }

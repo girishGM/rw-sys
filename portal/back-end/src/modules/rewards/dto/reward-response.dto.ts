@@ -11,13 +11,25 @@
  * actually built — see {@link maskConnectorConfigValue}.
  */
 import type { Country } from '@/database/models/country.model';
+import type { RewardCategory } from '@/database/models/reward-category.model';
 import type { RewardCountryAssignment } from '@/database/models/reward-country-assignment.model';
+import type { RewardSubCategory } from '@/database/models/reward-sub-category.model';
 import type { RewardSystem } from '@/database/models/reward-system.model';
 import type {
   RewardConnectorTypeValue,
   RewardDeliveryModeValue,
   RewardStatusValue,
 } from '../rewards.constants';
+
+/** A reward system with its category (and, when set, sub-category) eagerly loaded — T-118, the
+ * shape every read path in this module loads it in so `toRewardDto`/`toRewardListItemDto` never
+ * have to guard against a missing association. Mirrors `RuleWithCategory`
+ * (`rule-response.dto.ts`), except `category` is a direct FK here rather than derived through
+ * the sub-category — see `reward-system.model.ts`'s own header for why. */
+export type RewardWithCategory = RewardSystem & {
+  category: RewardCategory;
+  subCategory: RewardSubCategory | null;
+};
 
 /** 03-API-CONTRACT.md §1 — `{ "data": … }`. Declared locally per the precedent
  * `rule-response.dto.ts`'s own copy documents: this envelope is an API-wide convention no task
@@ -54,6 +66,12 @@ interface RewardCommonDto {
   readonly retryEnabled: boolean;
   readonly retryConfig: Record<string, unknown>;
   readonly merchantId: number | null;
+  /** T-118 — resolved from the eagerly-loaded `category`/`subCategory` associations, never a
+   * bare id alone (mirrors `RuleDto`'s own `categoryName`/`subCategoryName`). */
+  readonly categoryId: number;
+  readonly categoryName: string;
+  readonly subCategoryId: number | null;
+  readonly subCategoryName: string | null;
   readonly status: RewardStatusValue;
   readonly createdAt: string;
   readonly updatedAt: string;
@@ -77,7 +95,7 @@ export interface RewardDto extends RewardCommonDto {
   readonly connectorConfigPreview: Record<string, string> | null;
 }
 
-function commonFields(reward: RewardSystem): RewardCommonDto {
+function commonFields(reward: RewardWithCategory): RewardCommonDto {
   return {
     id: reward.id,
     systemCode: reward.systemCode,
@@ -91,13 +109,17 @@ function commonFields(reward: RewardSystem): RewardCommonDto {
     retryEnabled: reward.retryEnabled,
     retryConfig: reward.retryConfig,
     merchantId: reward.merchantId,
+    categoryId: reward.category.id,
+    categoryName: reward.category.name,
+    subCategoryId: reward.subCategory === null ? null : reward.subCategory.id,
+    subCategoryName: reward.subCategory === null ? null : reward.subCategory.name,
     status: reward.status as RewardStatusValue,
     createdAt: reward.createdAt.toISOString(),
     updatedAt: reward.updatedAt.toISOString(),
   };
 }
 
-export function toRewardListItemDto(reward: RewardSystem): RewardListItemDto {
+export function toRewardListItemDto(reward: RewardWithCategory): RewardListItemDto {
   return commonFields(reward);
 }
 
@@ -107,7 +129,7 @@ export function toRewardListItemDto(reward: RewardSystem): RewardListItemDto {
  * way here, `connectorConfig: null`, because neither is a case the caller can act on.
  */
 export function toRewardDto(
-  reward: RewardSystem,
+  reward: RewardWithCategory,
   decryptedConnectorConfig: Record<string, unknown> | null,
 ): RewardDto {
   return {

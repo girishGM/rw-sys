@@ -19,6 +19,7 @@ import { QueryTypes } from 'sequelize';
 import type { Sequelize } from 'sequelize-typescript';
 import * as argon2 from 'argon2';
 import request from 'supertest';
+import { ruleListEnvelopeSchema, ruleSchema } from '@reward-portal/shared';
 import { AppModule } from '@/app.module';
 import { ARGON2_OPTIONS } from '@/modules/auth/auth.constants';
 import { SEQUELIZE } from '@/database/sequelize.provider';
@@ -476,7 +477,13 @@ describe('T-031 — POST /rules — authorship', () => {
 
     const response = await get('super', `/rules/${String(created.body.data.id)}/parameters`);
     expect(response.status).toBe(200);
-    expect(response.body.data).toEqual(parameters);
+    // T-114 — every field now also carries a response-only `role`. This freshly created rule
+    // has no `rule_versions` row yet (never wired to a resolver), so every field is
+    // `compare_value` (T-114 TC-4) — asserted here as the observable shape of the one field
+    // this test actually supplied, rather than restated as a separate suite.
+    expect(response.body.data).toEqual({
+      fields: parameters.fields.map((field) => ({ ...field, role: 'compare_value' })),
+    });
   });
 
   it('TC-16/TC-17: expression is stored as inert text — never executed', async () => {
@@ -739,6 +746,195 @@ describe('T-031 — PATCH /rules/:id (TC-19, TC-21, TC-22)', () => {
       { id },
     );
     expect(rows).toHaveLength(1);
+  });
+});
+
+describe('T-111 — GET /rules?categoryId=/subCategoryId=/search=', () => {
+  /** T-105's own seed — real category/rule rows, not a fixture this suite creates or tears
+   * down. Confirms the whole path end to end (DTO → `resolveSubCategoryIds` → `where`) against
+   * data nothing in this suite controls, exactly the DoD's own "manually verified" ask. */
+  async function componentCategoryId(): Promise<number> {
+    const [row] = await sql<{ id: number }>(
+      `SELECT id FROM reward_config.rule_categories WHERE category_code = 'COMPONENT'`,
+    );
+    if (row === undefined) {
+      throw new Error('seeded rule_categories COMPONENT row not found — is T-105 applied?');
+    }
+    return row.id;
+  }
+
+  it('TC-5: categoryId=<COMPONENT> returns exactly T-105’s 2 seeded component rules', async () => {
+    const categoryId = await componentCategoryId();
+    const response = await get('super', `/rules?categoryId=${String(categoryId)}&pageSize=100`);
+
+    expect(response.status).toBe(200);
+    const ruleCodes = (response.body.data as { ruleCode: string }[])
+      .map((rule) => rule.ruleCode)
+      .sort();
+    expect(ruleCodes).toEqual(['RULE_COMP_COMPLETED_001', 'RULE_COMP_NOT_COMPLETED_001']);
+  });
+
+  it('TC-1/TC-2: subCategoryId is a direct match; categoryId rolls the sub-category up', async () => {
+    const [subCategory] = await sql<{ id: number }>(
+      `SELECT rsc.id
+         FROM reward_config.rule_sub_categories rsc
+         JOIN reward_config.rule_categories rc ON rc.id = rsc.category_id
+        WHERE rc.category_code = 'COMPONENT' AND rsc.sub_category_code = 'COMP_STATUS_CHECK'`,
+    );
+    expect(subCategory).toBeDefined();
+
+    const response = await get(
+      'super',
+      `/rules?subCategoryId=${String(subCategory.id)}&pageSize=100`,
+    );
+    expect(response.status).toBe(200);
+    const ruleCodes = (response.body.data as { ruleCode: string }[])
+      .map((rule) => rule.ruleCode)
+      .sort();
+    expect(ruleCodes).toEqual(['RULE_COMP_COMPLETED_001', 'RULE_COMP_NOT_COMPLETED_001']);
+  });
+
+  it('TC-3: search matches ruleCode/name case-insensitively', async () => {
+    const response = await get('super', '/rules?search=rule_comp_completed&pageSize=100');
+    expect(response.status).toBe(200);
+    const ruleCodes = (response.body.data as { ruleCode: string }[]).map((rule) => rule.ruleCode);
+    expect(ruleCodes).toEqual(['RULE_COMP_COMPLETED_001']);
+  });
+
+  it('TC-4: categoryId and search combine — both apply (AND)', async () => {
+    const categoryId = await componentCategoryId();
+    const response = await get(
+      'super',
+      `/rules?categoryId=${String(categoryId)}&search=NOT_COMPLETED&pageSize=100`,
+    );
+    expect(response.status).toBe(200);
+    const ruleCodes = (response.body.data as { ruleCode: string }[]).map((rule) => rule.ruleCode);
+    expect(ruleCodes).toEqual(['RULE_COMP_NOT_COMPLETED_001']);
+  });
+});
+
+describe('T-159 — GET /rules pagination tolerates a legacy row the shared read schema rejects', () => {
+  /**
+   * Reproduces the reported defect against the real database, not a hand-authored mock: a
+   * legacy `rule_master` row written before T-122's `valueSourceOnlyOnSelect` refinement existed
+   * (`type: 'string'` carrying a `valueSource` — the exact shape of the live dev-DB row this
+   * task's own diagnosis found, `rule_master.id=1790`/`T037E2E_RULE_SIBLING`) is inserted here
+   * directly with a raw `INSERT`, bypassing `RulesService.create` entirely — the only way to get
+   * such a row into the table at all, since every write path has enforced this refinement since
+   * T-122 (`rules.service.ts#assertValueSourceProvidersExist`'s own header).
+   *
+   * `search=T159PAGINATION` (T-111) scopes every query in this block to exactly the 4 rows
+   * created here, regardless of how many other global rules the shared dev database happens to
+   * hold — the same reason the real bug was hard to see structurally: the failure depends on
+   * *where* a bad row lands relative to `pageSize`, not on the row in isolation, and this keeps
+   * that positioning deterministic instead of riding on the current row count of a shared DB.
+   */
+  const SEARCH_TERM = 'T159PAGINATION';
+  let dirtyRowId: number;
+
+  async function insertLegacyInvalidRule(code: string): Promise<number> {
+    const parameters = JSON.stringify({
+      fields: [
+        {
+          key: 'targetComponentId',
+          label: 'Target component',
+          type: 'string',
+          required: true,
+          valueSource: { kind: 'CONTEXT_LOOKUP', contextProvider: 'SIBLING_COMPONENTS' },
+        },
+      ],
+    });
+    const [created] = await sql<{ id: number }>(
+      `INSERT INTO reward_config.rule_master
+         (tenant_id, sub_category_id, rule_code, name, expression, parameters, created_by, status)
+       VALUES (NULL, :subCategoryId, :code, :code, NULL, :parameters, NULL, 'active')
+       RETURNING id`,
+      { subCategoryId, code, parameters },
+    );
+    createdRuleIds.add(created.id);
+    return created.id;
+  }
+
+  beforeAll(async () => {
+    // Sorted `name:asc`, `pageSize=2`: page 1 = [A, B], page 2 = [C (the dirty row), D] — the
+    // dirty row deliberately does **not** land on page 1, mirroring the live bug report exactly
+    // ("Previous" back to page 1 always worked; "Next" past it always failed).
+    await createRule({ ruleCode: `${SEARCH_TERM}_A`, name: `${SEARCH_TERM}_A` });
+    await createRule({ ruleCode: `${SEARCH_TERM}_B`, name: `${SEARCH_TERM}_B` });
+    dirtyRowId = await insertLegacyInvalidRule(`${SEARCH_TERM}_C`);
+    await createRule({ ruleCode: `${SEARCH_TERM}_D`, name: `${SEARCH_TERM}_D` });
+  });
+
+  it('page 1 (no dirty row) returns exactly the two clean rows', async () => {
+    const response = await get(
+      'super',
+      `/rules?search=${SEARCH_TERM}&sort=name:asc&pageSize=2&page=1`,
+    );
+    expect(response.status).toBe(200);
+    expect((response.body.data as { ruleCode: string }[]).map((rule) => rule.ruleCode)).toEqual([
+      `${SEARCH_TERM}_A`,
+      `${SEARCH_TERM}_B`,
+    ]);
+    expect(response.body.meta).toEqual({ page: 1, pageSize: 2, total: 4 });
+  });
+
+  it(
+    'page 2 (dirty row included) is still a genuine 200 over real HTTP against real Postgres — ' +
+      'the server never throws on this row, only a naive whole-array client schema does',
+    async () => {
+      const response = await get(
+        'super',
+        `/rules?search=${SEARCH_TERM}&sort=name:asc&pageSize=2&page=2`,
+      );
+
+      // TC-1 — reproduced live: this is a genuine 200 with a well-formed body, exactly as the
+      // original diagnosis found. The bug was never a server-side failure.
+      expect(response.status).toBe(200);
+      expect(response.body.meta).toEqual({ page: 2, pageSize: 2, total: 4 });
+      const ids = (response.body.data as { id: number; ruleCode: string }[]).map((r) => r.id);
+      expect(ids).toContain(dirtyRowId);
+      expect(response.body.data as unknown[]).toHaveLength(2);
+
+      // The defect, reproduced against this exact real round trip: the whole-array envelope
+      // schema `fetchRules` used to validate the *entire* response with (pre-fix) fails the
+      // whole page over one bad row, real Postgres data included — not a synthetic fixture.
+      const wholeArrayResult = ruleListEnvelopeSchema.safeParse(response.body);
+      expect(wholeArrayResult.success).toBe(false);
+
+      // The fix, proven against the same real payload: validating each row of `data`
+      // independently (the algorithm `fetchRules` now uses) drops exactly the one dirty row and
+      // keeps every other row on the page — including `meta`, untouched, so the pager still
+      // counts and pages correctly regardless of how many rows were dropped.
+      const rows = response.body.data as unknown[];
+      const validRows = rows.filter((row) => ruleSchema.safeParse(row).success);
+      const invalidRows = rows.filter((row) => !ruleSchema.safeParse(row).success);
+      expect(invalidRows).toHaveLength(1);
+      expect((invalidRows[0] as { id: number }).id).toBe(dirtyRowId);
+      expect(validRows.map((row) => (row as { ruleCode: string }).ruleCode)).toEqual([
+        `${SEARCH_TERM}_D`,
+      ]);
+    },
+  );
+
+  it('Previous back to page 1 from a fetch that included the dirty row still works', async () => {
+    // Confirms the pager's own round trip (page 2 → page 1), not just page 2 in isolation —
+    // the reported symptom was specifically that "Previous" always worked, so this pins that
+    // still holds true with the dirty row present in the same dataset.
+    const page2 = await get(
+      'super',
+      `/rules?search=${SEARCH_TERM}&sort=name:asc&pageSize=2&page=2`,
+    );
+    expect(page2.status).toBe(200);
+
+    const page1 = await get(
+      'super',
+      `/rules?search=${SEARCH_TERM}&sort=name:asc&pageSize=2&page=1`,
+    );
+    expect(page1.status).toBe(200);
+    expect((page1.body.data as { ruleCode: string }[]).map((rule) => rule.ruleCode)).toEqual([
+      `${SEARCH_TERM}_A`,
+      `${SEARCH_TERM}_B`,
+    ]);
   });
 });
 

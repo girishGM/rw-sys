@@ -25,6 +25,7 @@
     "db:rollback": "npm run db:rollback -w back-end",
     "db:status": "npm run db:status -w back-end",
     "bootstrap:superadmin": "npm run bootstrap:superadmin -w back-end",
+    "db:export-package": "bash scripts/export-db-package.sh",
     "test:perf": "cd back-end && npx jest --config ./test/jest-e2e.json test/performance --runInBand",
     "size-limit": "npm run build -w front-end && npm exec -w front-end -- size-limit",
     "load-test": "node scripts/load-test.js",

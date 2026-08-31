@@ -23,6 +23,9 @@
  * counts rows globally — they are all scoped to this suite's own tenants. A failed run leaves
  * rows behind but cannot corrupt anything.
  *
+ * That claim was false for the residue purge for a long time, and silently — see
+ * `purgeOwnResidue` below and the `T-144` describe that now holds it to it.
+ *
  * ### Teardown needs the migration connection, and that is the design working
  *
  * `reward_app` holds `SELECT, INSERT` and **nothing else** on
@@ -65,6 +68,7 @@ import {
   clearProvidedKeyMaterial,
   provideMissingKeyMaterial,
 } from './support/foreign-key-material';
+import { purgeSuiteResidue } from './support/purge-suite-residue';
 
 jest.setTimeout(600_000);
 
@@ -73,6 +77,13 @@ const PASSWORD = 'correct horse battery staple 7!';
 const COUNTRY_A_CODE = 'S1';
 const COUNTRY_B_CODE = 'S2';
 const PREFIX = 'T037E2E';
+/** The `portal_users.display_name` prefix every actor this suite creates carries. */
+const USER_DISPLAY_PREFIX = 'T-037';
+/**
+ * T-144's regression fixture: a campaign/tracker/component journey that is deliberately **not**
+ * this suite's, planted to prove `purgeOwnResidue` leaves other people's rows alone.
+ */
+const FOREIGN_PREFIX = 'T144OTHER';
 
 let app: INestApplication;
 let db: Sequelize;
@@ -420,6 +431,58 @@ async function ensureRuleVersion(ruleId: number, countryId: number): Promise<num
   return versionId;
 }
 
+/**
+ * T-147 — the {@link ensureRuleVersion} mirror for a version that needs `default_operators` set.
+ * `default_operators` is one of the columns `T103_002`'s immutability trigger freezes once a
+ * version is `published` (same set as `expression`/`parameters`/`version_no`/`is_breaking`), so it
+ * must be baked into the **same** `INSERT` that publishes the row — an `UPDATE` after the fact
+ * (even idempotent, even from a fixture) is rejected by that trigger, reproduced directly while
+ * building this fixture. Idempotent the same way `ensureRuleVersion` is: a second call against the
+ * same `ruleId` reuses the version already created, trusting its `default_operators` from the
+ * first call rather than re-writing it.
+ */
+async function ensureRuleVersionWithOperators(
+  ruleId: number,
+  countryId: number,
+  operators: readonly string[],
+): Promise<number> {
+  const [existing] = await sql<{ id: number }>(
+    'SELECT id FROM reward_config.rule_versions WHERE rule_id = :ruleId AND version_no = 1',
+    { ruleId },
+  );
+  const versionId =
+    existing?.id ??
+    (
+      await sql<{ id: number }>(
+        `INSERT INTO reward_config.rule_versions
+           (rule_id, version_no, parameters, default_operators, status, created_by, published_by, published_at)
+         VALUES (:ruleId, 1, :parameters, :defaultOperators, 'published', :adminUserId, :adminUserId, now())
+         RETURNING id`,
+        {
+          ruleId,
+          parameters: RULE_PARAMETERS,
+          defaultOperators: JSON.stringify(operators),
+          adminUserId,
+        },
+      )
+    )[0].id;
+
+  const [assignment] = await sql<{ id: number }>(
+    `SELECT id FROM reward_config.rule_version_country_assignments
+      WHERE rule_version_id = :versionId AND country_id = :countryId`,
+    { versionId, countryId },
+  );
+  if (assignment === undefined) {
+    await exec(
+      `INSERT INTO reward_config.rule_version_country_assignments
+         (rule_version_id, rule_id, country_id, status, assigned_by)
+       VALUES (:versionId, :ruleId, :countryId, 'active', :adminUserId)`,
+      { versionId, ruleId, countryId, adminUserId },
+    );
+  }
+  return versionId;
+}
+
 async function ensureRewardSystem(code: string, countryId: number, rewardType: string) {
   const [existing] = await sql<{ id: number }>(
     'SELECT id FROM reward_config.reward_systems WHERE system_code = :code',
@@ -524,71 +587,253 @@ async function setCeiling(
 }
 
 /**
- * Removes anything a previous, failed run of **this** suite left behind.
+ * Removes anything a previous, failed run of **this** suite left behind. Without it a single
+ * crashed run makes every later run fail on `uq_portal_users_email_live`.
  *
- * Runs as the migration role for the reason the file header gives, and is keyed strictly on this
- * suite's own `T037E2E` prefix and `T-037 ` display names, so it can never touch the 192
- * pre-existing `tenant_campaigns` rows the `create-campaign` agents own — or any other suite's
- * fixtures. Without it a single crashed run makes every later run fail on
- * `uq_portal_users_email_live`.
+ * T-144: this used to be a local copy of the purge, and its last six statements were keyed on
+ * `tracker_code LIKE 'TRK-%'` / `component_code LIKE 'CMP-%'` — which is not a marker of this
+ * suite at all but the prefix `code-generator.ts` puts on **every** tracker and component the
+ * portal generates, for every tenant. So the copy tried to delete rows belonging to other
+ * people's campaigns, and the moment one of them was still linked (tenant `DEMO`'s campaign
+ * `C001` → tracker `TRK-363411-C736NH`, in the shared dev database) the delete hit
+ * `fk_tct_tracker`, threw inside `beforeAll` with an empty `.message`, and failed all 75 tests
+ * in this file.
+ *
+ * T-132 had already extracted and fixed exactly that in `support/purge-suite-residue.ts` — every
+ * statement there is scoped by this suite's own tenants, campaign codes or display names — but
+ * this file was never migrated onto it. It is now. Keep the delegation: do not re-inline a purge
+ * here, and if a new table needs clearing, add it to the shared helper where the scoping rule is
+ * documented and tested (`t132-purge-suite-residue.e2e-spec.ts`).
+ *
+ * The shared helper runs as the migration role, for the reason this file's header gives.
  */
-async function purgeSuiteResidue(): Promise<void> {
+async function purgeOwnResidue(): Promise<void> {
+  await purgeSuiteResidue({ prefix: PREFIX, userDisplayNamePrefix: USER_DISPLAY_PREFIX });
+}
+
+// --- T-144: evidence that the purge above is scoped to this suite --------------------------------
+
+/**
+ * A campaign with a tracker and a component linked to it, carrying the generated codes
+ * `code-generator.ts` produces — which is what made a foreign journey indistinguishable from this
+ * suite's own by code alone, and what the defect turned on.
+ */
+interface PlantedJourney {
+  readonly tenantId: number;
+  readonly campaignId: number;
+  readonly trackerId: number;
+  readonly componentId: number;
+}
+
+interface JourneyState {
+  readonly campaign: boolean;
+  readonly tracker: boolean;
+  readonly component: boolean;
+  readonly campaignTrackerLink: boolean;
+  readonly trackerComponentLink: boolean;
+}
+
+const JOURNEY_INTACT: JourneyState = {
+  campaign: true,
+  tracker: true,
+  component: true,
+  campaignTrackerLink: true,
+  trackerComponentLink: true,
+};
+const JOURNEY_REMOVED: JourneyState = {
+  campaign: false,
+  tracker: false,
+  component: false,
+  campaignTrackerLink: false,
+  trackerComponentLink: false,
+};
+
+/** This suite's own residue, planted before the purge — must be gone afterwards. */
+let plantedOwn: PlantedJourney | undefined;
+/** Another suite's rows, planted before the purge — must survive it untouched. */
+let plantedForeign: PlantedJourney | undefined;
+let ownAfterPurge: JourneyState | undefined;
+let foreignAfterPurge: JourneyState | undefined;
+
+/**
+ * Fixture work for the check above runs as the migration role, like the purge it observes: there
+ * is no application role permitted to write and delete across every table involved (see this
+ * file's header).
+ */
+async function withAdmin<T>(fn: (admin: Sequelize) => Promise<T>): Promise<T> {
   const admin = createMigrationConnection();
-  const purge = async (statement: string) => {
-    await admin.query(statement, { type: QueryTypes.RAW });
-  };
   try {
-    await purge(`
-      WITH mine AS (
-        SELECT id FROM reward_config.tenant_campaigns WHERE campaign_code LIKE '${PREFIX}%'
-      )
-      DELETE FROM reward_portal.portal_campaign_audit_trail
-       WHERE campaign_id IN (SELECT id FROM mine)`);
-    await purge(`
-      WITH mine AS (
-        SELECT id FROM reward_config.tenant_campaigns WHERE campaign_code LIKE '${PREFIX}%'
-      )
-      DELETE FROM reward_portal.portal_approval_requests
-       WHERE entity_type = 'campaign' AND entity_id IN (SELECT id FROM mine)`);
-    for (const table of [
-      'reward_config.campaign_caps',
-      'reward_config.reward_campaign_assignments',
-      'reward_config.campaign_merchants',
-    ]) {
-      await purge(`
-        DELETE FROM ${table}
-         WHERE campaign_id IN (
-           SELECT id FROM reward_config.tenant_campaigns WHERE campaign_code LIKE '${PREFIX}%')`);
-    }
-    await purge(`
-      DELETE FROM reward_config.tenant_campaign_trackers
-       WHERE campaign_id IN (
-         SELECT id FROM reward_config.tenant_campaigns WHERE campaign_code LIKE '${PREFIX}%')`);
-    await purge(`DELETE FROM reward_config.tenant_campaigns WHERE campaign_code LIKE '${PREFIX}%'`);
-    await purge(`
-      DELETE FROM reward_config.tracker_component_rules
-       WHERE tracker_component_id IN (
-         SELECT id FROM reward_config.tracker_components WHERE component_code LIKE 'CMP-%')`);
-    await purge(`
-      DELETE FROM reward_config.reward_component_assignments
-       WHERE component_id IN (
-         SELECT id FROM reward_config.tracker_components WHERE component_code LIKE 'CMP-%')`);
-    await purge(`
-      DELETE FROM reward_config.reward_tracker_assignments
-       WHERE tracker_id IN (SELECT id FROM reward_config.trackers WHERE tracker_code LIKE 'TRK-%')`);
-    await purge(`
-      DELETE FROM reward_config.tracker_tracker_components
-       WHERE tracker_id IN (SELECT id FROM reward_config.trackers WHERE tracker_code LIKE 'TRK-%')`);
-    await purge(`DELETE FROM reward_config.tracker_components WHERE component_code LIKE 'CMP-%'`);
-    await purge(`DELETE FROM reward_config.trackers WHERE tracker_code LIKE 'TRK-%'`);
-    await purge(`
-      DELETE FROM reward_portal.portal_user_notifications
-       WHERE user_id IN (SELECT id FROM reward_portal.portal_users
-                          WHERE display_name LIKE 'T-037 %')`);
-    await purge(`DELETE FROM reward_portal.portal_users WHERE display_name LIKE 'T-037 %'`);
+    return await fn(admin);
   } finally {
     await admin.close();
   }
+}
+
+async function adminSql<T extends object>(
+  admin: Sequelize,
+  statement: string,
+  replacements: Record<string, unknown> = {},
+): Promise<T[]> {
+  return admin.query<T>(statement, { type: QueryTypes.SELECT, replacements });
+}
+
+async function adminExec(
+  admin: Sequelize,
+  statement: string,
+  replacements: Record<string, unknown> = {},
+): Promise<void> {
+  await admin.query(statement, { type: QueryTypes.RAW, replacements });
+}
+
+async function adminInsertId(
+  admin: Sequelize,
+  statement: string,
+  replacements: Record<string, unknown> = {},
+): Promise<number> {
+  const [row] = await adminSql<{ id: number }>(admin, statement, replacements);
+  if (row === undefined) throw new Error(`no id returned from: ${statement}`);
+  return row.id;
+}
+
+async function ensureTenantByCode(admin: Sequelize, code: string): Promise<number> {
+  const [existing] = await adminSql<{ id: number }>(
+    admin,
+    'SELECT id FROM reward_config.tenants WHERE code = :code',
+    { code },
+  );
+  if (existing !== undefined) return existing.id;
+  const [country] = await adminSql<{ id: number }>(
+    admin,
+    'SELECT id FROM reward_config.countries ORDER BY id LIMIT 1',
+  );
+  if (country === undefined) throw new Error('no countries rows — is the schema seeded?');
+  return adminInsertId(
+    admin,
+    `INSERT INTO reward_config.tenants (code, name, country_id, status)
+     VALUES (:code, :code, :countryId, 'active') RETURNING id`,
+    { code, countryId: country.id },
+  );
+}
+
+let plantedSequence = 0;
+
+async function plantJourney(
+  admin: Sequelize,
+  tenantCode: string,
+  campaignCodePrefix: string,
+): Promise<PlantedJourney> {
+  plantedSequence += 1;
+  const suffix = `${String(Date.now())}${String(plantedSequence)}`.slice(-8);
+  const tenantId = await ensureTenantByCode(admin, tenantCode);
+  const campaignId = await adminInsertId(
+    admin,
+    `INSERT INTO reward_config.tenant_campaigns
+       (tenant_id, campaign_code, name, start_date, end_date, status, created_by)
+     VALUES (:tenantId, :code, :code, now(), now() + interval '30 days', 'draft', 'T-144 fixture')
+     RETURNING id`,
+    { tenantId, code: `${campaignCodePrefix}_PLANTED_${suffix}` },
+  );
+  const trackerId = await adminInsertId(
+    admin,
+    `INSERT INTO reward_config.trackers (tenant_id, tracker_code, name, completion_logic, status)
+     VALUES (:tenantId, :code, 'T-144 tracker', 'all', 'active') RETURNING id`,
+    { tenantId, code: `TRK-${String(campaignId)}-${suffix}` },
+  );
+  const componentId = await adminInsertId(
+    admin,
+    `INSERT INTO reward_config.tracker_components (tenant_id, component_code, name, status)
+     VALUES (:tenantId, :code, 'T-144 component', 'active') RETURNING id`,
+    { tenantId, code: `CMP-${String(campaignId)}-${suffix}` },
+  );
+  await adminExec(
+    admin,
+    `INSERT INTO reward_config.tenant_campaign_trackers (tenant_id, campaign_id, tracker_id, status)
+     VALUES (:tenantId, :campaignId, :trackerId, 'active')`,
+    { tenantId, campaignId, trackerId },
+  );
+  await adminExec(
+    admin,
+    `INSERT INTO reward_config.tracker_tracker_components (tracker_id, component_id, sequence_order)
+     VALUES (:trackerId, :componentId, 1)`,
+    { trackerId, componentId },
+  );
+  return { tenantId, campaignId, trackerId, componentId };
+}
+
+async function journeyState(admin: Sequelize, journey: PlantedJourney): Promise<JourneyState> {
+  const [row] = await adminSql<{
+    campaign: string;
+    tracker: string;
+    component: string;
+    tct: string;
+    ttc: string;
+  }>(
+    admin,
+    `SELECT
+       (SELECT count(*) FROM reward_config.tenant_campaigns WHERE id = :campaignId) AS campaign,
+       (SELECT count(*) FROM reward_config.trackers WHERE id = :trackerId) AS tracker,
+       (SELECT count(*) FROM reward_config.tracker_components WHERE id = :componentId) AS component,
+       (SELECT count(*) FROM reward_config.tenant_campaign_trackers
+         WHERE campaign_id = :campaignId AND tracker_id = :trackerId) AS tct,
+       (SELECT count(*) FROM reward_config.tracker_tracker_components
+         WHERE tracker_id = :trackerId AND component_id = :componentId) AS ttc`,
+    { ...journey },
+  );
+  if (row === undefined) throw new Error('journeyState returned no row');
+  return {
+    campaign: Number(row.campaign) === 1,
+    tracker: Number(row.tracker) === 1,
+    component: Number(row.component) === 1,
+    campaignTrackerLink: Number(row.tct) === 1,
+    trackerComponentLink: Number(row.ttc) === 1,
+  };
+}
+
+/**
+ * Removes the foreign-tenant fixture, including anything a crashed earlier run left in it. Scoped
+ * to a tenant code no other suite uses, so it obeys the same rule as the purge it exists to test:
+ * nothing here matches globally.
+ */
+async function dropForeignFixture(admin: Sequelize): Promise<void> {
+  const tenantCode = `${FOREIGN_PREFIX}_TENANT`;
+  const [tenant] = await adminSql<{ id: number }>(
+    admin,
+    'SELECT id FROM reward_config.tenants WHERE code = :code',
+    { code: tenantCode },
+  );
+  if (tenant === undefined) return;
+  const scope = { tenantId: tenant.id };
+  const trackersInTenant = 'SELECT id FROM reward_config.trackers WHERE tenant_id = :tenantId';
+  const componentsInTenant =
+    'SELECT id FROM reward_config.tracker_components WHERE tenant_id = :tenantId';
+  await adminExec(
+    admin,
+    `DELETE FROM reward_config.tracker_tracker_components
+      WHERE tracker_id IN (${trackersInTenant}) OR component_id IN (${componentsInTenant})`,
+    scope,
+  );
+  await adminExec(
+    admin,
+    'DELETE FROM reward_config.tenant_campaign_trackers WHERE tenant_id = :tenantId',
+    scope,
+  );
+  await adminExec(
+    admin,
+    'DELETE FROM reward_config.tenant_campaigns WHERE tenant_id = :tenantId',
+    scope,
+  );
+  await adminExec(
+    admin,
+    'DELETE FROM reward_config.tracker_components WHERE tenant_id = :tenantId',
+    scope,
+  );
+  await adminExec(admin, 'DELETE FROM reward_config.trackers WHERE tenant_id = :tenantId', scope);
+  await adminExec(admin, 'DELETE FROM reward_config.tenants WHERE id = :tenantId', scope);
+}
+
+function recorded(state: JourneyState | undefined): JourneyState {
+  if (state === undefined) throw new Error('beforeAll did not record the purge outcome');
+  return state;
 }
 
 async function clearCeilings(tenantId: number): Promise<void> {
@@ -729,7 +974,30 @@ beforeAll(async () => {
   db = app.get<Sequelize>(SEQUELIZE);
   emailCrypto = emailCryptoOf(app);
 
-  await purgeSuiteResidue();
+  // T-144. Plant the exact shape of row the purge used to destroy itself on — a campaign that is
+  // *not* this suite's, still referencing a `TRK-`/`CMP-` coded journey — alongside a piece of
+  // residue that genuinely is this suite's, and record what the purge did to each. The assertions
+  // are in the `T-144` describe below.
+  //
+  // This is set up here, in `beforeAll`, rather than inside that test, and the reason is not
+  // convenience: `purgeOwnResidue` deletes every `T037E2E` campaign and every `T-037 ` actor, so
+  // the only honest moment to call it is the one it is already called in — before any of them
+  // exist. Calling it from a test would delete the suite out from under itself.
+  await withAdmin(async (admin) => {
+    await dropForeignFixture(admin);
+    plantedOwn = await plantJourney(admin, `${PREFIX}_TENANT_A`, PREFIX);
+    plantedForeign = await plantJourney(admin, `${FOREIGN_PREFIX}_TENANT`, FOREIGN_PREFIX);
+  });
+
+  await purgeOwnResidue();
+
+  await withAdmin(async (admin) => {
+    if (plantedOwn === undefined || plantedForeign === undefined) {
+      throw new Error('T-144 fixture was not planted');
+    }
+    ownAfterPurge = await journeyState(admin, plantedOwn);
+    foreignAfterPurge = await journeyState(admin, plantedForeign);
+  });
 
   adminUserId = await ensureAdminUserId();
   countryA = await ensureCountry(COUNTRY_A_CODE, 'T-037 e2e country A');
@@ -800,6 +1068,10 @@ afterAll(async () => {
     };
 
     try {
+      // T-144's foreign-tenant fixture. Removed first so it goes even if a test failed partway
+      // through, and scoped to a tenant code no other suite uses.
+      await dropForeignFixture(admin);
+
       const ids = [...createdCampaignIds];
       if (ids.length > 0) {
         // Children first, then the campaigns. Ordered by foreign key so nothing is left dangling
@@ -884,6 +1156,26 @@ afterAll(async () => {
   }
   clearProvidedKeyMaterial(borrowedKeyVars);
   if (app !== undefined) await app.close();
+});
+
+// --- T-144: the suite's own residue purge --------------------------------------------------------
+
+/**
+ * These two assert what `beforeAll`'s `purgeOwnResidue()` actually did to real rows in the real
+ * database, not what its SQL says. The defect they guard against was invisible to inspection and
+ * to every other test in this file: the purge deleted `trackers WHERE tracker_code LIKE 'TRK-%'`,
+ * a prefix every tracker the portal generates carries, and stayed green for as long as no other
+ * campaign in the shared database happened to have a live link row at purge time. Planting that
+ * link row makes the condition deterministic instead of waiting for someone else's data.
+ */
+describe('T-144 · the suite residue purge is scoped to this suite', () => {
+  it("TC-3: leaves another campaign's TRK-/CMP- journey completely intact", () => {
+    expect(recorded(foreignAfterPurge)).toEqual(JOURNEY_INTACT);
+  });
+
+  it("TC-4: still removes this suite's own residue", () => {
+    expect(recorded(ownAfterPurge)).toEqual(JOURNEY_REMOVED);
+  });
 });
 
 // --- TC-1…TC-13: the campaign itself -------------------------------------------------------------
@@ -1292,6 +1584,230 @@ describe('T-037 · rule binding and dynamic values', () => {
     });
     expect(response.status).toBe(400);
     expect(response.body.error.code).toBe('NOT_PART_OF_CAMPAIGN');
+  });
+});
+
+// --- T-147: rule operator + component combination logic ------------------------------------------
+
+describe('T-147 · rule operator and component combination logic', () => {
+  // A rule/version of this block's own, not `ruleAssignedToA`/`ruleVersionA` — `default_operators`
+  // is one of the columns `T103_002`'s immutability trigger freezes once a version is `published`
+  // (same set as `expression`/`parameters`/`version_no`/`is_breaking`), so it must be baked into
+  // the version's own creating `INSERT` ({@link ensureRuleVersionWithOperators}) rather than set
+  // by an `UPDATE` on the shared fixture after the fact — reproduced directly while building this
+  // fixture the first way.
+  let operatorRuleId: number;
+
+  beforeAll(async () => {
+    operatorRuleId = await ensureRule(`${PREFIX}_RULE_OP`);
+    await assignRuleToCountry(operatorRuleId, countryA);
+    await ensureRuleVersionWithOperators(operatorRuleId, countryA, ['at_least', 'equals']);
+  });
+
+  /** Binds {@link operatorRuleId} to a fresh submittable campaign's component, alongside its
+   * existing `ruleAssignedToA` binding — `bindRule` allows more than one rule per component, so
+   * this needs none of `buildSubmittableCampaign`'s own setup duplicated. */
+  async function bindOperatorRule(): Promise<{
+    id: number;
+    componentId: number;
+    bindingId: number;
+  }> {
+    const { id, componentId } = await buildSubmittableCampaign();
+    const bound = await post('makerA', `/campaigns/${String(id)}/rules`, {
+      componentId,
+      ruleId: operatorRuleId,
+      values: { minSpend: 50 },
+    }).expect(201);
+    const component = (
+      bound.body.data.trackers[0].components as { id: number; rules: { id: number }[] }[]
+    ).find((c) => c.id === componentId);
+    const bindingId = component?.rules[component.rules.length - 1]?.id as number;
+    return { id, componentId, bindingId };
+  }
+
+  it("the rule picker carries the pinned version's defaultOperators", async () => {
+    const { id } = await createDraft();
+    const response = await get('makerA', `/campaigns/${String(id)}/rule-options`).expect(200);
+    const option = (response.body.data as { ruleId: number; defaultOperators: string[] }[]).find(
+      (entry) => entry.ruleId === operatorRuleId,
+    );
+    expect(option?.defaultOperators).toEqual(['at_least', 'equals']);
+  });
+
+  it("an operator from the pinned version's defaultOperators is accepted and persisted", async () => {
+    const { id, bindingId } = await bindOperatorRule();
+    await patch('makerA', `/campaigns/${String(id)}/rules/${String(bindingId)}`, {
+      values: { minSpend: 50 },
+      operator: 'at_least',
+    }).expect(200);
+
+    const [row] = await sql<{ operator: string }>(
+      'SELECT operator FROM reward_config.tracker_component_rules WHERE id = :id',
+      { id: bindingId },
+    );
+    expect(row.operator).toBe('at_least');
+  });
+
+  it('an operator outside defaultOperators is a 400 OPERATOR_NOT_ALLOWED', async () => {
+    const { id, bindingId } = await bindOperatorRule();
+    const response = await patch('makerA', `/campaigns/${String(id)}/rules/${String(bindingId)}`, {
+      values: { minSpend: 50 },
+      operator: 'between',
+    });
+    expect(response.status).toBe(400);
+    expect(response.body.error.code).toBe('OPERATOR_NOT_ALLOWED');
+  });
+
+  it('an operator is rejected on a binding whose rule has no defaultOperators at all', async () => {
+    // `ruleAssignedToA` (via `buildSubmittableCampaign`'s own default binding) has never had
+    // `default_operators` set — every operator must be refused, not just ones outside some set.
+    const { id, bindingId } = await buildSubmittableCampaign();
+    const response = await patch('makerA', `/campaigns/${String(id)}/rules/${String(bindingId)}`, {
+      values: { minSpend: 50 },
+      operator: 'at_least',
+    });
+    expect(response.status).toBe(400);
+    expect(response.body.error.code).toBe('OPERATOR_NOT_ALLOWED');
+  });
+
+  it('operator: null clears a previously set operator', async () => {
+    const { id, bindingId } = await bindOperatorRule();
+    await patch('makerA', `/campaigns/${String(id)}/rules/${String(bindingId)}`, {
+      values: { minSpend: 50 },
+      operator: 'equals',
+    }).expect(200);
+    await patch('makerA', `/campaigns/${String(id)}/rules/${String(bindingId)}`, {
+      values: { minSpend: 50 },
+      operator: null,
+    }).expect(200);
+
+    const [row] = await sql<{ operator: string | null }>(
+      'SELECT operator FROM reward_config.tracker_component_rules WHERE id = :id',
+      { id: bindingId },
+    );
+    expect(row.operator).toBeNull();
+  });
+
+  it('ruleLogic n_of without ruleThreshold is a 400', async () => {
+    const { id, componentId } = await buildSubmittableCampaign();
+    const response = await patch(
+      'makerA',
+      `/campaigns/${String(id)}/components/${String(componentId)}`,
+      { ruleLogic: 'n_of' },
+    );
+    expect(response.status).toBe(400);
+  });
+
+  it('ruleThreshold without ruleLogic n_of is a 400', async () => {
+    const { id, componentId } = await buildSubmittableCampaign();
+    const response = await patch(
+      'makerA',
+      `/campaigns/${String(id)}/components/${String(componentId)}`,
+      { ruleLogic: 'any', ruleThreshold: 2 },
+    );
+    expect(response.status).toBe(400);
+  });
+
+  it('ruleLogic n_of with ruleThreshold is accepted and persisted', async () => {
+    const { id, componentId } = await buildSubmittableCampaign();
+    await patch('makerA', `/campaigns/${String(id)}/components/${String(componentId)}`, {
+      ruleLogic: 'n_of',
+      ruleThreshold: 1,
+    }).expect(200);
+
+    const [row] = await sql<{ rule_logic: string; rule_threshold: number }>(
+      'SELECT rule_logic, rule_threshold FROM reward_config.tracker_components WHERE id = :id',
+      { id: componentId },
+    );
+    expect(row.rule_logic).toBe('n_of');
+    expect(row.rule_threshold).toBe(1);
+  });
+
+  it('a partial PATCH — ruleThreshold alone, ruleLogic omitted — never leaves a threshold stored on a non-n_of component', async () => {
+    // The gap an independent review of T-147 found: `updateComponentRequestSchema`'s own
+    // cross-field refine only sees the fields *this* request sends, so a request naming
+    // `ruleThreshold` alone (no `ruleLogic`) passes it untouched. The invariant must still hold
+    // in the stored row — this proves `journey.service.ts#updateComponent` merges against the
+    // component's current `ruleLogic` rather than trusting the refine alone.
+    const { id, componentId } = await buildSubmittableCampaign();
+    // Confirm the starting state really is non-n_of (the untouched default).
+    const [before] = await sql<{ rule_logic: string | null }>(
+      'SELECT rule_logic FROM reward_config.tracker_components WHERE id = :id',
+      { id: componentId },
+    );
+    expect(before.rule_logic).toBeNull();
+
+    await patch('makerA', `/campaigns/${String(id)}/components/${String(componentId)}`, {
+      ruleThreshold: 5,
+    }).expect(200);
+
+    const [after] = await sql<{ rule_logic: string | null; rule_threshold: number | null }>(
+      'SELECT rule_logic, rule_threshold FROM reward_config.tracker_components WHERE id = :id',
+      { id: componentId },
+    );
+    expect(after.rule_logic).toBeNull();
+    // The attempted threshold is discarded, not stored — the same "clear rather than leave a
+    // stale value" choice `updateTracker`'s own `completionThreshold` handling already makes.
+    expect(after.rule_threshold).toBeNull();
+  });
+
+  it('switching ruleLogic away from n_of, alone, clears a previously stored threshold', async () => {
+    const { id, componentId } = await buildSubmittableCampaign();
+    await patch('makerA', `/campaigns/${String(id)}/components/${String(componentId)}`, {
+      ruleLogic: 'n_of',
+      ruleThreshold: 3,
+    }).expect(200);
+
+    await patch('makerA', `/campaigns/${String(id)}/components/${String(componentId)}`, {
+      ruleLogic: 'any',
+    }).expect(200);
+
+    const [row] = await sql<{ rule_logic: string; rule_threshold: number | null }>(
+      'SELECT rule_logic, rule_threshold FROM reward_config.tracker_components WHERE id = :id',
+      { id: componentId },
+    );
+    expect(row.rule_logic).toBe('any');
+    expect(row.rule_threshold).toBeNull();
+  });
+
+  it("ruleLogic defaults to null (reads as 'all') until a Maker sets one", async () => {
+    const { id, componentId } = await buildSubmittableCampaign();
+    const journey = await get('makerA', `/campaigns/${String(id)}/journey`).expect(200);
+    const component = (
+      journey.body.data as {
+        trackers: { components: { id: number; ruleLogic: string | null }[] }[];
+      }
+    ).trackers[0]?.components.find((c) => c.id === componentId);
+    expect(component?.ruleLogic).toBeNull();
+  });
+
+  it('GET journey surfaces operator/value on the rule and ruleLogic/ruleThreshold on the component', async () => {
+    const { id, bindingId, componentId } = await bindOperatorRule();
+    await patch('makerA', `/campaigns/${String(id)}/rules/${String(bindingId)}`, {
+      values: { minSpend: 50 },
+      operator: 'at_least',
+    }).expect(200);
+    await patch('makerA', `/campaigns/${String(id)}/components/${String(componentId)}`, {
+      ruleLogic: 'n_of',
+      ruleThreshold: 1,
+    }).expect(200);
+
+    const journey = await get('makerA', `/campaigns/${String(id)}/journey`).expect(200);
+    const component = (
+      journey.body.data as {
+        trackers: {
+          components: {
+            id: number;
+            ruleLogic: string;
+            ruleThreshold: number;
+            rules: { id: number; operator: string | null }[];
+          }[];
+        }[];
+      }
+    ).trackers[0]?.components.find((c) => c.id === componentId);
+    expect(component?.ruleLogic).toBe('n_of');
+    expect(component?.ruleThreshold).toBe(1);
+    expect(component?.rules.find((rule) => rule.id === bindingId)?.operator).toBe('at_least');
   });
 });
 

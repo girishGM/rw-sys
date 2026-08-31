@@ -40,4 +40,62 @@ describe('UpdateRuleVersionDto', () => {
     );
     expect(errors.length).toBeGreaterThan(0);
   });
+
+  // T-109
+  it('accepts resolverId, resolverConfig, evaluationContext and defaultOperators', async () => {
+    const errors = await validate(
+      plainToInstance(UpdateRuleVersionDto, {
+        resolverId: 5,
+        resolverConfig: { path: 'transaction.amount' },
+        evaluationContext: 'transaction_payload',
+        defaultOperators: ['equals', 'in'],
+      }),
+    );
+    expect(errors).toHaveLength(0);
+  });
+
+  it('accepts null for all 4 resolver-wiring fields — clearing must stay possible', async () => {
+    const errors = await validate(
+      plainToInstance(UpdateRuleVersionDto, {
+        resolverId: null,
+        resolverConfig: null,
+        evaluationContext: null,
+        defaultOperators: null,
+      }),
+    );
+    expect(errors).toHaveLength(0);
+  });
+
+  it('rejects a non-integer resolverId', async () => {
+    const errors = await validate(plainToInstance(UpdateRuleVersionDto, { resolverId: 'five' }));
+    expect(errors.length).toBeGreaterThan(0);
+  });
+
+  it('rejects a non-array defaultOperators', async () => {
+    const errors = await validate(
+      plainToInstance(UpdateRuleVersionDto, { defaultOperators: 'equals' }),
+    );
+    expect(errors.length).toBeGreaterThan(0);
+  });
+
+  it('rejects a defaultOperators entry that is not a string', async () => {
+    const errors = await validate(
+      plainToInstance(UpdateRuleVersionDto, { defaultOperators: ['equals', 42] }),
+    );
+    expect(errors.length).toBeGreaterThan(0);
+  });
+
+  it('rejects an over-long evaluationContext', async () => {
+    const errors = await validate(
+      plainToInstance(UpdateRuleVersionDto, { evaluationContext: 'x'.repeat(51) }),
+    );
+    expect(errors.length).toBeGreaterThan(0);
+  });
+
+  it('rejects a non-object resolverConfig', async () => {
+    const errors = await validate(
+      plainToInstance(UpdateRuleVersionDto, { resolverConfig: 'not-an-object' }),
+    );
+    expect(errors.length).toBeGreaterThan(0);
+  });
 });

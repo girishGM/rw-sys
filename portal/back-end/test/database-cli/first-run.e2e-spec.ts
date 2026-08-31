@@ -23,9 +23,11 @@
  * documents (never a second server — that file is explicit about using the one already
  * running) — no `reward_portal` schema, no `reward_config` schema, no rows, until this suite
  * creates them via the real `npm run db:migrate` and the real
- * `database/reward_config_postgres.sql` (one level above `portal/` — read-only input here,
- * the same relationship `e2e/utils/db.ts#loadRewardConfigSchema` has to it for T-050's own
- * suite). The superuser-credential lookup and ephemeral-database lifecycle below are the same
+ * `database/reward_config/reward_config_postgres.sql` (one level above `portal/` — read-only
+ * input here, the same relationship `e2e/utils/db.ts#loadRewardConfigSchema` has to it for
+ * T-050's own suite, though that file's own path constant has the same pre-restructuring
+ * staleness this task fixes here — see T-152's completion report). The superuser-credential
+ * lookup and ephemeral-database lifecycle below are the same
  * strategy `e2e/utils/localPostgres.ts` already established for a Docker-less sandbox —
  * duplicated narrowly here rather than imported, because `e2e/` is a separate npm workspace
  * with its own `tsconfig`/module resolution, not reachable from `back-end`'s.
@@ -48,6 +50,7 @@ const REWARD_CONFIG_SQL_PATH = path.join(
   PORTAL_ROOT,
   '..',
   'database',
+  'reward_config',
   'reward_config_postgres.sql',
 );
 

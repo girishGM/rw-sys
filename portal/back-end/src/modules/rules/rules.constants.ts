@@ -14,6 +14,15 @@ export const RULE_ENTITY = 'rule';
 /** `role_entity_permissions.entity` for country assignment writes/reads. */
 export const RULE_ASSIGNMENT_ENTITY = 'rule_assignment';
 
+/** T-106 — `role_entity_permissions.entity` for category/sub-category authoring. */
+export const RULE_CATEGORY_ENTITY = 'rule_category';
+export const RULE_SUB_CATEGORY_ENTITY = 'rule_sub_category';
+
+/** T-106 — `rule_categories.category_code`/`rule_sub_categories.sub_category_code` width
+ * (`varchar(50)`) and `.name` width (`varchar(200)`), both confirmed against the live schema. */
+export const RULE_CATEGORY_CODE_MAX_LENGTH = 50;
+export const RULE_CATEGORY_NAME_MAX_LENGTH = 200;
+
 export const RULE_CODE_MAX_LENGTH = 80;
 export const RULE_NAME_MAX_LENGTH = 200;
 export const RULE_EXPRESSION_MAX_LENGTH = 8000;
@@ -32,6 +41,11 @@ export const RULE_CODE_PATTERN = /^[A-Z][A-Z0-9_]{1,79}$/;
 export const DEFAULT_PAGE_SIZE = 20;
 /** 03-API-CONTRACT.md §1 — "`pageSize` capped at 100". */
 export const MAX_PAGE_SIZE = 100;
+
+/** T-111 — `GET /rules?search=` bound. Same width `list-merchants-query.dto.ts`'s own
+ * `MERCHANT_SEARCH_MAX_LENGTH` uses; this is a UI convenience filter, not a column, so there is
+ * no schema width to transcribe from — just a sane cap on the query string itself. */
+export const RULE_SEARCH_MAX_LENGTH = 100;
 
 /**
  * `rule_master.parameters` meta-schema bounds (implementation note 4 — "validate it against a

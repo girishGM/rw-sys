@@ -33,6 +33,7 @@
  */
 import { z } from 'zod';
 import { ruleParametersSchema, type RuleParameterField, type RuleParameters } from './rule.schema';
+import { promoCodeBindLevelSchema, rewardKindSchema } from './reward.schema';
 
 // --- primitives ---------------------------------------------------------------------------------
 
@@ -450,6 +451,15 @@ export const createComponentRequestSchema = z
 
 export type CreateComponentRequest = z.infer<typeof createComponentRequestSchema>;
 
+/**
+ * T-147 — `ruleLogic`/`ruleThreshold`: the component-level "rules combine" contract T-104 added,
+ * mirroring `trackers.completion_logic`/`.completion_threshold` one level up (same three values,
+ * same `n_of`-needs-a-threshold shape, same `createTrackerRequestSchema` precedent below). Always
+ * sent together, never as a partial update of just one — the two-sided refine only has enough
+ * information to enforce "n_of requires a threshold, anything else forbids one" when both fields
+ * reflect what this request is actually setting, not a mix of "what the caller sent" and "what
+ * was already in the database".
+ */
 export const updateComponentRequestSchema = z
   .object({
     name: z.string().min(1).max(200).optional(),
@@ -457,8 +467,22 @@ export const updateComponentRequestSchema = z
     activityId: z.number().int().positive().optional(),
     sequenceOrder: z.number().int().min(1).max(1000).optional(),
     isMandatory: z.boolean().optional(),
+    ruleLogic: trackerCompletionLogicSchema.optional(),
+    ruleThreshold: z.number().int().min(1).max(1000).nullable().optional(),
   })
-  .strict();
+  .strict()
+  .refine((value) => value.ruleLogic !== 'n_of' || value.ruleThreshold != null, {
+    message: "ruleThreshold is required when ruleLogic is 'n_of'",
+    path: ['ruleThreshold'],
+  })
+  .refine(
+    (value) =>
+      value.ruleLogic === undefined || value.ruleLogic === 'n_of' || value.ruleThreshold == null,
+    {
+      message: "ruleThreshold is only allowed when ruleLogic is 'n_of'",
+      path: ['ruleThreshold'],
+    },
+  );
 
 export type UpdateComponentRequest = z.infer<typeof updateComponentRequestSchema>;
 
@@ -494,6 +518,16 @@ export const componentRuleSchema = z
     /** The meta-schema the values below were validated against — what the form renders from. */
     parameters: ruleParametersSchema,
     values: z.record(z.unknown()),
+    /**
+     * T-147 — the comparison contract T-104 added (`tracker_component_rules.operator`/`.value`),
+     * sitting next to `values` rather than inside it: `values` is the Maker's own parameter-field
+     * input (e.g. `targetComponentCode`), `operator`/`value` are the dedicated comparison the
+     * runtime engine reads, matching `tracker-component-rule.model.ts`'s own header on the split.
+     * `null` until the Maker sets one — this portal never evaluates rules, so an unset comparison
+     * blocks nothing here, only whatever the external engine does with it.
+     */
+    operator: z.string().nullable(),
+    value: z.unknown().nullable(),
     status: z.string(),
   })
   .strict();
@@ -534,6 +568,14 @@ export const componentSchema = z
     sequenceOrder: z.number().int(),
     isMandatory: z.boolean(),
     status: z.string(),
+    /**
+     * T-147 — how this component's own bound rules combine into "is this component complete?",
+     * mirroring `trackerSchema`'s `completionLogic`/`completionThreshold` one level up. `null`
+     * (never populated, T-104's own default) reads as `'all'` — every existing component keeps
+     * behaving exactly as it always has until a Maker explicitly sets one.
+     */
+    ruleLogic: trackerCompletionLogicSchema.nullable(),
+    ruleThreshold: z.number().int().nullable(),
     rules: z.array(componentRuleSchema),
     rewards: z.array(rewardAssignmentSchema),
   })
@@ -593,9 +635,22 @@ export const bindComponentRuleRequestSchema = z
 
 export type BindComponentRuleRequest = z.infer<typeof bindComponentRuleRequestSchema>;
 
-/** `PATCH /campaigns/:id/rules/:bindingId` — change the values without re-picking the rule. */
+/**
+ * `PATCH /campaigns/:id/rules/:bindingId` — change the values without re-picking the rule.
+ *
+ * T-147 — `operator` travels in the same request as `values` rather than its own endpoint: the
+ * Maker's UI treats the operator dropdown as part of the same rule-configuration panel `values`
+ * already saves as one unit (`ComponentRulesStep.tsx`'s existing dirty/save cycle), and a second
+ * endpoint for one more optional field would be a second thing to keep in sync for no benefit.
+ * Which operators are actually *allowed* depends on the binding's pinned rule version — runtime
+ * state no Zod schema can see — so that check lives in `BindingsService#updateRuleValues`, not
+ * here; this schema only checks shape.
+ */
 export const updateComponentRuleValuesRequestSchema = z
-  .object({ values: z.record(z.unknown()) })
+  .object({
+    values: z.record(z.unknown()),
+    operator: z.string().min(1).max(30).nullable().optional(),
+  })
   .strict();
 
 export type UpdateComponentRuleValuesRequest = z.infer<
@@ -608,11 +663,21 @@ export const ruleOptionSchema = z
     ruleId: z.number().int(),
     ruleCode: z.string(),
     name: z.string(),
+    // T-112/T-138 — every rule has a sub-category (and every sub-category a category), so both
+    // ids are non-nullable, unlike the *Name fields above which are best-effort display labels.
+    categoryId: z.number().int(),
+    subCategoryId: z.number().int(),
     categoryName: z.string().nullable(),
     subCategoryName: z.string().nullable(),
     ruleVersionId: z.number().int().nullable(),
     ruleVersionNo: z.number().int().nullable(),
     parameters: ruleParametersSchema,
+    /**
+     * T-147 — the pinned version's own `defaultOperators` (T-109/T-110), so the Maker's operator
+     * dropdown (`ComponentRulesStep.tsx`) knows what to offer *before* the rule is even bound.
+     * Empty for a rule with no assigned version, or a version that never had any set.
+     */
+    defaultOperators: z.array(z.string()),
   })
   .strict();
 
@@ -633,6 +698,21 @@ export const rewardOptionSchema = z
     unitType: z.string().nullable(),
     unitCode: z.string().nullable(),
     amount: z.string().nullable(),
+    /**
+     * T-127 — the Kind of the reward's **live** version (`13-REWARD-MASTER-VALUE-SOURCES.md` §5),
+     * `null` when that version predates T-119 or the reward has no country-assigned version at
+     * all. Step 5 branches on this and nothing else to decide whether the Promo Code Config
+     * picker appears: the Kind decides, never the attachment level.
+     */
+    rewardKind: rewardKindSchema.nullable(),
+    /**
+     * T-127 — `value_config.bindLevels` for a `PROMO_CODE` reward: the levels its author said it
+     * may be attached at. `null` means *no restriction stated* — always the case for every other
+     * Kind, and for a `PROMO_CODE` version whose config the server could not parse. Client and
+     * server read this the same way (`BindingsService.assertPromoCodeAttachable`), so the picker
+     * can never offer an attachment the server would then refuse.
+     */
+    promoCodeBindLevels: z.array(promoCodeBindLevelSchema).nullable(),
   })
   .strict();
 
@@ -658,12 +738,45 @@ export const attachRewardRequestSchema = z
     /** Required for `tracker`/`component`, forbidden for `campaign` — mirrors `ck_cc_ref`. */
     refId: z.number().int().positive().optional(),
     rewardPolicyId: z.number().int().positive(),
+    /**
+     * T-127 — the Promo Code Config the maker picked, for a `PROMO_CODE` reward only
+     * (`13-REWARD-MASTER-VALUE-SOURCES.md` §5). Optional and **absent**, never `null`, when
+     * nothing was picked: today `PROMO_CODE_CONFIG_SERVICE` is `planned`, so there is nothing to
+     * pick and attaching without one is the normal path, not a validation failure.
+     *
+     * An opaque identifier issued by a service that does not exist yet, so the only shape this
+     * boundary can honestly assert is "a non-empty, bounded string". What it must *be* — that it
+     * names a config the provider actually knows — is not checkable until that provider is built;
+     * the server additionally rejects it outright on a reward that is not `PROMO_CODE`, which is
+     * checkable today.
+     */
+    promoCodeConfig: z.string().min(1).max(200).optional(),
+    /**
+     * The Maker's chosen cashback amount + currency, for a `FIXED_AMOUNT` reward whose author
+     * left `value_config` unset at creation time (mirrors `promoCodeConfig`'s own division of
+     * labour — see this schema's own header on `promoCodeConfig` above). `moneySchema` matches
+     * `readPolicyAmount`'s own read-side pattern in `bindings.service.ts`, so a value written
+     * here is read back exactly the same way a reward author's own pre-set amount is.
+     */
+    cashbackAmount: moneySchema.optional(),
+    cashbackCurrency: currencyCodeSchema.optional(),
+    /** The Maker's chosen point count, for a `POINTS` reward left unset at creation time. Not a
+     * decimal string like money — mirrors `pointsValueConfigSchema`'s own shape in
+     * `reward.schema.ts`, which this attach-time value is filling in the same role for. */
+    points: z.number().nonnegative().optional(),
   })
   .strict()
   .refine((value) => (value.level === 'campaign') === (value.refId === undefined), {
     message: 'refId is required for tracker/component level and forbidden at campaign level',
     path: ['refId'],
-  });
+  })
+  .refine(
+    (value) => (value.cashbackAmount === undefined) === (value.cashbackCurrency === undefined),
+    {
+      message: 'cashbackAmount and cashbackCurrency must both be supplied together, or neither',
+      path: ['cashbackCurrency'],
+    },
+  );
 
 export type AttachRewardRequest = z.infer<typeof attachRewardRequestSchema>;
 
@@ -1002,6 +1115,10 @@ export const campaignAuditListEnvelopeSchema = z
  *    reaches here, so `undefined` is the only representation of "not supplied".
  *  - **`min`/`max` are applied to `number` fields only**, exactly as `ruleParameterFieldSchema`
  *    documents them, so TC-17's out-of-range value fails on the server whatever the client did.
+ *
+ * A fourth property, added by T-136: a `select` field whose choices come from a **provider**
+ * rather than from a hand-typed `options` array is validated for *shape*, not for membership —
+ * see {@link selectFieldSchema} for why membership is not this function's question to answer.
  */
 export function buildRuleValueSchema(
   parameters: RuleParameters,
@@ -1031,6 +1148,58 @@ export function buildRuleValueSchema(
  */
 const NO_OPTIONS_SENTINEL = `${String.fromCharCode(0)}__no_options__`;
 
+/**
+ * The longest a free-text value may be, and — see {@link selectFieldSchema} — the longest a
+ * provider-sourced `select` value may be. Named rather than repeated so the two cannot drift:
+ * both are "a string this function cannot enumerate", and length is the only honest bound it has.
+ */
+const STRING_VALUE_MAX_LENGTH = 2000;
+
+/**
+ * T-136 — the value schema for one `select` field, which has two genuinely different sources
+ * (`13-REWARD-MASTER-VALUE-SOURCES.md` §3, T-122) and therefore two different contracts:
+ *
+ *  - **A `valueSource` is declared.** The choices are produced at campaign time by a registered
+ *    context/API provider (`GET /field-value-sources/context|api/:code`, T-123). They are not
+ *    knowable to this function — it is pure, synchronous, runs identically in a browser and in
+ *    the API process, and has no registry, no tracker and no campaign draft to read. So it checks
+ *    the **shape** of the value and leaves membership to the layers that can actually answer it:
+ *    T-123's own lookup decides what the Maker is offered, and the binding save path is where a
+ *    stale or forged choice is re-checked against the journey (T-124's `SIBLING_COMPONENTS`
+ *    guard). This is the T-136 fix. Before it, this branch enumerated `options` for *every*
+ *    `select`, so a field with a `valueSource` and no `options` — legal since T-122, and the
+ *    normal case for a provider-backed field — became an enum of one unmatchable sentinel that
+ *    rejected every value a Maker could possibly pick, client-side *and* server-side, from the
+ *    same shared function.
+ *  - **No `valueSource`.** The hand-typed `options` array is the entire contract and is enforced
+ *    exactly as before; a value outside it is a 400 on both sides. Unchanged by T-136.
+ *
+ * A field carrying **both** takes the provider branch. `ruleParameterFieldSchema` permits the
+ * combination and T-125 renders such a field from its provider (`ComponentRulesStep.tsx` routes
+ * on `valueSource !== undefined`), so validating it against the unrendered `options` list would
+ * reject precisely the values the Maker was shown.
+ *
+ * A provider's own `value` is `string | number` (`FieldValueOption`, both in T-123's lookup
+ * service and in the SPA's `ruleValues.ts`), so both arrive here — a number is **normalised to
+ * its string form** rather than stored as-is. The SPA already sends `String(option.value)`; an
+ * API or agent caller that forwards the provider's raw `4321` must not produce a second stored
+ * representation of the one value a later reader (T-124's guard, the rules engine) has to
+ * compare. One value, one shape in `tracker_component_rules.config`.
+ */
+function selectFieldSchema(field: RuleParameterField): z.ZodTypeAny {
+  if (field.valueSource !== undefined) {
+    return z
+      .union([z.string().min(1).max(STRING_VALUE_MAX_LENGTH), z.number().finite()])
+      .transform((value) => String(value));
+  }
+
+  // `field.options` is guaranteed non-empty by `ruleParameterFieldSchema`'s own refine, but
+  // this function is called with data that came out of the database, where a row written
+  // before that refine existed could still be malformed. Falling back to "no value is
+  // acceptable" fails closed; throwing here would 500 a maker's form instead.
+  return z.enum((field.options ?? [NO_OPTIONS_SENTINEL]) as [string, ...string[]]);
+}
+
 function fieldSchema(field: RuleParameterField): z.ZodTypeAny {
   switch (field.type) {
     case 'number': {
@@ -1047,14 +1216,10 @@ function fieldSchema(field: RuleParameterField): z.ZodTypeAny {
       // exists to remove for the campaign's own dates.
       return z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'must be a YYYY-MM-DD date');
     case 'select':
-      // `field.options` is guaranteed non-empty by `ruleParameterFieldSchema`'s own refine, but
-      // this function is called with data that came out of the database, where a row written
-      // before that refine existed could still be malformed. Falling back to "no value is
-      // acceptable" fails closed; throwing here would 500 a maker's form instead.
-      return z.enum((field.options ?? [NO_OPTIONS_SENTINEL]) as [string, ...string[]]);
+      return selectFieldSchema(field);
     case 'string':
     default:
-      return z.string().min(1).max(2000);
+      return z.string().min(1).max(STRING_VALUE_MAX_LENGTH);
   }
 }
 

@@ -377,7 +377,9 @@ export class JourneyService {
       // Scoped existence check: `assertComponentInCampaign` proves the *link* belongs to this
       // campaign, and this proves the component row itself is reachable in the actor's tenant.
       // Both are needed — a link row carries no tenant column of its own.
-      await this.scoped.findByPkOrFail(TrackerComponent, componentId, { transaction });
+      const component = await this.scoped.findByPkOrFail(TrackerComponent, componentId, {
+        transaction,
+      });
 
       if (dto.activityId !== undefined) {
         await this.assertActivityOffered(campaign.id, dto.activityId, transaction);
@@ -387,6 +389,24 @@ export class JourneyService {
       if (dto.name !== undefined) changes['name'] = dto.name.trim();
       if (dto.description !== undefined) changes['description'] = dto.description;
       if (dto.activityId !== undefined) changes['activityId'] = dto.activityId;
+      if (dto.ruleLogic !== undefined) changes['ruleLogic'] = dto.ruleLogic;
+      if (dto.ruleThreshold !== undefined) changes['ruleThreshold'] = dto.ruleThreshold;
+
+      /**
+       * T-147, R7 review fix — `updateComponentRequestSchema`'s own refine only proves the
+       * invariant ("n_of needs a threshold, anything else forbids one") for the fields present in
+       * *this* request; it cannot see the component's existing row. A `PATCH { ruleThreshold: 5 }`
+       * alone — `ruleLogic` omitted — passed that refine untouched and, before this fix, was
+       * written straight through, silently persisting a threshold on a component whose stored
+       * `ruleLogic` might not be `'n_of'`. Mirrors `updateTracker`'s own
+       * `completionLogic`/`completionThreshold` merge one level up: compute the **effective**
+       * post-update `ruleLogic`, and force-clear a stale threshold whenever it is not `'n_of'`,
+       * rather than trusting the request to have sent both fields together.
+       */
+      const effectiveRuleLogic =
+        (changes['ruleLogic'] as string | undefined) ?? component.ruleLogic;
+      if (effectiveRuleLogic !== 'n_of') changes['ruleThreshold'] = null;
+
       if (Object.keys(changes).length > 0) {
         await this.scoped.update(TrackerComponent, changes, {
           where: { id: componentId },

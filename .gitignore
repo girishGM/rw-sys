@@ -26,6 +26,16 @@ credentials.json
 # agents/create-campaign-v2/.env.development.
 agents/
 
+project-plan/
+
+# T-154 — anchored to the repo root: a bare `database/` (no leading slash) matches a directory of
+# that name at ANY depth, which silently swallowed `portal/back-end/src/database/` (the real
+# migrations/models source tree) and `portal/back-end/test/database/` (real e2e specs) ever since
+# this line was added in f4750d2 — 24 migrations (T102_001 through T146_001, all of Wave 5-7) and
+# 7 model files were on disk but untracked, invisible to every `git add`/commit since. Only the
+# top-level `database/` (the external reference-schema export, per CLAUDE.md's own tree) was ever
+# meant to be excluded.
+/database/
 # Repo orientation doc for AI agents/developers — not read by any build step (confirmed: only
 # referenced in code comments in portal/back-end/Dockerfile and portal/docker-compose.yml,
 # pointing a human reader at it, never COPYed or parsed). Also somewhat tailored to this local

@@ -50,6 +50,11 @@ function validRuleVersion() {
     retiredAt: null,
     updatedAt: '2026-01-01T00:00:00.000Z',
     suggestedIsBreaking: null,
+    // T-109
+    resolverId: null,
+    resolverConfig: null,
+    evaluationContext: null,
+    defaultOperators: null,
   };
 }
 
@@ -100,6 +105,25 @@ describe('ruleVersionSchema', () => {
     expect(ruleVersionSchema.safeParse({ ...validRuleVersion(), expression: null }).success).toBe(
       true,
     );
+  });
+
+  // T-109
+  it('accepts a wired resolver/evaluationContext/defaultOperators', () => {
+    expect(
+      ruleVersionSchema.safeParse({
+        ...validRuleVersion(),
+        resolverId: 5,
+        resolverConfig: { path: 'transaction.amount' },
+        evaluationContext: 'transaction_payload',
+        defaultOperators: ['equals', 'in'],
+      }).success,
+    ).toBe(true);
+  });
+
+  it('accepts a response missing the resolver-wiring keys — a pre-T-109 server response, or a rolling deploy (same tolerance rewardVersionValueResponseFields documents)', () => {
+    const withoutResolverId: Record<string, unknown> = { ...validRuleVersion() };
+    delete withoutResolverId['resolverId'];
+    expect(ruleVersionSchema.safeParse(withoutResolverId).success).toBe(true);
   });
 });
 
@@ -194,6 +218,41 @@ describe('updateRuleVersionRequestSchema — draft-only edits', () => {
   it('rejects an expression over 8000 characters', () => {
     const tooLong = { expression: 'a'.repeat(8001) };
     expect(updateRuleVersionRequestSchema.safeParse(tooLong).success).toBe(false);
+  });
+
+  // T-109
+  it('accepts resolverId/resolverConfig/evaluationContext/defaultOperators', () => {
+    expect(
+      updateRuleVersionRequestSchema.safeParse({
+        resolverId: 5,
+        resolverConfig: { path: 'transaction.amount' },
+        evaluationContext: 'transaction_payload',
+        defaultOperators: ['equals', 'in'],
+      }).success,
+    ).toBe(true);
+  });
+
+  it('accepts null for all 4 resolver-wiring fields — clearing must stay possible (implementation note 1)', () => {
+    expect(
+      updateRuleVersionRequestSchema.safeParse({
+        resolverId: null,
+        resolverConfig: null,
+        evaluationContext: null,
+        defaultOperators: null,
+      }).success,
+    ).toBe(true);
+  });
+
+  it('rejects an evaluationContext over 50 characters', () => {
+    expect(
+      updateRuleVersionRequestSchema.safeParse({ evaluationContext: 'x'.repeat(51) }).success,
+    ).toBe(false);
+  });
+
+  it('rejects a defaultOperators entry that is not a string', () => {
+    expect(
+      updateRuleVersionRequestSchema.safeParse({ defaultOperators: ['equals', 42] }).success,
+    ).toBe(false);
   });
 });
 

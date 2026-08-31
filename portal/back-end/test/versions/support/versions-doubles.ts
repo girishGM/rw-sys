@@ -364,6 +364,11 @@ export function ruleVersionRow(overrides: Partial<RuleVersion> = {}): RuleVersio
     deprecatedAt: null,
     retiredAt: null,
     updatedAt: new Date('2026-01-01T00:00:00.000Z'),
+    // T-109 — mirrors `rule-version.model.ts`'s own default: `NULL` reads as "not yet wired".
+    resolverId: null,
+    resolverConfig: null,
+    evaluationContext: null,
+    defaultOperators: null,
     ...overrides,
   } as unknown as RuleVersion;
 }

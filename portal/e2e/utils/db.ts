@@ -1,9 +1,9 @@
 /**
  * T-050 — direct Postgres access, used only where no portal API can do the job:
  *
- *  - loading `database/reward_config_postgres.sql` (the legacy schema this portal is a front end
- *    onto — nothing in `portal/` owns or migrates it, see `00-ARCHITECTURE.md`) into the fresh
- *    Testcontainers database before `db:migrate` ever runs;
+ *  - loading `database/reward_config/reward_config_postgres.sql` (the legacy schema this portal
+ *    is a front end onto — nothing in `portal/` owns or migrates it, see `00-ARCHITECTURE.md`)
+ *    into the fresh Testcontainers database before `db:migrate` ever runs;
  *  - seeding the encryption-key rows T-016/T-056 deliberately leave for a deployment to insert
  *    (`T016_001_encryption_keys.ts`'s own header: "no rows are seeded here... a deployment
  *    decision");
@@ -101,11 +101,23 @@ export async function ensureAppRoleExists(info: DbConnectionInfo, roleName = 're
   });
 }
 
-/** `database/reward_config_postgres.sql` lives at the git-repo root, one level above `portal/`
- * (see `CLAUDE.md`'s repo map) — outside this task's file scope to edit, but not to read: it is
- * input data for this setup step, the same relationship a migration has to the schema it targets. */
+/** `database/reward_config/reward_config_postgres.sql` lives at the git-repo root, one level
+ * above `portal/` (see `CLAUDE.md`'s repo map — `database/reward_config/` is the static external
+ * reference schema, moved under that subdirectory by the 2026-08-29 restructuring; it used to sit
+ * directly at `database/reward_config_postgres.sql`, which is why an older comment or path
+ * anywhere in this repo pointing at the flat, pre-restructuring path is stale, not this one — see
+ * T-155) — outside this task's file scope to edit, but not to read: it is input data for this
+ * setup step, the same relationship a migration has to the schema it targets. */
 export function readRewardConfigSchemaSql(): string {
-  const sqlPath = path.resolve(__dirname, '..', '..', '..', 'database', 'reward_config_postgres.sql');
+  const sqlPath = path.resolve(
+    __dirname,
+    '..',
+    '..',
+    '..',
+    'database',
+    'reward_config',
+    'reward_config_postgres.sql',
+  );
   return readFileSync(sqlPath, 'utf8');
 }
 

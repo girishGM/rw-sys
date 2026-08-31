@@ -1,8 +1,10 @@
+import { ERROR_CODE } from '@/common/errors/app-error';
 import {
   REWARD_ERROR_CODE,
   RewardHasCountryAssignmentsError,
   RewardInUseByCampaignError,
   RewardPolicyCodeExistsError,
+  rewardSubCategoryCategoryMismatchError,
   RewardSystemCodeExistsError,
 } from '@/modules/rewards/rewards.errors';
 
@@ -45,6 +47,15 @@ describe('rewards.errors', () => {
     for (const detail of error.details ?? []) {
       expect(detail.code).toMatch(/^[A-Z][A-Z0-9_]{1,59}$/);
     }
+  });
+
+  it('rewardSubCategoryCategoryMismatchError() is 400 VALIDATION_FAILED with a subCategoryId detail (TC-3)', () => {
+    const error = rewardSubCategoryCategoryMismatchError();
+    expect(error.status).toBe(400);
+    expect(error.code).toBe(ERROR_CODE.VALIDATION_FAILED);
+    expect(error.details).toEqual([
+      { field: 'subCategoryId', code: REWARD_ERROR_CODE.REWARD_SUB_CATEGORY_CATEGORY_MISMATCH },
+    ]);
   });
 
   it('logContext (server log only) carries the richer, human-readable form', () => {

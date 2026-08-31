@@ -185,6 +185,18 @@ async function ensureSubCategory(): Promise<number> {
   return row.id;
 }
 
+/** T-109 — `rule_resolvers`/`rule_operators` are T-102's seed-managed registries; every row
+ * this suite needs already exists once `T102_002` has run. */
+async function ensureResolverId(resolverCode: string): Promise<number> {
+  const [row] = await sql<{ id: number }>(
+    `SELECT id FROM reward_config.rule_resolvers WHERE resolver_code = :resolverCode`,
+    { resolverCode },
+  );
+  if (row === undefined)
+    throw new Error(`seeded rule_resolvers row ${resolverCode} not found — is T-102 applied?`);
+  return row.id;
+}
+
 let ruleCodeCounter = 0;
 function ruleCode(suffix: string): string {
   ruleCodeCounter += 1;
@@ -462,5 +474,134 @@ describe('T-041 — POST /rules/:id/versions — draft lifecycle', () => {
     });
     expect(confirmed.status).toBe(200);
     expect(confirmed.body.data.isBreaking).toBe(true);
+  });
+});
+
+describe('T-109 — PATCH /rules/:id/versions/:vid — resolver wiring', () => {
+  it('TC-1/TC-5: sets resolverId + resolverConfig + evaluationContext + defaultOperators on a draft; GET reflects it', async () => {
+    const resolverId = await ensureResolverId('JSONPATH_PAYLOAD');
+    const ruleId = await createRule();
+    const created = await post('super', `/rules/${String(ruleId)}/versions`, {});
+    const versionId = created.body.data.id as number;
+
+    const response = await patch(
+      'super',
+      `/rules/${String(ruleId)}/versions/${String(versionId)}`,
+      {
+        resolverId,
+        resolverConfig: { path: 'transaction.amount' },
+        evaluationContext: 'transaction_payload',
+        defaultOperators: ['equals', 'in'],
+      },
+    );
+    expect(response.status).toBe(200);
+    expect(response.body.data.resolverId).toBe(resolverId);
+    expect(response.body.data.resolverConfig).toEqual({ path: 'transaction.amount' });
+    expect(response.body.data.evaluationContext).toBe('transaction_payload');
+    expect(response.body.data.defaultOperators).toEqual(['equals', 'in']);
+
+    // TC-5: GET independently reflects all 4 fields, not just the PATCH echo.
+    const read = await get('super', `/rules/${String(ruleId)}/versions/${String(versionId)}`);
+    expect(read.status).toBe(200);
+    expect(read.body.data.resolverId).toBe(resolverId);
+    expect(read.body.data.resolverConfig).toEqual({ path: 'transaction.amount' });
+    expect(read.body.data.evaluationContext).toBe('transaction_payload');
+    expect(read.body.data.defaultOperators).toEqual(['equals', 'in']);
+  });
+
+  it('a freshly created draft has all 4 fields NULL (implementation note: creation never touches them)', async () => {
+    const ruleId = await createRule();
+    const created = await post('super', `/rules/${String(ruleId)}/versions`, {});
+    expect(created.body.data.resolverId).toBeNull();
+    expect(created.body.data.resolverConfig).toBeNull();
+    expect(created.body.data.evaluationContext).toBeNull();
+    expect(created.body.data.defaultOperators).toBeNull();
+  });
+
+  it('TC-2: a nonexistent resolverId → 404, nothing written', async () => {
+    const ruleId = await createRule();
+    const created = await post('super', `/rules/${String(ruleId)}/versions`, {});
+    const versionId = created.body.data.id as number;
+
+    const response = await patch(
+      'super',
+      `/rules/${String(ruleId)}/versions/${String(versionId)}`,
+      { resolverId: 999_999_999 },
+    );
+    expect(response.status).toBe(404);
+
+    const read = await get('super', `/rules/${String(ruleId)}/versions/${String(versionId)}`);
+    expect(read.body.data.resolverId).toBeNull();
+  });
+
+  it('TC-3: an unknown operator code in defaultOperators → 400, nothing written', async () => {
+    const ruleId = await createRule();
+    const created = await post('super', `/rules/${String(ruleId)}/versions`, {});
+    const versionId = created.body.data.id as number;
+
+    const response = await patch(
+      'super',
+      `/rules/${String(ruleId)}/versions/${String(versionId)}`,
+      { defaultOperators: ['equals', 'NO_SUCH_OPERATOR'] },
+    );
+    expect(response.status).toBe(400);
+    expectErrorEnvelope(response.body, 'VALIDATION_FAILED');
+
+    const read = await get('super', `/rules/${String(ruleId)}/versions/${String(versionId)}`);
+    expect(read.body.data.defaultOperators).toBeNull();
+  });
+
+  it('TC-4: PATCHing resolverConfig on a published version → 409, same error expression already produces', async () => {
+    const ruleId = await createRule();
+    const created = await post('super', `/rules/${String(ruleId)}/versions`, {});
+    const versionId = created.body.data.id as number;
+    await post('super', `/rules/${String(ruleId)}/versions/${String(versionId)}/publish`);
+
+    const response = await patch(
+      'super',
+      `/rules/${String(ruleId)}/versions/${String(versionId)}`,
+      { resolverConfig: { path: 'x' } },
+    );
+    expect(response.status).toBe(409);
+    expectErrorEnvelope(response.body, 'VERSION_INVALID_TRANSITION');
+
+    // Verification step 2 — the DB trigger (`T103_002`'s extended `fn_rule_version_immutable`)
+    // independently rejects a raw UPDATE of the same column, bypassing this portal's API.
+    await expect(
+      db.query(
+        `UPDATE reward_config.rule_versions SET resolver_config = '{"path":"x"}' WHERE id = :id`,
+        { type: QueryTypes.RAW, replacements: { id: versionId } },
+      ),
+    ).rejects.toThrow(/immutable/i);
+  });
+
+  it('TC-6: clears resolverId back to null on a draft', async () => {
+    const resolverId = await ensureResolverId('JSONPATH_PAYLOAD');
+    const ruleId = await createRule();
+    const created = await post('super', `/rules/${String(ruleId)}/versions`, {});
+    const versionId = created.body.data.id as number;
+    await patch('super', `/rules/${String(ruleId)}/versions/${String(versionId)}`, {
+      resolverId,
+    });
+
+    const cleared = await patch('super', `/rules/${String(ruleId)}/versions/${String(versionId)}`, {
+      resolverId: null,
+    });
+    expect(cleared.status).toBe(200);
+    expect(cleared.body.data.resolverId).toBeNull();
+  });
+
+  it('country_admin PATCH resolver wiring → 403 (layer 1), before any registry lookup', async () => {
+    const ruleId = await createRule();
+    const created = await post('super', `/rules/${String(ruleId)}/versions`, {});
+    const versionId = created.body.data.id as number;
+
+    const response = await patch(
+      'adminV',
+      `/rules/${String(ruleId)}/versions/${String(versionId)}`,
+      { resolverId: 999_999_999 },
+    );
+    expect(response.status).toBe(403);
+    expectErrorEnvelope(response.body, 'PERM_DENIED');
   });
 });

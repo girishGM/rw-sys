@@ -71,6 +71,19 @@ export class TrackerComponent extends Model<TrackerComponent> {
   @Column({ type: DataType.TEXT, allowNull: true, field: 'completion_criteria' })
   declare completionCriteria: string | null;
 
+  /**
+   * T-104 — how this component's own bound rules combine: `'all'` | `'any'` | `'n_of'`, mirroring
+   * `trackers.completion_logic` one level up. `NULL` reads as `'all'` at the application layer
+   * (no DB-level default, per this task's own note on staying inside the nullable-additive
+   * pattern already established elsewhere in this schema).
+   */
+  @Column({ type: DataType.STRING(10), allowNull: true, field: 'rule_logic' })
+  declare ruleLogic: string | null;
+
+  /** Only meaningful when `ruleLogic === 'n_of'`. */
+  @Column({ type: DataType.INTEGER, allowNull: true, field: 'rule_threshold' })
+  declare ruleThreshold: number | null;
+
   @Column({ type: DataType.STRING(20), allowNull: false, defaultValue: 'active' })
   declare status: string;
 

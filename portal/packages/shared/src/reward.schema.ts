@@ -63,11 +63,33 @@ export type RewardDeliveryMode = z.infer<typeof rewardDeliveryModeSchema>;
 /**
  * `reward_systems.connector_type` — a constrained vocabulary (implementation note 6), grounded in
  * the two values already live (`internal_api`, `file_export`) plus `webhook`/`manual` for
- * connector shapes no legacy row uses yet.
+ * connector shapes no legacy row uses yet. This is the **write** schema — `POST`/`PATCH /rewards`
+ * reject anything outside it, satisfying implementation note 6 to the letter ("validate against
+ * explicit enums... not free text").
  */
 export const REWARD_CONNECTOR_TYPES = ['internal_api', 'file_export', 'webhook', 'manual'] as const;
 export const rewardConnectorTypeSchema = z.enum(REWARD_CONNECTOR_TYPES);
 export type RewardConnectorType = z.infer<typeof rewardConnectorTypeSchema>;
+
+/**
+ * T-158 — the **read** shape for `connector_type`, deliberately looser than
+ * {@link rewardConnectorTypeSchema}. `reward_config.reward_systems.connector_type` has no CHECK
+ * constraint (`varchar(20)`, same as `reward_type` — see {@link rewardTypeSchema}'s own note on
+ * that column), and rows written outside `POST /rewards` (this dev DB's own e2e fixture leftovers,
+ * confirmed directly: 16 `reward_systems` rows carry `connector_type = 'internal'`, a pre-rename
+ * value the current enum no longer includes) genuinely exist. Before this change,
+ * `rewardListItemSchema`/`rewardSchema` used the strict enum on read too, so **one** such row
+ * anywhere in a caller's scope failed `.safeParse` for the *entire* list — reproduced live
+ * (T-158): a `super_admin`'s unscoped `GET /rewards` includes every legacy row, so the whole page
+ * rendered the generic `UNKNOWN_ERROR_MESSAGE` while a narrower-scoped `country_admin`, whose one
+ * visible reward happened to carry a valid value, saw no error at all. A write path that only
+ * ever accepts the closed enum (`createRewardRequestSchema`/`updateRewardRequestSchema`, both
+ * unchanged) cannot produce this value going forward; a read path must still tolerate whatever is
+ * already stored, exactly the same asymmetry {@link rewardTypeSchema} already documents for its
+ * sibling column. Bounded to the column's own width so a legacy value still cannot carry an
+ * unbounded blob.
+ */
+export const rewardConnectorTypeReadSchema = z.string().min(1).max(20);
 
 /**
  * `reward_systems.reward_type` is deliberately **not** a closed enum, unlike `delivery_mode`/
@@ -117,12 +139,21 @@ const rewardCommonFields = {
   description: z.string().nullable(),
   rewardType: rewardTypeSchema,
   deliveryMode: rewardDeliveryModeSchema,
-  connectorType: rewardConnectorTypeSchema,
+  // T-158 — the read schema, not the write one; see `rewardConnectorTypeReadSchema`'s own note.
+  connectorType: rewardConnectorTypeReadSchema,
   maintenanceWindowEnabled: z.boolean(),
   maintenanceSchedule: jsonObjectSchema,
   retryEnabled: z.boolean(),
   retryConfig: jsonObjectSchema,
   merchantId: z.number().int().nullable(),
+  /** T-118 — resolved category/sub-category, same shape `rule.schema.ts#ruleSchema` gives
+   * `categoryId`/`categoryName`/`subCategoryId`/`subCategoryName`, except both may appear
+   * without the other being `null` here: `subCategoryId` alone is genuinely optional (a reward
+   * category may have zero sub-categories, T-116's own "Points never needs one" example). */
+  categoryId: z.number().int(),
+  categoryName: z.string(),
+  subCategoryId: z.number().int().nullable(),
+  subCategoryName: z.string().nullable(),
   status: rewardStatusSchema,
   createdAt: z.string(),
   updatedAt: z.string(),
@@ -170,12 +201,19 @@ export const createRewardRequestSchema = z
     retryEnabled: z.boolean().optional(),
     retryConfig: jsonObjectSchema.optional(),
     merchantId: z.number().int().optional(),
+    // T-118 — `categoryId` is required (`reward_systems.category_id` is `NOT NULL`);
+    // `subCategoryId` is optional, same "a category may have zero sub-categories" reasoning
+    // `createRewardSubCategoryRequestSchema` documents below.
+    categoryId: z.number().int(),
+    subCategoryId: z.number().int().optional(),
   })
   .strict();
 
 export type CreateRewardRequest = z.infer<typeof createRewardRequestSchema>;
 
-/** The request body of `PATCH /rewards/:id`. `systemCode` is immutable, never here. */
+/** The request body of `PATCH /rewards/:id`. `systemCode` is immutable, never here — and so,
+ * since T-118, are `categoryId`/`subCategoryId` (immutable-by-replacement, the task's own scope
+ * note): changing a reward's category is a new reward, not an edit to an existing one. */
 export const updateRewardRequestSchema = z
   .object({
     name: z.string().min(1).max(200).optional(),
@@ -342,3 +380,305 @@ export const updateRewardPolicyCapRequestSchema = z
   .strict();
 
 export type UpdateRewardPolicyCapRequest = z.infer<typeof updateRewardPolicyCapRequestSchema>;
+
+// --- reward_categories / reward_sub_categories (T-116) -----------------------------------------
+//
+// The reward equivalent of `rule.schema.ts`'s own `ruleCategorySchema`/`ruleSubCategorySchema`
+// family (T-106) — same shape, same `.strict()` discipline. A category may legitimately have
+// zero sub-categories (this task's own scope note: e.g. Points never needs one); nothing here
+// requires at least one.
+
+/** `GET /reward-categories`. Read-only reference data, same shape `ruleCategorySchema`
+ * declares. */
+export const rewardCategorySchema = z
+  .object({
+    id: z.number().int(),
+    categoryCode: z.string(),
+    name: z.string(),
+    status: z.string(),
+  })
+  .strict();
+
+export type RewardCategory = z.infer<typeof rewardCategorySchema>;
+
+export const rewardCategoryListEnvelopeSchema = z
+  .object({ data: z.array(rewardCategorySchema) })
+  .strict();
+
+/** `GET /reward-sub-categories`. Read-only reference data, same shape
+ * `ruleSubCategorySchema` declares. */
+export const rewardSubCategorySchema = z
+  .object({
+    id: z.number().int(),
+    categoryId: z.number().int(),
+    subCategoryCode: z.string(),
+    name: z.string(),
+    status: z.string(),
+  })
+  .strict();
+
+export type RewardSubCategory = z.infer<typeof rewardSubCategorySchema>;
+
+export const rewardSubCategoryListEnvelopeSchema = z
+  .object({ data: z.array(rewardSubCategorySchema) })
+  .strict();
+
+/** `POST /reward-categories`. `categoryCode` is immutable once created, same discipline
+ * `createRewardRequestSchema` applies to `systemCode` — never in the update schema below. */
+export const createRewardCategoryRequestSchema = z
+  .object({
+    categoryCode: z.string().min(2).max(50),
+    name: z.string().min(1).max(200),
+  })
+  .strict();
+
+export type CreateRewardCategoryRequest = z.infer<typeof createRewardCategoryRequestSchema>;
+
+export const updateRewardCategoryRequestSchema = z
+  .object({
+    name: z.string().min(1).max(200).optional(),
+    status: rewardStatusSchema.optional(),
+  })
+  .strict();
+
+export type UpdateRewardCategoryRequest = z.infer<typeof updateRewardCategoryRequestSchema>;
+
+export const rewardCategoryEnvelopeSchema = z.object({ data: rewardCategorySchema }).strict();
+
+/** `POST /reward-sub-categories`. Moving a sub-category to a different category is out of
+ * scope (T-116, matching T-106's own precedent) — `categoryId` is write-once, at creation, and
+ * absent from the update schema. */
+export const createRewardSubCategoryRequestSchema = z
+  .object({
+    categoryId: z.number().int(),
+    subCategoryCode: z.string().min(2).max(50),
+    name: z.string().min(1).max(200),
+  })
+  .strict();
+
+export type CreateRewardSubCategoryRequest = z.infer<typeof createRewardSubCategoryRequestSchema>;
+
+export const updateRewardSubCategoryRequestSchema = z
+  .object({
+    name: z.string().min(1).max(200).optional(),
+    status: rewardStatusSchema.optional(),
+  })
+  .strict();
+
+export type UpdateRewardSubCategoryRequest = z.infer<typeof updateRewardSubCategoryRequestSchema>;
+
+export const rewardSubCategoryEnvelopeSchema = z.object({ data: rewardSubCategorySchema }).strict();
+
+// --- reward version Kind + value config (T-119) -----------------------------------------------
+//
+// 13-REWARD-MASTER-VALUE-SOURCES.md §5: `reward_versions` gains a nullable `reward_kind` and a
+// nullable `value_config` whose *shape depends on the kind* — the reward-side parallel of
+// `rule_versions.resolver_id`/`resolver_config` (T-103). Modelled here, once, as a Zod
+// discriminated union so the value schema is data-driven rather than a new frontend branch per
+// kind (task objective), and so the server-side gate and the SPA's own editor (T-120) can never
+// drift apart (00-ARCHITECTURE.md §8).
+//
+// These live in `reward.schema.ts` rather than `version.schema.ts` (where the rest of the
+// reward-version wire contract lives) because that is the file T-119 owns; the two keys
+// `version.schema.ts` needs import from here.
+
+/** `reward_versions.reward_kind` — the closed vocabulary `ck_rewv_reward_kind` also enforces. */
+export const REWARD_KINDS = [
+  'FIXED_AMOUNT',
+  'PERCENTAGE',
+  'POINTS',
+  'PHYSICAL',
+  'PROMO_CODE',
+] as const;
+export const rewardKindSchema = z.enum(REWARD_KINDS);
+export type RewardKind = z.infer<typeof rewardKindSchema>;
+
+/** ISO-4217 alphabetic code. Which codes a tenant may actually use is `tenant_currencies`
+ * (T-126, §4) — a database question this shared schema deliberately does not answer; all it
+ * enforces is the shape a currency code has on the wire. */
+const currencyCodeSchema = z.string().regex(/^[A-Z]{3}$/);
+
+const currencyValueSchema = z
+  .object({ currency: currencyCodeSchema, value: z.number().nonnegative() })
+  .strict();
+
+/** Non-empty, and no currency twice — two entries for `MYR` would make "the value for MYR"
+ * ambiguous at payout time, which is not something a later screen can repair. */
+const currencyValuesSchema = z
+  .array(currencyValueSchema)
+  .min(1)
+  .refine(
+    (values) => new Set(values.map((entry) => entry.currency)).size === values.length,
+    'currencyValues must not repeat a currency',
+  );
+
+/**
+ * `FIXED_AMOUNT` — single-currency or multi-currency, discriminated on `multiCurrency` itself so
+ * the two shapes cannot be mixed (a `multiCurrency: true` config carrying `defaultValue`, or a
+ * `multiCurrency: false` one carrying `currencyValues`, is rejected rather than half-read).
+ */
+export const fixedAmountValueConfigSchema = z.discriminatedUnion('multiCurrency', [
+  z
+    .object({
+      multiCurrency: z.literal(false),
+      defaultCurrency: currencyCodeSchema,
+      defaultValue: z.number().nonnegative(),
+    })
+    .strict(),
+  z.object({ multiCurrency: z.literal(true), currencyValues: currencyValuesSchema }).strict(),
+]);
+
+/** `PERCENTAGE` — 0–100 inclusive; a percentage outside that range is a typo, not a policy. */
+export const percentageValueConfigSchema = z
+  .object({ percentage: z.number().min(0).max(100) })
+  .strict();
+
+/** `POINTS` — a non-negative point count. */
+export const pointsValueConfigSchema = z.object({ points: z.number().nonnegative() }).strict();
+
+/** `PHYSICAL` — a stock-keeping unit and what it is, for a reward fulfilled off-platform. */
+export const physicalValueConfigSchema = z
+  .object({ sku: z.string().min(1).max(80), description: z.string().min(1).max(500) })
+  .strict();
+
+/**
+ * The `field_api_lookup_providers` codes (T-121, §3) that may back a `PROMO_CODE` reward. Checked
+ * here as a *known code*, never as an *active* one: §3 is explicit that authoring against a
+ * `planned` provider is allowed, because nobody has confirmed the real endpoint/auth/response
+ * keys yet and this work is not blocked waiting on them (TC-5). This file never queries the
+ * database — whatever registry check belongs on top of "is this a known code" is the service
+ * layer's, not this schema's.
+ */
+export const PROMO_CODE_API_PROVIDERS = ['PROMO_CODE_CONFIG_SERVICE'] as const;
+export const promoCodeApiProviderSchema = z.enum(PROMO_CODE_API_PROVIDERS);
+
+/** Where a Promo Code may be bound when a Maker attaches it (§5). */
+export const PROMO_CODE_BIND_LEVELS = ['component', 'tracker', 'campaign'] as const;
+export const promoCodeBindLevelSchema = z.enum(PROMO_CODE_BIND_LEVELS);
+export type PromoCodeBindLevel = z.infer<typeof promoCodeBindLevelSchema>;
+
+/**
+ * `PROMO_CODE` — carries **no amount at all** (§5), only which config service issues the code and
+ * at which levels it may be bound. The Maker's chosen Promo Code Config is stored at attach time
+ * in the `reward_policies.config` JSON (T-127), not here.
+ */
+export const promoCodeValueConfigSchema = z
+  .object({
+    apiProvider: promoCodeApiProviderSchema,
+    bindLevels: z
+      .array(promoCodeBindLevelSchema)
+      .min(1)
+      .refine(
+        (levels) => new Set(levels).size === levels.length,
+        'bindLevels must not repeat a level',
+      ),
+  })
+  .strict();
+
+/**
+ * The `(reward_kind, value_config)` pair — one discriminated union, so a config is only ever
+ * validated against the kind it was actually authored for. Both halves are validated together
+ * because neither is meaningful alone: `value_config` has no shape without a kind, and this is
+ * the one place that mapping is written down.
+ */
+export const rewardVersionValueSchema = z.discriminatedUnion('rewardKind', [
+  z
+    .object({ rewardKind: z.literal('FIXED_AMOUNT'), valueConfig: fixedAmountValueConfigSchema })
+    .strict(),
+  z
+    .object({ rewardKind: z.literal('PERCENTAGE'), valueConfig: percentageValueConfigSchema })
+    .strict(),
+  z.object({ rewardKind: z.literal('POINTS'), valueConfig: pointsValueConfigSchema }).strict(),
+  z.object({ rewardKind: z.literal('PHYSICAL'), valueConfig: physicalValueConfigSchema }).strict(),
+  z
+    .object({ rewardKind: z.literal('PROMO_CODE'), valueConfig: promoCodeValueConfigSchema })
+    .strict(),
+]);
+
+export type RewardVersionValue = z.infer<typeof rewardVersionValueSchema>;
+
+/** The wire shape of `value_config` before its kind is known — a JSON object, nothing more. The
+ * shape that actually matters is {@link rewardVersionValueSchema}'s, checked against the kind. */
+export const rewardValueConfigSchema = z.record(z.string(), z.unknown());
+
+/**
+ * Whether `valueConfig` is well-formed **for `rewardKind`**. `null`/`undefined` `valueConfig` is
+ * accepted for any kind (including none): a version whose kind is chosen but whose value is not
+ * yet filled in is a legitimate draft state, and a version with neither is the pre-T-119 row every
+ * existing `reward_versions` record still is (TC-7). A `valueConfig` with **no** kind is not
+ * accepted — there is no schema to judge it by.
+ */
+export function isRewardVersionValue(
+  rewardKind: RewardKind | null | undefined,
+  valueConfig: unknown,
+): boolean {
+  if (valueConfig === null || valueConfig === undefined) return true;
+  if (rewardKind === null || rewardKind === undefined) return false;
+  return rewardVersionValueSchema.safeParse({ rewardKind, valueConfig }).success;
+}
+
+/** Shared by the create and update request schemas below (and by T-120's own form): reports the
+ * pair check above as Zod issues, pathed at the field that is actually wrong. */
+export function checkRewardVersionValue(
+  value: {
+    readonly rewardKind?: RewardKind | null;
+    readonly valueConfig?: Record<string, unknown> | null;
+  },
+  ctx: z.RefinementCtx,
+): void {
+  const { rewardKind, valueConfig } = value;
+  if (valueConfig === null || valueConfig === undefined) return;
+  if (rewardKind === null || rewardKind === undefined) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['rewardKind'],
+      message: 'rewardKind is required when valueConfig is supplied',
+    });
+    return;
+  }
+  const result = rewardVersionValueSchema.safeParse({ rewardKind, valueConfig });
+  if (result.success) return;
+  for (const issue of result.error.issues) ctx.addIssue(issue);
+}
+
+/**
+ * `POST /rewards/:rewardId/versions`. Everything about the cloned payload is server-decided
+ * (`createVersionRequestSchema`'s own note) — `rewardKind`/`valueConfig` are the exception: a
+ * fresh draft may be created with its Kind already chosen, which is how the Reward Master screen
+ * (T-120) authors one in a single step.
+ */
+export const createRewardVersionRequestSchema = z
+  .object({
+    changeSummary: z.string().max(500).optional(),
+    originRequestId: z.number().int().optional(),
+    rewardKind: rewardKindSchema.nullable().optional(),
+    valueConfig: rewardValueConfigSchema.nullable().optional(),
+  })
+  .strict()
+  .superRefine(checkRewardVersionValue);
+
+export type CreateRewardVersionRequest = z.infer<typeof createRewardVersionRequestSchema>;
+
+/**
+ * The `rewardKind`/`valueConfig` half of `PATCH /rewards/:rewardId/versions/:vid`, kept here (the
+ * file T-119 owns) and spread into `updateRewardVersionRequestSchema` in `version.schema.ts`.
+ *
+ * A PATCH may legitimately send only one of the pair, in which case the other is whatever the
+ * stored draft already holds — a merge only the server can perform, so the server re-checks the
+ * *effective* pair with {@link isRewardVersionValue} rather than relying on this schema alone.
+ */
+export const rewardVersionValueRequestFields = {
+  rewardKind: rewardKindSchema.nullable().optional(),
+  valueConfig: rewardValueConfigSchema.nullable().optional(),
+};
+
+/**
+ * The same two keys as they appear on a **response** (`rewardVersionSchema` in
+ * `version.schema.ts`). `null` is "not set"; `.optional()` as well as `.nullable()` because a
+ * server that predates this task sends neither key, and a `.strict()` client schema that
+ * *required* them would reject every response from it during a rolling deploy.
+ */
+export const rewardVersionValueResponseFields = {
+  rewardKind: rewardKindSchema.nullable().optional(),
+  valueConfig: rewardValueConfigSchema.nullable().optional(),
+};

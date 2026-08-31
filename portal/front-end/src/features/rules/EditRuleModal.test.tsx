@@ -4,16 +4,27 @@ import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { Rule } from '@reward-portal/shared';
 
-const { mockMutateAsync, mockUseUpdateRuleMutation, mockUseRuleSubCategoriesQuery } = vi.hoisted(
-  () => ({
-    mockMutateAsync: vi.fn(),
-    mockUseUpdateRuleMutation: vi.fn(),
-    mockUseRuleSubCategoriesQuery: vi.fn(),
-  }),
-);
+const {
+  mockMutateAsync,
+  mockUseFieldApiLookupProvidersQuery,
+  mockUseFieldContextProvidersQuery,
+  mockUseUpdateRuleMutation,
+  mockUseRuleResolversQuery,
+  mockUseRuleSubCategoriesQuery,
+} = vi.hoisted(() => ({
+  mockMutateAsync: vi.fn(),
+  mockUseFieldApiLookupProvidersQuery: vi.fn(),
+  mockUseFieldContextProvidersQuery: vi.fn(),
+  mockUseUpdateRuleMutation: vi.fn(),
+  mockUseRuleResolversQuery: vi.fn(),
+  mockUseRuleSubCategoriesQuery: vi.fn(),
+}));
 
 vi.mock('./api', () => ({
   useUpdateRuleMutation: mockUseUpdateRuleMutation,
+  useFieldApiLookupProvidersQuery: mockUseFieldApiLookupProvidersQuery,
+  useFieldContextProvidersQuery: mockUseFieldContextProvidersQuery,
+  useRuleResolversQuery: mockUseRuleResolversQuery,
   useRuleSubCategoriesQuery: mockUseRuleSubCategoriesQuery,
 }));
 
@@ -53,6 +64,30 @@ beforeEach(() => {
       { id: 13, categoryId: 13, subCategoryCode: 'GENERAL', name: 'General', status: 'active' },
     ],
   });
+  mockUseRuleResolversQuery.mockReturnValue({
+    data: [
+      {
+        id: 1,
+        resolverCode: 'TRACKER_STATE_LOOKUP',
+        name: 'Tracker state lookup',
+        description: null,
+        status: 'active',
+        resolverInputFieldKeys: ['targetComponentCode'],
+      },
+    ],
+  });
+  mockUseFieldContextProvidersQuery.mockReturnValue({
+    data: [
+      {
+        id: 1,
+        providerCode: 'SIBLING_COMPONENTS',
+        name: 'Sibling components',
+        description: null,
+        status: 'active',
+      },
+    ],
+  });
+  mockUseFieldApiLookupProvidersQuery.mockReturnValue({ data: [] });
 });
 
 describe('EditRuleModal', () => {
@@ -89,5 +124,130 @@ describe('EditRuleModal', () => {
     await user.click(screen.getByRole('button', { name: /save changes/i }));
 
     expect(mockMutateAsync).toHaveBeenCalledWith(expect.objectContaining({ status: 'inactive' }));
+  });
+
+  // T-114 — `rule.parameters.fields` is the response shape: every field carries a
+  // server-computed `role`. Seeding this modal's editable state directly from that response
+  // must not leak `role` back into the PATCH body — `updateRuleRequestSchema` still 400s on it
+  // (its own `.strict()`, unchanged by T-114) — so a rule that already has parameters must
+  // still be editable and saveable at all.
+  it('T-114: strips the response-only role before resubmitting existing parameter fields', async () => {
+    const ruleWithParameters: Rule = {
+      ...rule,
+      parameters: {
+        fields: [
+          {
+            key: 'minSpend',
+            label: 'Minimum spend',
+            type: 'number',
+            required: true,
+            role: 'compare_value',
+          },
+        ],
+      },
+    };
+    mockMutateAsync.mockResolvedValue(ruleWithParameters);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const user = userEvent.setup();
+    render(
+      <QueryClientProvider client={client}>
+        <EditRuleModal open onClose={vi.fn()} rule={ruleWithParameters} />
+      </QueryClientProvider>,
+    );
+
+    await user.click(screen.getByRole('button', { name: /save changes/i }));
+
+    expect(mockMutateAsync).toHaveBeenCalledWith(
+      expect.objectContaining({
+        parameters: {
+          fields: [{ key: 'minSpend', label: 'Minimum spend', type: 'number', required: true }],
+        },
+      }),
+    );
+    const [[submitted]] = mockMutateAsync.mock.calls as [[{ parameters: { fields: unknown[] } }]];
+    expect(submitted.parameters.fields[0]).not.toHaveProperty('role');
+  });
+
+  // T-115 — the same preview-only Resolver picker `AddRuleModal.test.tsx` covers; here it must
+  // also recompute against a field seeded from an already-saved rule (role stripped by
+  // `toEditableFields`, so the preview is the only source of a badge in this form).
+  it('T-115: previewing a resolver badges an existing field named after its input key', async () => {
+    const ruleWithParameters: Rule = {
+      ...rule,
+      parameters: {
+        fields: [
+          {
+            key: 'targetComponentCode',
+            label: 'Target component',
+            type: 'string',
+            required: true,
+            role: 'compare_value',
+          },
+        ],
+      },
+    };
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const user = userEvent.setup();
+    render(
+      <QueryClientProvider client={client}>
+        <EditRuleModal open onClose={vi.fn()} rule={ruleWithParameters} />
+      </QueryClientProvider>,
+    );
+
+    // `{ selector: 'span' }` targets the read-only role `Badge` specifically — T-160
+    // (`ParameterFieldsEditor`, shared by this modal) added a static "Role matters: **Compared
+    // value** / **Resolver input**" help paragraph (rendered as `<strong>`) with this same wording.
+    expect(screen.getByText('Compared value', { selector: 'span' })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('combobox', { name: /resolver/i }));
+    await user.click(screen.getByRole('option', { name: /tracker state lookup/i }));
+
+    expect(screen.getByText('Resolver input', { selector: 'span' })).toBeInTheDocument();
+    expect(screen.queryByText('Compared value', { selector: 'span' })).not.toBeInTheDocument();
+  });
+
+  // T-125 — the same field-builder value-source picker `AddRuleModal.test.tsx` covers; this only
+  // confirms `EditRuleModal` wires the two provider queries through to the shared editor.
+  it('T-125: an existing select field can be switched to "This journey"', async () => {
+    const ruleWithSelectField: Rule = {
+      ...rule,
+      parameters: {
+        fields: [
+          {
+            key: 'targetComponentCode',
+            label: 'Target component',
+            type: 'select',
+            required: true,
+            options: ['a', 'b'],
+            role: 'compare_value',
+          },
+        ],
+      },
+    };
+    mockMutateAsync.mockResolvedValue(ruleWithSelectField);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const user = userEvent.setup();
+    render(
+      <QueryClientProvider client={client}>
+        <EditRuleModal open onClose={vi.fn()} rule={ruleWithSelectField} />
+      </QueryClientProvider>,
+    );
+
+    await user.click(screen.getByRole('combobox', { name: /where do the options come from/i }));
+    await user.click(screen.getByRole('option', { name: 'This journey' }));
+    await user.click(screen.getByRole('button', { name: /save changes/i }));
+
+    expect(mockMutateAsync).toHaveBeenCalledWith(
+      expect.objectContaining({
+        parameters: {
+          fields: [
+            expect.objectContaining({
+              key: 'targetComponentCode',
+              valueSource: { kind: 'CONTEXT_LOOKUP', contextProvider: 'SIBLING_COMPONENTS' },
+            }),
+          ],
+        },
+      }),
+    );
   });
 });

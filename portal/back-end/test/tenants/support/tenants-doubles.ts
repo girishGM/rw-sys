@@ -28,8 +28,10 @@ import type {
 } from '@/modules/auth/services/credential.repository';
 import type { RequestContext, SessionService } from '@/modules/auth/services/session.service';
 import type { AuthenticatedUser } from '@/modules/auth/decorators/current-user.decorator';
+import type { Country } from '@/database/models/country.model';
 import type { Tenant } from '@/database/models/tenant.model';
 import type { TenantBudgetCeiling } from '@/database/models/tenant-budget-ceiling.model';
+import type { TenantCurrency } from '@/database/models/tenant-currency.model';
 import type { PortalUser } from '@/database/portal-models';
 
 export interface RecordedCall {
@@ -105,6 +107,20 @@ export class FakeScopedRepository {
     options: FindOptions = {},
   ): Promise<M> {
     this.record('findByPkOrFail', model, { id, ...options });
+    const row = this.byPk.get(model.name);
+    if (row === undefined || row === null) throw new ScopeViolationError();
+    return row as M;
+  }
+
+  /** T-126 — `findOneOrFail` used by `TenantCurrenciesService`, which addresses a row entirely
+   * through `options.where` (no separate `id` argument). Shares the same `byPk` map
+   * `findByPkOrFail` reads from: this fake's fidelity has always been "one row per model", not
+   * real `where`-clause evaluation (`applyWhere` above is the one exception, for `listAll`). */
+  async findOneOrFail<M extends Model>(
+    model: ModelStatic<M>,
+    options: FindOptions = {},
+  ): Promise<M> {
+    this.record('findOneOrFail', model, options);
     const row = this.byPk.get(model.name);
     if (row === undefined || row === null) throw new ScopeViolationError();
     return row as M;
@@ -367,6 +383,39 @@ export function budgetCeilingRow(
     updatedAt: new Date('2026-01-01T00:00:00.000Z'),
     ...overrides,
   } as unknown as TenantBudgetCeiling;
+}
+
+/** T-143 — a `countries` row, reduced to the columns `insertTenant`'s default-currency lookup
+ * reads (`currencyCode`), same shape `test/merchants/support/merchants-doubles.ts#countryRow`
+ * already establishes. */
+export function countryRow(overrides: Partial<Country> = {}): Country {
+  return {
+    id: 1,
+    code: 'MY',
+    name: 'Malaysia',
+    timezone: 'Asia/Kuala_Lumpur',
+    currencyCode: 'MYR',
+    dialingCode: '+60',
+    isHq: false,
+    status: 'active',
+    createdAt: new Date('2026-01-01T00:00:00.000Z'),
+    updatedAt: new Date('2026-01-01T00:00:00.000Z'),
+    ...overrides,
+  } as unknown as Country;
+}
+
+/** A `tenant_currencies` row shaped exactly as `toTenantCurrencyDto` expects to read it. */
+export function tenantCurrencyRow(overrides: Partial<TenantCurrency> = {}): TenantCurrency {
+  return {
+    id: 700,
+    tenantId: 10,
+    currencyCode: 'MYR',
+    isDefault: true,
+    status: 'active',
+    createdAt: new Date('2026-01-01T00:00:00.000Z'),
+    updatedAt: new Date('2026-01-01T00:00:00.000Z'),
+    ...overrides,
+  } as unknown as TenantCurrency;
 }
 
 export function requestContext(overrides: Partial<RequestContext> = {}): RequestContext {

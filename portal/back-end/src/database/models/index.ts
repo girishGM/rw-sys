@@ -66,6 +66,22 @@ export * from './tracker-component-rule.model';
 export * from './reward-campaign-assignment.model';
 export * from './reward-tracker-assignment.model';
 export * from './reward-component-assignment.model';
+export * from './rule-resolver.model';
+export * from './rule-operator.model';
+
+// T-116 — reward category/sub-category, the reward equivalent of `rule_categories`/
+// `rule_sub_categories` (T-003). Append-only, per 05-EXECUTION-PLAN.md §3.
+export * from './reward-category.model';
+export * from './reward-sub-category.model';
+
+// T-121 — field value-source registries (13-REWARD-MASTER-VALUE-SOURCES.md §3). Append-only,
+// per 05-EXECUTION-PLAN.md §3.
+export * from './field-context-provider.model';
+export * from './field-api-lookup-provider.model';
+
+// T-126 — tenant-scoped, additive currency list (13-REWARD-MASTER-VALUE-SOURCES.md §4).
+// Append-only, per 05-EXECUTION-PLAN.md §3.
+export * from './tenant-currency.model';
 
 import { Country } from './country.model';
 import { Tenant } from './tenant.model';
@@ -113,6 +129,15 @@ import { TrackerComponentRule } from './tracker-component-rule.model';
 import { RewardCampaignAssignment } from './reward-campaign-assignment.model';
 import { RewardTrackerAssignment } from './reward-tracker-assignment.model';
 import { RewardComponentAssignment } from './reward-component-assignment.model';
+import { RuleResolver } from './rule-resolver.model';
+import { RuleOperator } from './rule-operator.model';
+import { RewardCategory } from './reward-category.model';
+import { RewardSubCategory } from './reward-sub-category.model';
+// T-121 — field value-source registries (13-REWARD-MASTER-VALUE-SOURCES.md §3).
+import { FieldContextProvider } from './field-context-provider.model';
+import { FieldApiLookupProvider } from './field-api-lookup-provider.model';
+// T-126 — tenant-scoped, additive currency list.
+import { TenantCurrency } from './tenant-currency.model';
 
 export const REWARD_CONFIG_MODELS = [
   Country,
@@ -161,4 +186,11 @@ export const REWARD_CONFIG_MODELS = [
   RewardCampaignAssignment,
   RewardTrackerAssignment,
   RewardComponentAssignment,
+  RuleResolver,
+  RuleOperator,
+  RewardCategory,
+  RewardSubCategory,
+  FieldContextProvider,
+  FieldApiLookupProvider,
+  TenantCurrency,
 ];

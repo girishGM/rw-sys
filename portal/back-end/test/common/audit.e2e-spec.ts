@@ -77,7 +77,11 @@ import type { PortalUserEmailCrypto } from '@/common/data-protection/portal-user
 import { Audit } from '@/common/audit/decorators/audit.decorator';
 import { AuditModule } from '@/common/audit/audit.module';
 import { AuditService } from '@/common/audit/audit.service';
-import { AUDIT_STORE, type AuditStore } from '@/common/audit/audit.repository';
+import {
+  AUDIT_STORE,
+  DOMAIN_CORRELATION_KEY,
+  type AuditStore,
+} from '@/common/audit/audit.repository';
 import { validationExceptionFactory } from '@/common/errors';
 
 jest.setTimeout(300_000);
@@ -344,12 +348,20 @@ function get(key: string, path: string) {
   return http().get(`/api/v1${path}`).set('Cookie', as(key).jar);
 }
 
-function post(key: string, path: string, body: unknown) {
-  return http()
+/**
+ * `headers` exists for one caller: TC-4 sends a known `X-Correlation-Id` so the id persisted in
+ * `campaign_audit_trail.field_changes` can be compared against the id the request was made with,
+ * rather than merely against "some string". See that test.
+ */
+function post(key: string, path: string, body: unknown, headers: Record<string, string> = {}) {
+  const pending = http()
     .post(`/api/v1${path}`)
     .set('Cookie', as(key).jar)
-    .set('X-CSRF-Token', as(key).csrf)
-    .send(body as object);
+    .set('X-CSRF-Token', as(key).csrf);
+
+  for (const [name, value] of Object.entries(headers)) pending.set(name, value);
+
+  return pending.send(body as object);
 }
 
 async function ensureCountry(): Promise<number> {
@@ -611,9 +623,19 @@ describe('T-014 — audit stores', () => {
   describe('TC-4 — a campaign update', () => {
     it("writes campaign_audit_trail with action='updated' and only the changed fields", async () => {
       const name = `T014 renamed ${Date.now()}`;
-      const response = await post('maker', `/t014/campaigns/${campaignId}/rename`, { name });
+      const correlationId = `T014CAT${Date.now()}`; // `^[A-Za-z0-9_-]{8,64}$` — see T-019.
+      const response = await post(
+        'maker',
+        `/t014/campaigns/${campaignId}/rename`,
+        { name },
+        { 'X-Correlation-Id': correlationId },
+      );
 
       expect(response.status).toBe(201);
+      // The id the server actually adopted, echoed by `CorrelationMiddleware`. Asserted rather
+      // than assumed: a malformed id is discarded whole and replaced, and this test's last
+      // assertion would then be comparing against an id nothing ever used.
+      expect(response.headers['x-correlation-id']).toBe(correlationId);
 
       const [row] = await adminSql<{
         action: string;
@@ -638,14 +660,65 @@ describe('T-014 — audit stores', () => {
       expect(row.performed_by).toBe(fixtureAdminUserId);
 
       // Only what changed: `status` and `region` were identical and must be absent.
+      //
+      // `field_changes` carries two different kinds of key, and this assertion is about the first
+      // kind only. Alongside the diff, T-019 writes a reserved **envelope** key
+      // (`audit.repository.ts#DOMAIN_CORRELATION_KEY`) into this column on every domain audit row
+      // written inside a request: `reward_config.campaign_audit_trail` has no correlation-id
+      // column, AGENT-PROTOCOL R1 forbids adding one, so the id travels inside the table's
+      // existing JSON column instead. The double underscore exists precisely so a reader can tell
+      // an envelope key from a changed column — this filter draws the same distinction, and the
+      // envelope's own value is asserted by the test below rather than ignored here.
       const changes = JSON.parse(row.field_changes) as Record<string, unknown>;
-      expect(Object.keys(changes)).toEqual(['name']);
+      const changedFields = Object.keys(changes).filter((key) => key !== DOMAIN_CORRELATION_KEY);
+      expect(changedFields).toEqual(['name']);
       expect(changes.name).toMatchObject({ after: name });
+      // The envelope key is the *only* thing allowed alongside the diff — anything else here
+      // would be a genuine leak of internal state into a 7-year audit record.
+      expect([...Object.keys(changes)].sort()).toEqual([DOMAIN_CORRELATION_KEY, 'name']);
+      expect(changes[DOMAIN_CORRELATION_KEY]).toBe(correlationId);
 
       // The 7-year default the design relies on, applied by the table rather than by us.
       const years =
         (new Date(row.retention_expires_at).getTime() - Date.now()) / (365.25 * 24 * 3600 * 1000);
       expect(years).toBeGreaterThan(6.9);
+    });
+
+    /**
+     * T-151. The regression guard for the assertion above.
+     *
+     * `__correlationId` in a `field_changes` diff reads like a leak of internal plumbing, and the
+     * obvious "fix" — stop writing it — would silently break trace retrieval (T-045), whose
+     * `domain-audit-query.ts` finds a campaign's audit rows *only* by matching this key inside
+     * this column. So the retrieval is asserted here the way the database performs it, against a
+     * row this suite really wrote, rather than by restating the key in a second place: if the
+     * envelope stopped being written, or were written under another name or at another nesting
+     * level, this query returns nothing and the test fails.
+     */
+    it('the __correlationId envelope is retrievable by the query T-045 issues (T-019)', async () => {
+      const correlationId = `T014ENV${Date.now()}`;
+      const response = await post(
+        'maker',
+        `/t014/campaigns/${campaignId}/rename`,
+        { name: `T014 envelope ${Date.now()}` },
+        { 'X-Correlation-Id': correlationId },
+      );
+
+      expect(response.status).toBe(201);
+
+      // The literal key text is deliberate: this is the operator/T-045 predicate, and binding it
+      // from the constant instead would still pass if the constant and the written key changed
+      // together — which is exactly the substitution that breaks every already-stored row.
+      const [found] = await adminSql<{ cid: string | null }>(
+        `SELECT field_changes::jsonb ->> '__correlationId' AS cid
+           FROM (SELECT field_changes FROM reward_config.campaign_audit_trail
+                  WHERE campaign_id = :campaignId ORDER BY id DESC LIMIT 1) AS latest`,
+        { campaignId },
+      );
+
+      expect(found.cid).toBe(correlationId);
+      // …and the constant the application code shares with T-045 names that same key.
+      expect(DOMAIN_CORRELATION_KEY).toBe('__correlationId');
     });
 
     it('writes nothing to portal_audit_log for a domain change (01-DATABASE.md §2.5)', async () => {

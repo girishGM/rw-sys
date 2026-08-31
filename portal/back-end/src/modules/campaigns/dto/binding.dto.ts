@@ -15,7 +15,20 @@
  * `@IsObject()` is still worth having: it turns `values: "5"` into a 400 with a field-level
  * detail rather than a confusing schema error about every key at once.
  */
-import { IsIn, IsInt, IsObject, IsOptional, IsPositive } from 'class-validator';
+import {
+  IsIn,
+  IsInt,
+  IsNumber,
+  IsObject,
+  IsOptional,
+  IsPositive,
+  IsString,
+  Length,
+  Matches,
+  MaxLength,
+  Min,
+  MinLength,
+} from 'class-validator';
 import {
   attachRewardRequestSchema,
   bindComponentRuleRequestSchema,
@@ -54,11 +67,24 @@ export class BindComponentRuleDto {
   values?: Record<string, unknown>;
 }
 
-/** `PATCH /campaigns/:id/rules/:bindingId` — step 4 edits values without re-picking the rule. */
+/**
+ * `PATCH /campaigns/:id/rules/:bindingId` — step 4 edits values without re-picking the rule.
+ *
+ * T-147 — `operator` joins `values` here (this file's header explains the shape; the schema's
+ * own header explains why one endpoint rather than two). Which operators are actually *allowed*
+ * is runtime state (`BindingsService#updateRuleValues` checks it against the binding's pinned
+ * version) — this decorator only checks that a supplied value is a plausible operator code.
+ */
 export class UpdateComponentRuleValuesDto {
   @IsObject()
   @MatchesSharedContract(updateComponentRuleValuesRequestSchema)
   values!: Record<string, unknown>;
+
+  @IsOptional()
+  @IsString()
+  @MinLength(1)
+  @MaxLength(30)
+  operator?: string | null;
 }
 
 /**
@@ -87,4 +113,44 @@ export class AttachRewardDto {
   @IsInt()
   @IsPositive()
   rewardPolicyId!: number;
+
+  /**
+   * T-127 — the Promo Code Config the maker picked (`13-REWARD-MASTER-VALUE-SOURCES.md` §5).
+   *
+   * Optional, and absent on almost every attach today: `PROMO_CODE_CONFIG_SERVICE` is seeded
+   * `planned`, so the picker has nothing to offer and the maker attaches without one. Whether it
+   * is *allowed* at all depends on the reward's live version — a question no decorator can answer,
+   * so `BindingsService` answers it (`PromoCodeConfigNotApplicableError`), the same division of
+   * labour this file's header describes for `values`.
+   */
+  @IsOptional()
+  @IsString()
+  @Length(1, 200)
+  promoCodeConfig?: string;
+
+  /**
+   * The Maker's chosen cashback amount, for a `FIXED_AMOUNT` reward whose author left
+   * `value_config` unset at creation time — the same division of labour `promoCodeConfig`
+   * above already documents: whether this is *allowed* at all depends on the reward's live
+   * `reward_kind`, a question no decorator can answer, so `BindingsService` answers it
+   * (`CashbackAmountNotApplicableError`).
+   */
+  @IsOptional()
+  @IsString()
+  @Matches(/^\d{1,14}(\.\d{1,4})?$/, {
+    message: 'cashbackAmount must be a non-negative decimal amount with at most 4 places',
+  })
+  cashbackAmount?: string;
+
+  @IsOptional()
+  @IsString()
+  @Matches(/^[A-Z]{3}$/, { message: 'cashbackCurrency must be a 3-letter ISO-4217 code' })
+  cashbackCurrency?: string;
+
+  /** The Maker's chosen point count, for a `POINTS` reward left unset at creation time. Same
+   * Kind-dependent gating as `cashbackAmount`, via `PointsNotApplicableError`. */
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  points?: number;
 }

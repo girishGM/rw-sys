@@ -7,10 +7,11 @@
  */
 import 'reflect-metadata';
 import type { Request } from 'express';
-import { PERMISSION_METADATA_KEY } from '@/common/rbac/rbac.constants';
+import { PERMISSION_METADATA_KEY, ROLES_METADATA_KEY } from '@/common/rbac/rbac.constants';
 import { AUDIT_METADATA } from '@/common/audit/decorators/audit.decorator';
 import { UsersController } from '@/modules/users/users.controller';
 import type { UsersService } from '@/modules/users/users.service';
+import type { PortalRole } from '@/database/portal-models';
 import { actor, portalUserRow } from './support/users-doubles';
 
 function permissionOf(handler: (...args: never[]) => unknown): { entity: string; action: string } {
@@ -18,6 +19,10 @@ function permissionOf(handler: (...args: never[]) => unknown): { entity: string;
     entity: string;
     action: string;
   };
+}
+
+function rolesOf(handler: (...args: never[]) => unknown): readonly PortalRole[] | undefined {
+  return Reflect.getMetadata(ROLES_METADATA_KEY, handler) as readonly PortalRole[] | undefined;
 }
 
 function fakeRequest(overrides: Partial<Request> = {}): Request {
@@ -74,6 +79,30 @@ describe('UsersController — authorisation metadata (R6)', () => {
       targetType: 'user',
     });
   });
+
+  // --- T-128: GET/PATCH /users/me/preferences --------------------------------------------------
+
+  it('TC-4: GET/PATCH /users/me/preferences carry @Roles(...ALL_PORTAL_ROLES) and no @RequirePermission — self-service, every role, no admin gate', () => {
+    const allRoles: readonly PortalRole[] = [
+      'super_admin',
+      'country_admin',
+      'tenant_admin',
+      'maker',
+      'checker',
+      'merchant',
+    ];
+
+    expect(rolesOf(UsersController.prototype.getMyPreferences)).toEqual(allRoles);
+    expect(rolesOf(UsersController.prototype.updateMyPreferences)).toEqual(allRoles);
+    expect(permissionOf(UsersController.prototype.getMyPreferences)).toBeUndefined();
+    expect(permissionOf(UsersController.prototype.updateMyPreferences)).toBeUndefined();
+  });
+
+  it('audits user_preferences_updated', () => {
+    expect(
+      Reflect.getMetadata(AUDIT_METADATA, UsersController.prototype.updateMyPreferences),
+    ).toMatchObject({ event: 'user_preferences_updated', targetType: 'portal_user' });
+  });
 });
 
 describe('UsersController — delegation', () => {
@@ -103,6 +132,29 @@ describe('UsersController — delegation', () => {
 
     expect(getById).toHaveBeenCalledWith(9);
     expect(response.data).toMatchObject({ id: 9 });
+  });
+
+  it('getMyPreferences() passes only the actor through and wraps in {data} — TC-6: no id parameter exists on this route to spoof', async () => {
+    const getPreferences = jest.fn().mockResolvedValue({ uiTheme: 'light-blue' });
+    const controller = controllerWith({ getPreferences });
+    const who = actor();
+
+    const response = await controller.getMyPreferences(who);
+
+    expect(getPreferences).toHaveBeenCalledWith(who);
+    expect(getPreferences).toHaveBeenCalledTimes(1);
+    expect(response.data).toEqual({ uiTheme: 'light-blue' });
+  });
+
+  it('updateMyPreferences() passes the actor and the requested theme through, untouched', async () => {
+    const updatePreferences = jest.fn().mockResolvedValue({ uiTheme: 'yellow-black' });
+    const controller = controllerWith({ updatePreferences });
+    const who = actor();
+
+    const response = await controller.updateMyPreferences(who, { uiTheme: 'yellow-black' });
+
+    expect(updatePreferences).toHaveBeenCalledWith(who, 'yellow-black');
+    expect(response.data).toEqual({ uiTheme: 'yellow-black' });
   });
 
   it('create() passes the actor and the dto through, untouched', async () => {

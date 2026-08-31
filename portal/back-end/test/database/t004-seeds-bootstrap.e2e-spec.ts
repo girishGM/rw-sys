@@ -85,6 +85,16 @@ import { GRPC_GRANT_PERMISSIONS } from '@/database/migrations/T047_002_seed_grpc
 // from PERMISSION_SEED_EXTRAS above.
 import { up as pausePermissionsUp } from '@/database/migrations/T047_003_campaign_pause_permissions';
 import { AGENT_NAV_CONFIGS } from '@/database/migrations/T049_001_seed_agent_nav';
+// Wave 5/6/7 (T-106, T-116, T-121, T-126, T-107, T-117) — same "add a line here" obligation
+// PERMISSION_SEED_EXTRAS/NAV_SEED_MIGRATIONS's own doc comments describe; missing until now.
+import { RULE_CATEGORY_PERMISSIONS } from '@/database/migrations/T106_001_seed_rule_category_permissions';
+import { REWARD_CATEGORY_PERMISSIONS } from '@/database/migrations/T116_002_seed_reward_category_permissions';
+import { FIELD_VALUE_SOURCE_PERMISSIONS } from '@/database/migrations/T121_002_seed_field_value_source_registries';
+import { TENANT_CURRENCY_PERMISSIONS } from '@/database/migrations/T126_002_seed_tenant_currency_permissions';
+import { RULE_CATEGORY_NAV_CONFIGS } from '@/database/migrations/T107_001_seed_rule_category_nav';
+import { REWARD_CATEGORY_NAV_CONFIGS } from '@/database/migrations/T117_001_seed_reward_category_nav';
+import { RULE_VALUE_SOURCES_NAV_CONFIGS } from '@/database/migrations/T146_001_seed_rule_value_sources_nav';
+import { NEW_NAV_ROWS as RULES_REWARDS_NAV_CONFIGS } from '@/database/migrations/T157_001_nest_rules_rewards_nav';
 // T-056 — `portal_users.email` is encrypted; keys must exist before the CLI child process runs,
 // and the fixture row must be found by something other than a plaintext `email` comparison.
 import { ensureEncryptionKeys, removeEncryptionKeys } from '../auth/support/portal-user-fixture';
@@ -118,6 +128,13 @@ const PERMISSION_SEED_EXTRAS: { readonly file: string; readonly rows: readonly P
       rows: DEFINITION_REQUEST_PERMISSIONS,
     },
     { file: 'T047_002_seed_grpc_grant_permissions.ts', rows: GRPC_GRANT_PERMISSIONS },
+    { file: 'T106_001_seed_rule_category_permissions.ts', rows: RULE_CATEGORY_PERMISSIONS },
+    { file: 'T116_002_seed_reward_category_permissions.ts', rows: REWARD_CATEGORY_PERMISSIONS },
+    {
+      file: 'T121_002_seed_field_value_source_registries.ts',
+      rows: FIELD_VALUE_SOURCE_PERMISSIONS,
+    },
+    { file: 'T126_002_seed_tenant_currency_permissions.ts', rows: TENANT_CURRENCY_PERMISSIONS },
   ];
 
 /**
@@ -193,6 +210,15 @@ const NAV_SEED_MIGRATIONS: { readonly file: string; readonly rows: readonly NavR
   { file: 'T004_002_seed_role_nav_configs.ts', rows: ROLE_NAV_CONFIGS },
   { file: 'T042_002_seed_definition_request_nav.ts', rows: DEFINITION_REQUEST_NAV_CONFIGS },
   { file: 'T049_001_seed_agent_nav.ts', rows: AGENT_NAV_CONFIGS },
+  { file: 'T107_001_seed_rule_category_nav.ts', rows: RULE_CATEGORY_NAV_CONFIGS },
+  { file: 'T117_001_seed_reward_category_nav.ts', rows: REWARD_CATEGORY_NAV_CONFIGS },
+  { file: 'T146_001_seed_rule_value_sources_nav.ts', rows: RULE_VALUE_SOURCES_NAV_CONFIGS },
+  // T-157 — only its two *inserted* rows (`rules_all`/`rewards_all`) belong here; its other half
+  // (re-parenting `rule_categories`/`rule_value_sources`/`reward_categories`) is an in-place
+  // `UPDATE` of `parent_nav_key`, a column the SELECT below never asserts on, so it needs no
+  // entry in this INSERT-only registry the way `T047_003`'s `PERMISSION_UPDATE_MIGRATIONS`
+  // needed one above for `role_entity_permissions.actions`.
+  { file: 'T157_001_nest_rules_rewards_nav.ts', rows: RULES_REWARDS_NAV_CONFIGS },
 ];
 const SEEDED_NAV_ROWS: readonly NavRow[] = NAV_SEED_MIGRATIONS.flatMap((m) => m.rows);
 

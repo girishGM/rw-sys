@@ -25,6 +25,24 @@ import type { VersionStatus } from './rule-version.model';
  * §3.1: no conversion rate anywhere in the design, a budget only ever matches a grant sharing
  * both fields exactly.
  */
+/**
+ * T-119 — `reward_versions.reward_kind`'s vocabulary (`ck_rewv_reward_kind`,
+ * 13-REWARD-MASTER-VALUE-SOURCES.md §5). Declared here as a literal tuple rather than imported
+ * from `packages/shared`'s `REWARD_KINDS`, the same choice this layer already makes for
+ * `VersionStatus`/`UnitType` (nothing under `src/database/` imports the wire package). The two
+ * lists are asserted identical by `test/versions/reward-version-kind.spec.ts`, so the duplication
+ * cannot drift silently.
+ */
+export const REWARD_VERSION_KINDS = [
+  'FIXED_AMOUNT',
+  'PERCENTAGE',
+  'POINTS',
+  'PHYSICAL',
+  'PROMO_CODE',
+] as const;
+
+export type RewardVersionKind = (typeof REWARD_VERSION_KINDS)[number];
+
 @Table({
   schema: 'reward_config',
   tableName: 'reward_versions',
@@ -77,6 +95,29 @@ export class RewardVersion extends Model<RewardVersion> {
 
   @Column({ type: DataType.STRING(10), allowNull: true, field: 'unit_code' })
   declare unitCode: string | null;
+
+  /** T-119 — `reward_kind` (`ck_rewv_reward_kind`, `T119_001`). `null` is "kind not yet set", the
+   * state every row that predates that migration is in (TC-7). Typed against the one definition
+   * of the vocabulary, `packages/shared`'s `RewardKind`, so the column and the wire contract
+   * cannot drift. */
+  @Column({ type: DataType.STRING(20), allowNull: true, field: 'reward_kind' })
+  declare rewardKind: RewardVersionKind | null;
+
+  /** T-119 — `value_config`: JSON-in-`text`, whose shape depends on {@link rewardKind}
+   * (13-REWARD-MASTER-VALUE-SOURCES.md §5, validated by `rewardVersionValueSchema`). Same
+   * tolerant getter/setter treatment as `connectorConfig`/`retryConfig` above, except that the
+   * fallback is `null` rather than `{}`: "no value configured yet" and "configured as an empty
+   * object" are different states here, and only the first is legitimate. */
+  @Column(DataType.TEXT)
+  get valueConfig(): Record<string, unknown> | null {
+    return parseJsonColumn<Record<string, unknown> | null>(this.getDataValue('valueConfig'), null);
+  }
+  set valueConfig(value: Record<string, unknown> | null) {
+    this.setDataValue(
+      'valueConfig',
+      stringifyJsonColumn(value) as unknown as Record<string, unknown> | null,
+    );
+  }
 
   @Column({ type: DataType.STRING(500), allowNull: true, field: 'change_summary' })
   declare changeSummary: string | null;

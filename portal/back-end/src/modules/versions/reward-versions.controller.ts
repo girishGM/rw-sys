@@ -1,6 +1,11 @@
 /**
  * T-041 — `/rewards/:rewardId/versions`. Mirrors `RuleVersionsController` exactly — see that
  * file's header for the permission/role reasoning, identical here with `REWARD_ENTITY`.
+ *
+ * T-119 — `POST`/`PATCH` additionally accept the reward `Kind` and its per-kind `valueConfig`
+ * (`CreateRewardVersionDto`/`UpdateRewardVersionDto`), and every response carries the pair back
+ * (`RewardVersionWithValueDto`). No new route, no new permission: the Kind is part of the version
+ * payload the `super_admin` who authors the version already writes.
  */
 import {
   Body,
@@ -21,13 +26,12 @@ import {
   type AuthenticatedUser,
 } from '@/modules/auth/decorators/current-user.decorator';
 import { REWARD_ENTITY } from '@/modules/rewards/rewards.constants';
-import { RewardVersionsService } from './reward-versions.service';
-import { CreateVersionDto } from './dto/create-version.dto';
+import { RewardVersionsService, type RewardVersionWithValueDto } from './reward-versions.service';
+import { CreateRewardVersionDto } from './dto/create-reward-version.dto';
 import { UpdateRewardVersionDto } from './dto/update-reward-version.dto';
 import {
   envelope,
   type DataEnvelope,
-  type RewardVersionDto,
   type VersionCountryAssignmentDto,
   type VersionDiffDto,
 } from './dto/version-response.dto';
@@ -40,7 +44,7 @@ export class RewardVersionsController {
   @RequirePermission(REWARD_ENTITY, 'view')
   async list(
     @Param('rewardId', ParseIntPipe) rewardId: number,
-  ): Promise<DataEnvelope<readonly RewardVersionDto[]>> {
+  ): Promise<DataEnvelope<readonly RewardVersionWithValueDto[]>> {
     return envelope(await this.versions.list(rewardId));
   }
 
@@ -49,7 +53,7 @@ export class RewardVersionsController {
   async findOne(
     @Param('rewardId', ParseIntPipe) rewardId: number,
     @Param('vid', ParseIntPipe) versionId: number,
-  ): Promise<DataEnvelope<RewardVersionDto>> {
+  ): Promise<DataEnvelope<RewardVersionWithValueDto>> {
     return envelope(await this.versions.getById(rewardId, versionId));
   }
 
@@ -78,8 +82,8 @@ export class RewardVersionsController {
   async create(
     @CurrentUser() actor: AuthenticatedUser,
     @Param('rewardId', ParseIntPipe) rewardId: number,
-    @Body() dto: CreateVersionDto,
-  ): Promise<DataEnvelope<RewardVersionDto>> {
+    @Body() dto: CreateRewardVersionDto,
+  ): Promise<DataEnvelope<RewardVersionWithValueDto>> {
     return envelope(await this.versions.createDraft(actor, rewardId, dto));
   }
 
@@ -91,7 +95,7 @@ export class RewardVersionsController {
     @Param('rewardId', ParseIntPipe) rewardId: number,
     @Param('vid', ParseIntPipe) versionId: number,
     @Body() dto: UpdateRewardVersionDto,
-  ): Promise<DataEnvelope<RewardVersionDto>> {
+  ): Promise<DataEnvelope<RewardVersionWithValueDto>> {
     return envelope(await this.versions.updateDraft(actor, rewardId, versionId, dto));
   }
 
@@ -102,7 +106,7 @@ export class RewardVersionsController {
     @CurrentUser() actor: AuthenticatedUser,
     @Param('rewardId', ParseIntPipe) rewardId: number,
     @Param('vid', ParseIntPipe) versionId: number,
-  ): Promise<DataEnvelope<RewardVersionDto>> {
+  ): Promise<DataEnvelope<RewardVersionWithValueDto>> {
     return envelope(await this.versions.publish(actor, rewardId, versionId));
   }
 
@@ -113,7 +117,7 @@ export class RewardVersionsController {
     @CurrentUser() actor: AuthenticatedUser,
     @Param('rewardId', ParseIntPipe) rewardId: number,
     @Param('vid', ParseIntPipe) versionId: number,
-  ): Promise<DataEnvelope<RewardVersionDto>> {
+  ): Promise<DataEnvelope<RewardVersionWithValueDto>> {
     return envelope(await this.versions.deprecate(actor, rewardId, versionId));
   }
 
@@ -124,7 +128,7 @@ export class RewardVersionsController {
     @CurrentUser() actor: AuthenticatedUser,
     @Param('rewardId', ParseIntPipe) rewardId: number,
     @Param('vid', ParseIntPipe) versionId: number,
-  ): Promise<DataEnvelope<RewardVersionDto>> {
+  ): Promise<DataEnvelope<RewardVersionWithValueDto>> {
     return envelope(await this.versions.retire(actor, rewardId, versionId));
   }
 

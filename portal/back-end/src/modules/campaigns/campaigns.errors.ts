@@ -61,6 +61,19 @@ export const CAMPAIGN_ERROR_CODE = Object.freeze({
   RULE_ALREADY_BOUND: 'RULE_ALREADY_BOUND',
   /** A generated tracker/component code could not be made unique — see `CODE_GENERATION_ATTEMPTS`. */
   CODE_GENERATION_FAILED: 'CODE_GENERATION_FAILED',
+  /** T-127 — a `PROMO_CODE` reward attached at a level its `value_config.bindLevels` excludes. */
+  REWARD_NOT_ATTACHABLE_AT_LEVEL: 'REWARD_NOT_ATTACHABLE_AT_LEVEL',
+  /** T-127 — a Promo Code Config sent for a reward whose live version is not `PROMO_CODE`. */
+  PROMO_CODE_CONFIG_NOT_APPLICABLE: 'PROMO_CODE_CONFIG_NOT_APPLICABLE',
+  /** A cashback amount/currency sent for a reward whose live version is not `FIXED_AMOUNT`. */
+  CASHBACK_AMOUNT_NOT_APPLICABLE: 'CASHBACK_AMOUNT_NOT_APPLICABLE',
+  /** A points value sent for a reward whose live version is not `POINTS`. */
+  POINTS_NOT_APPLICABLE: 'POINTS_NOT_APPLICABLE',
+  /** T-124/T-141 — a `SIBLING_COMPONENTS` field bound to a component that is not strictly
+   * earlier, in the same tracker, than the component the binding itself is on. */
+  SIBLING_COMPONENT_NOT_EARLIER: 'SIBLING_COMPONENT_NOT_EARLIER',
+  /** T-147 — an `operator` outside the binding's own pinned rule version's `defaultOperators`. */
+  OPERATOR_NOT_ALLOWED: 'OPERATOR_NOT_ALLOWED',
 });
 
 /** 409 — `POST /campaigns` with a `campaignCode` already used in this tenant (TC-6). A different
@@ -244,6 +257,121 @@ export class RewardAlreadyAttachedError extends ConflictError {
 export class RuleAlreadyBoundError extends ConflictError {
   constructor(options: AppErrorOptions = {}) {
     super(CAMPAIGN_ERROR_CODE.RULE_ALREADY_BOUND, options);
+  }
+}
+
+/**
+ * 400 — T-127. A `PROMO_CODE` reward may only be attached at the levels its own
+ * `value_config.bindLevels` names (`13-REWARD-MASTER-VALUE-SOURCES.md` §5). Step 5 already filters
+ * these out of the picker, which is exactly why this must also exist server-side: the picker is a
+ * convenience, the check is the control, and `POST /campaigns/:id/rewards` is reachable without
+ * either.
+ *
+ * 400 rather than 404 for the same reason {@link RewardNotAssignedToCountryError} is (this file's
+ * header): nothing is being hidden — the maker can see this reward, they simply cannot attach it
+ * *here*, and saying so is the only answer that lets them fix it.
+ */
+export class RewardNotAttachableAtLevelError extends AppError {
+  constructor(rewardPolicyId: number, level: string, options: AppErrorOptions = {}) {
+    super(CAMPAIGN_ERROR_CODE.REWARD_NOT_ATTACHABLE_AT_LEVEL, 400, {
+      ...options,
+      details: [{ field: 'level', code: `LEVEL_${level.toUpperCase()}` }],
+      logContext: { ...options.logContext, rewardPolicyId, level },
+    });
+  }
+}
+
+/**
+ * 400 — T-127. `promoCodeConfig` was sent for a reward whose live version is not `PROMO_CODE`.
+ *
+ * Rejected rather than ignored: the value's only destination is the policy's `config` JSON, where
+ * a later service will read it as *the config this reward's codes come from*. Silently dropping it
+ * would leave the maker believing they configured something they did not, and silently keeping it
+ * would attach promo-code semantics to a reward that has none.
+ */
+export class PromoCodeConfigNotApplicableError extends AppError {
+  constructor(rewardPolicyId: number, options: AppErrorOptions = {}) {
+    super(CAMPAIGN_ERROR_CODE.PROMO_CODE_CONFIG_NOT_APPLICABLE, 400, {
+      ...options,
+      details: [{ field: 'promoCodeConfig', code: `POLICY_${rewardPolicyId}` }],
+      logContext: { ...options.logContext, rewardPolicyId },
+    });
+  }
+}
+
+/**
+ * 400 — a `cashbackAmount`/`cashbackCurrency` was sent for a reward whose live version is not
+ * `FIXED_AMOUNT`. Same rejected-not-ignored reasoning as {@link PromoCodeConfigNotApplicableError}:
+ * the value's only destination is the policy's `config` JSON, so silently accepting it would leave
+ * the maker believing they set an amount that will never be read.
+ */
+export class CashbackAmountNotApplicableError extends AppError {
+  constructor(rewardPolicyId: number, options: AppErrorOptions = {}) {
+    super(CAMPAIGN_ERROR_CODE.CASHBACK_AMOUNT_NOT_APPLICABLE, 400, {
+      ...options,
+      details: [{ field: 'cashbackAmount', code: `POLICY_${rewardPolicyId}` }],
+      logContext: { ...options.logContext, rewardPolicyId },
+    });
+  }
+}
+
+/** 400 — a `points` value was sent for a reward whose live version is not `POINTS`. Same
+ * reasoning as {@link CashbackAmountNotApplicableError}. */
+export class PointsNotApplicableError extends AppError {
+  constructor(rewardPolicyId: number, options: AppErrorOptions = {}) {
+    super(CAMPAIGN_ERROR_CODE.POINTS_NOT_APPLICABLE, 400, {
+      ...options,
+      details: [{ field: 'points', code: `POLICY_${rewardPolicyId}` }],
+      logContext: { ...options.logContext, rewardPolicyId },
+    });
+  }
+}
+
+/**
+ * 400 — T-124/T-141. `13-REWARD-MASTER-VALUE-SOURCES.md` §3's circular-dependency rule: a
+ * `SIBLING_COMPONENTS` field may only resolve to a component with a strictly **earlier**
+ * `sequence_order`, in the same tracker, than the component this binding itself is on. Covers a
+ * later component, a tied `sequence_order`, a self-reference and a component in a different
+ * tracker entirely — none of those is a valid backward edge, so all four are refused the same
+ * way (`bindings.service.ts#assertNoCircularSiblingDependency`).
+ *
+ * 400 rather than 404 for the same reason {@link RuleNotAssignedToCountryError} is (this file's
+ * header): `field.key` and both component ids are named in `details` so the Maker — or a curl
+ * that skipped the picker T-123 already filters — is told exactly what is wrong, not left to
+ * guess from a generic "not found".
+ */
+export class SiblingComponentNotEarlierError extends AppError {
+  constructor(
+    fieldKey: string,
+    ownComponentId: number,
+    targetComponentId: number,
+    options: AppErrorOptions = {},
+  ) {
+    super(CAMPAIGN_ERROR_CODE.SIBLING_COMPONENT_NOT_EARLIER, 400, {
+      ...options,
+      details: [{ field: `values.${fieldKey}`, code: `COMPONENT_${targetComponentId}` }],
+      logContext: { ...options.logContext, fieldKey, ownComponentId, targetComponentId },
+    });
+  }
+}
+
+/**
+ * 400 — T-147. `operator` must name one of the binding's own pinned rule version's
+ * `defaultOperators` (T-109/T-110). Checked in the service, not a decorator: the allowed set is
+ * runtime state (which version is pinned to this specific binding), the same reason
+ * {@link RuleNotAssignedToCountryError}'s own header gives for `values`' validation living in
+ * `BindingsService` rather than in a Zod schema.
+ */
+export class OperatorNotAllowedError extends AppError {
+  constructor(operator: string, options: AppErrorOptions = {}) {
+    super(CAMPAIGN_ERROR_CODE.OPERATOR_NOT_ALLOWED, 400, {
+      ...options,
+      // `rule_operators.operator_code` is lower snake case (`at_least`, `days_since_between`) —
+      // `SAFE_ERROR_CODE_PATTERN` (app-error.ts) requires upper snake, same reason
+      // `issueCode()` in bindings.service.ts upper-cases a Zod issue code before embedding it.
+      details: [{ field: 'operator', code: `OPERATOR_${operator.toUpperCase()}` }],
+      logContext: { ...options.logContext, operator },
+    });
   }
 }
 

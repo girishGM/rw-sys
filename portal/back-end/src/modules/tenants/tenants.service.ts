@@ -38,7 +38,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { UniqueConstraintError, type Transaction } from 'sequelize';
 import type { Sequelize } from 'sequelize-typescript';
 import { SEQUELIZE } from '@/database/sequelize.provider';
-import { Tenant, TenantBudgetCeiling } from '@/database/models';
+import { Country, Tenant, TenantBudgetCeiling, TenantCurrency } from '@/database/models';
 import { PortalUser } from '@/database/portal-models';
 import { ScopedRepository } from '@/common/scope/scoped.repository';
 import { assertRole } from '@/common/rbac/assert-role';
@@ -380,11 +380,30 @@ export class TenantsService {
 
   // --- private helpers -----------------------------------------------------------------------
 
+  /**
+   * T-143 fix: a tenant never exists without exactly one `tenant_currencies` default row — the
+   * same "never exists without X" precedent `countries.service.ts#insertCountry`'s own header
+   * cites for admin provisioning, applied here to `TenantCurrency` instead of a `PortalUser`.
+   * T126_001's migration backfilled this row once, at migrate time, for every tenant that
+   * already existed; nothing inserted it for a tenant created afterward through `POST /tenants`,
+   * which silently violated `13-REWARD-MASTER-VALUE-SOURCES.md §4`'s own invariant ("a tenant
+   * with no extra rows still has its country's currency available") for every tenant onboarded
+   * since. Both inserts share `transaction`, so a tenant is never left without its default
+   * currency by a failure between the two (mirroring `provisionTenantAdmin`'s own TC-14
+   * atomicity).
+   *
+   * Deliberately a direct `this.scoped.create(TenantCurrency, …)` here, not a call to
+   * `TenantCurrenciesService.create` — that method's own `assertRole(actor, 'super_admin')`
+   * would reject the `country_admin` actor this method is actually called under, and the seed
+   * row is a system-managed consequence of provisioning, not a user-initiated currency-list
+   * change (`TenantCurrenciesService`'s own header note on `super_admin`-only mutation).
+   */
   private async insertTenant(dto: CreateTenantDto, transaction: Transaction): Promise<Tenant> {
+    let tenant: Tenant;
     try {
       // `as never` — the same `sequelize-typescript`/`CreationAttributes<M>` escape hatch
       // `countries.service.ts#insertCountry`'s comment documents at length.
-      return await this.scoped.create(
+      tenant = await this.scoped.create(
         Tenant,
         {
           code: dto.code,
@@ -405,6 +424,25 @@ export class TenantsService {
       }
       throw error;
     }
+
+    // The tenant's own country_id was just forced onto it by `ScopedRepository.create` from the
+    // actor's own scope (this file's header, implementation note 1) — `country_admin`'s `Country`
+    // scope strategy is `column('id', 'country')`, so this lookup always resolves to that same
+    // country, never a client-supplied one (R3).
+    const country = await this.scoped.findByPkOrFail(Country, tenant.countryId, { transaction });
+
+    await this.scoped.create(
+      TenantCurrency,
+      {
+        tenantId: tenant.id,
+        currencyCode: country.currencyCode,
+        isDefault: true,
+        status: 'active',
+      } as never,
+      { transaction },
+    );
+
+    return tenant;
   }
 
   /**

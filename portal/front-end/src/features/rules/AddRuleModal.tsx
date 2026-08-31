@@ -20,7 +20,14 @@ import { Modal } from '../../components/Modal';
 import { Select, type SelectOption } from '../../components/Select';
 import { ApiError } from '../../lib/apiError';
 import { ParameterFieldsEditor } from './ParameterFieldsEditor';
-import { useCreateRuleMutation, useRuleCategoriesQuery, useRuleSubCategoriesQuery } from './api';
+import {
+  useCreateRuleMutation,
+  useFieldApiLookupProvidersQuery,
+  useFieldContextProvidersQuery,
+  useRuleCategoriesQuery,
+  useRuleResolversQuery,
+  useRuleSubCategoriesQuery,
+} from './api';
 
 interface FormValues {
   categoryId: string;
@@ -47,6 +54,11 @@ export function AddRuleModal({ open, onClose }: AddRuleModalProps) {
   const mutation = useCreateRuleMutation();
   const [submitError, setSubmitError] = useState<ApiError | null>(null);
   const [fields, setFields] = useState<RuleParameterField[]>([]);
+  // T-115 — which Resolver's `resolverInputFieldKeys` the field builder previews the "Resolver
+  // input" / "Compared value" badge against. Never submitted (implementation note 3): the
+  // request payload built in `onSubmit` below has no `resolverId`/`role` key at all, matching
+  // `createRuleRequestSchema`, which does not accept either.
+  const [previewResolverId, setPreviewResolverId] = useState<string>('');
 
   const form = useForm<FormValues>({ defaultValues: DEFAULT_VALUES });
   const categoryId = form.watch('categoryId');
@@ -55,6 +67,10 @@ export function AddRuleModal({ open, onClose }: AddRuleModalProps) {
   const subCategoriesQuery = useRuleSubCategoriesQuery(
     categoryId === '' ? undefined : Number(categoryId),
   );
+  const resolversQuery = useRuleResolversQuery();
+  // T-125 — feeds the field builder's "Where do the options come from?" picker.
+  const contextProvidersQuery = useFieldContextProvidersQuery();
+  const apiLookupProvidersQuery = useFieldApiLookupProvidersQuery();
 
   const categoryOptions: SelectOption[] = useMemo(
     () =>
@@ -73,9 +89,29 @@ export function AddRuleModal({ open, onClose }: AddRuleModalProps) {
     [subCategoriesQuery.data, categoryId],
   );
 
+  const resolverOptions: SelectOption[] = useMemo(
+    () =>
+      (resolversQuery.data ?? []).map((resolver) => ({
+        value: String(resolver.id),
+        label: `${resolver.name} (${resolver.resolverCode})`,
+      })),
+    [resolversQuery.data],
+  );
+
+  // T-115 — the previewed Resolver's `resolverInputFieldKeys`, or `[]` (every field reads as
+  // "Compared value") when none is selected — computed client-side, purely from the already-
+  // fetched `GET /rule-resolvers` list, so recomputing per keystroke costs no extra request.
+  const previewResolverInputFieldKeys: readonly string[] = useMemo(
+    () =>
+      (resolversQuery.data ?? []).find((resolver) => String(resolver.id) === previewResolverId)
+        ?.resolverInputFieldKeys ?? [],
+    [resolversQuery.data, previewResolverId],
+  );
+
   function handleClose(): void {
     setSubmitError(null);
     setFields([]);
+    setPreviewResolverId('');
     form.reset(DEFAULT_VALUES);
     onClose();
   }
@@ -124,11 +160,17 @@ export function AddRuleModal({ open, onClose }: AddRuleModalProps) {
   }
 
   return (
+    // T-160 — the mockup (`Super-Admin-Create-Rule-Master-Screen.png`) shows a visibly wider
+    // dialog than the previous default (`size="md"`, ~512px). `size="lg"` (~672px) was tried
+    // first, per this task's own instruction, but a real-browser check showed it still cramped
+    // once a Parameter Fields row renders — the "Required" checkbox label clipped and the Label
+    // input's placeholder truncated — so this uses the newly added `xl` (~896px) instead.
     <Modal
       open={open}
       onClose={handleClose}
       title="Add rule"
       description="Author a new global rule."
+      size="xl"
     >
       <form
         onSubmit={(event) => {
@@ -194,7 +236,28 @@ export function AddRuleModal({ open, onClose }: AddRuleModalProps) {
           </p>
         </div>
 
-        <ParameterFieldsEditor fields={fields} onChange={setFields} />
+        <div className="flex flex-col gap-1.5">
+          <Select
+            label="Resolver (preview)"
+            options={resolverOptions}
+            value={previewResolverId === '' ? null : previewResolverId}
+            onChange={setPreviewResolverId}
+            placeholder="None — every field is Compared value"
+          />
+          <p className="text-xs text-slate-500">
+            Not saved with this rule — wiring a rule to a resolver happens separately, on its
+            version. Pick one here only to preview which parameter keys it would treat as its own
+            input.
+          </p>
+        </div>
+
+        <ParameterFieldsEditor
+          fields={fields}
+          onChange={setFields}
+          resolverInputFieldKeys={previewResolverInputFieldKeys}
+          contextProviders={contextProvidersQuery.data ?? []}
+          apiLookupProviders={apiLookupProvidersQuery.data ?? []}
+        />
 
         <div className="flex justify-end gap-2">
           <Button type="button" variant="secondary" onClick={handleClose}>

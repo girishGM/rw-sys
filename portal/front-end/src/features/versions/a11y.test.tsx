@@ -16,11 +16,17 @@ const {
   mockUseCreateDraftMutation,
   mockUseVersionTransitionMutation,
   mockUseVersionDiffQuery,
+  mockUseUpdateDraftMutation,
+  mockUseRuleResolversQuery,
+  mockUseRuleOperatorsQuery,
 } = vi.hoisted(() => ({
   mockUseVersionsQuery: vi.fn(),
   mockUseCreateDraftMutation: vi.fn(),
   mockUseVersionTransitionMutation: vi.fn(),
   mockUseVersionDiffQuery: vi.fn(),
+  mockUseUpdateDraftMutation: vi.fn(),
+  mockUseRuleResolversQuery: vi.fn(),
+  mockUseRuleOperatorsQuery: vi.fn(),
 }));
 
 vi.mock('./api', () => ({
@@ -28,8 +34,15 @@ vi.mock('./api', () => ({
   useCreateDraftMutation: mockUseCreateDraftMutation,
   useVersionTransitionMutation: mockUseVersionTransitionMutation,
   useVersionDiffQuery: mockUseVersionDiffQuery,
+  useUpdateDraftMutation: mockUseUpdateDraftMutation,
+}));
+// T-110 — `EditVersionDraftModal`'s resolver-wiring fields (opened below, "Edit draft" scan).
+vi.mock('../rules/api', () => ({
+  useRuleResolversQuery: mockUseRuleResolversQuery,
+  useRuleOperatorsQuery: mockUseRuleOperatorsQuery,
 }));
 
+import userEvent from '@testing-library/user-event';
 import { VersionsPanel } from './VersionsPanel';
 
 const JSDOM_LAYOUT_DEPENDENT_RULES = ['color-contrast', 'color-contrast-enhanced'];
@@ -114,6 +127,33 @@ beforeEach(() => {
   mockUseCreateDraftMutation.mockReturnValue({ mutateAsync: vi.fn(), isPending: false });
   mockUseVersionTransitionMutation.mockReturnValue({ mutateAsync: vi.fn(), isPending: false });
   mockUseVersionDiffQuery.mockReturnValue({ data: undefined, isLoading: false });
+  mockUseUpdateDraftMutation.mockReset();
+  mockUseUpdateDraftMutation.mockReturnValue({ mutateAsync: vi.fn(), isPending: false });
+  mockUseRuleResolversQuery.mockReset();
+  mockUseRuleResolversQuery.mockReturnValue({
+    data: [
+      {
+        id: 1,
+        resolverCode: 'TRACKER_STATE_LOOKUP',
+        name: 'Sibling Tracker Component Lookup',
+        description: null,
+        status: 'active',
+        resolverInputFieldKeys: ['targetComponentCode'],
+      },
+    ],
+  });
+  mockUseRuleOperatorsQuery.mockReset();
+  mockUseRuleOperatorsQuery.mockReturnValue({
+    data: [
+      {
+        id: 1,
+        operatorCode: 'equals',
+        displayName: 'Equals',
+        expectedValueType: 'string',
+        status: 'active',
+      },
+    ],
+  });
 });
 
 afterEach(() => {
@@ -161,5 +201,22 @@ describe('TC-29 — VersionsPanel axe scan', () => {
     const { container } = renderPanel();
     await screen.findByText('Could not load versions');
     await scan(container, 'VersionsPanel — error');
+  });
+
+  // T-110 — the resolver/evaluation-context/operators fields added to "Edit draft".
+  it('the "Edit draft" modal, with resolver wiring fields shown, has no violations', async () => {
+    mockUseVersionsQuery.mockReturnValue({
+      data: [draftVersion, publishedVersion],
+      isLoading: false,
+      isError: false,
+    });
+    const user = userEvent.setup();
+    const { container } = renderPanel('super_admin');
+    await screen.findByText('v2');
+
+    await user.click(screen.getByRole('button', { name: /edit/i }));
+    await screen.findByText(/Edit draft v2/);
+
+    await scan(container, 'EditVersionDraftModal — resolver wiring fields');
   });
 });

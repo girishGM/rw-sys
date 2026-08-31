@@ -9,6 +9,7 @@ import {
   UpdatedAt,
 } from 'sequelize-typescript';
 import { RuleMaster } from './rule-master.model';
+import { RuleResolver } from './rule-resolver.model';
 import { parseJsonColumn, stringifyJsonColumn } from '../util/json-text.util';
 
 export type VersionStatus = 'draft' | 'published' | 'deprecated' | 'retired';
@@ -94,8 +95,34 @@ export class RuleVersion extends Model<RuleVersion> {
   @Column({ type: DataType.DATE, allowNull: true, field: 'retired_at' })
   declare retiredAt: Date | null;
 
+  /**
+   * T-103 — resolver-wiring columns, additive per `06-VERSIONING.md` §4.1/§5.1 ("all behaviour
+   * moves into immutable version rows" / "nullable, so every existing INSERT keeps working").
+   * `NULL` reads as "not yet wired to the registry-driven rule engine" — the version behaves
+   * exactly as before (inert `expression`, no resolver dispatch). Frozen alongside
+   * `expression`/`parameters`/`version_no`/`is_breaking` once published — see `T103_002`'s
+   * extension of `fn_rule_version_immutable()`.
+   */
+  @ForeignKey(() => RuleResolver)
+  @Column({ type: DataType.INTEGER, allowNull: true, field: 'resolver_id' })
+  declare resolverId: number | null;
+
+  @Column({ type: DataType.TEXT, allowNull: true, field: 'resolver_config' })
+  declare resolverConfig: string | null;
+
+  /** `transaction_payload` | `tracker_state` | `customer_profile` | `aggregate` | `schedule`. */
+  @Column({ type: DataType.STRING(50), allowNull: true, field: 'evaluation_context' })
+  declare evaluationContext: string | null;
+
+  /** JSON array text of `rule_operators.operator_code` values — read verbatim, never parsed here. */
+  @Column({ type: DataType.TEXT, allowNull: true, field: 'default_operators' })
+  declare defaultOperators: string | null;
+
   @BelongsTo(() => RuleMaster)
   declare rule: RuleMaster;
+
+  @BelongsTo(() => RuleResolver)
+  declare resolver: RuleResolver | null;
 
   @BelongsTo(() => RuleVersion, { foreignKey: 'supersedesVersionId' })
   declare supersedesVersion: RuleVersion | null;

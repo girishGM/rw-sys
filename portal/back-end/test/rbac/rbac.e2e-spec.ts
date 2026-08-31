@@ -528,6 +528,51 @@ async function ensureParticipation(
 }
 
 /**
+ * The tenant ids each TC-22 actor is *authorised* to see, read straight from the database.
+ *
+ * **Why this is a query and not a literal (T-150).** `countryX` is not a fixture this suite
+ * creates: `beforeAll` takes `SELECT id FROM countries ORDER BY id LIMIT 1`, which on any real
+ * database is the seeded home country (locally, `1` — `MY`). `tenantA`/`tenantB` are then created
+ * *inside* it. So a `country_admin` of X is legitimately scoped to every other tenant in that
+ * country too — including the seeded `DEMO` tenant — and TC-22's original `expected:
+ * [tenantA, tenantB]` was a closed-world assumption that only held while nothing else in the home
+ * country had a live campaign. It stopped holding the moment an unrelated campaign was created
+ * under `DEMO` through the portal's own Maker screen, and TC-22 then reported that correctly
+ * scoped row as a cross-tenant leak. Every other country-scoped test here (TC-8, and the
+ * subquery test beside it) already asserts against the database for exactly this reason; TC-22
+ * was the one that did not.
+ *
+ * The `countryX` query is the same boundary `scope-strategy.ts`'s `TENANTS_IN_COUNTRY` builds —
+ * written out again here in plain SQL, deliberately, so the expectation is derived independently
+ * of the code under test rather than from it. The other three actors are single-tenant by
+ * construction (`maker`/`merchant` scope is `tenant_id = :tenantId`, straight off the verified
+ * JWT), so their boundary really is one literal id and stays one.
+ */
+async function authorisedTenantIds(): Promise<{
+  makerA: number[];
+  makerB: number[];
+  merchant1: number[];
+  countryX: number[];
+}> {
+  const rows = await sql<{ id: number }>(
+    `SELECT id FROM reward_config.tenants WHERE country_id = :countryId ORDER BY id`,
+    { countryId: countryX },
+  );
+
+  return {
+    makerA: [tenantA],
+    makerB: [tenantB],
+    merchant1: [tenantA],
+    countryX: rows.map((row) => row.id),
+  };
+}
+
+/** The tenant ids in `seen` that `authorised` does not permit — empty means zero leakage. */
+function crossTenantLeaks(authorised: readonly number[], seen: readonly number[]): number[] {
+  return seen.filter((tenantId) => !authorised.includes(tenantId));
+}
+
+/**
  * `rbac_version:maker`, read/bumped/**restored to its exact prior value**.
  *
  * The restore is not cosmetic. `rbac_cache_config` is seeded global state that T-004's own e2e
@@ -1120,11 +1165,15 @@ describe('TC-21, TC-22 — concurrency through the whole chain', () => {
 
   it('TC-22: 500 interleaved mixed-tenant requests leak zero rows', async () => {
     // Split across four actors so the per-user rate limit (300/min) is not the thing under test.
+    // `expected` is each actor's real authorisation boundary, read from the database by direct
+    // SQL — see `authorisedTenantIds` for why `countryX`'s is not the literal pair
+    // `[tenantA, tenantB]` it used to be (T-150).
+    const authorised = await authorisedTenantIds();
     const plan = [
-      { key: 'makerA', expected: [tenantA] },
-      { key: 'makerB', expected: [tenantB] },
-      { key: 'merchant1', expected: [tenantA] },
-      { key: 'countryX', expected: [tenantA, tenantB] },
+      { key: 'makerA', expected: authorised.makerA },
+      { key: 'makerB', expected: authorised.makerB },
+      { key: 'merchant1', expected: authorised.merchant1 },
+      { key: 'countryX', expected: authorised.countryX },
     ];
 
     // 500 requests, up to `CONCURRENCY` of them genuinely in flight at once.
@@ -1148,21 +1197,65 @@ describe('TC-21, TC-22 — concurrency through the whole chain', () => {
       results.push(...(await Promise.all(batch)));
     }
 
+    // Zero cross-tenant rows: every tenant id in every response is one that actor may see.
+    // Collected rather than asserted per-id so a failure names the actor and *all* the ids it
+    // should not have seen, instead of stopping at the first — that difference is what made the
+    // original defect report ambiguous between "a leak" and "a stale fixture assumption".
+    const leaks: { key: string; leaked: number[] }[] = [];
     for (const { entry, response } of results) {
       expect(response.status).toBe(200);
       const seen: number[] = response.body.data.tenantIds;
 
-      // Zero cross-tenant rows: every tenant id in the response is one this actor may see.
-      for (const tenantId of seen) {
-        expect(entry.expected).toContain(tenantId);
-      }
-    }
+      const leaked = crossTenantLeaks(entry.expected, seen);
+      if (leaked.length > 0) leaks.push({ key: entry.key, leaked });
 
+      // A tenant in the *other* country, which no actor in the plan is scoped to, must never
+      // appear for anyone. This one is a fixed fact about the fixtures, not a database lookup,
+      // so it holds even if `authorisedTenantIds` were itself wrong.
+      expect(seen).not.toContain(tenantC);
+    }
+    expect(leaks).toEqual([]);
+
+    // Non-vacuity, per actor: each one really did see the rows it is entitled to, so the loop
+    // above is not passing over 500 empty responses.
+    const seenBy = (key: string) =>
+      new Set(
+        results
+          .filter(({ entry }) => entry.key === key)
+          .flatMap(({ response }) => response.body.data.tenantIds as number[]),
+      );
+
+    expect([...seenBy('makerA')]).toEqual([tenantA]);
+    expect([...seenBy('makerB')]).toEqual([tenantB]);
     // And the merchant really did see something, so the assertion above is not vacuous.
     const merchantResults = results.filter(({ entry }) => entry.key === 'merchant1');
     expect(merchantResults.every(({ response }) => response.body.data.tenantIds.length === 1)).toBe(
       true,
     );
+    expect([...seenBy('merchant1')]).toEqual([tenantA]);
+    expect([...seenBy('countryX')]).toEqual(expect.arrayContaining([tenantA, tenantB]));
+  });
+
+  /**
+   * T-150 TC-3 — proof that the check above has teeth.
+   *
+   * The 500-request loop can only fail if `crossTenantLeaks` reports something, and widening
+   * `countryX`'s expected set (see `authorisedTenantIds`) is exactly the kind of change that can
+   * quietly turn a security assertion into a tautology. These three cases run the same function
+   * over forged data, where a leak is known to be present, and are the reason a green TC-22 means
+   * something: they fail if the comparison is ever loosened to `[]`, to a superset, or to nothing.
+   */
+  it('TC-22’s leak check rejects a forged cross-tenant response', async () => {
+    expect(crossTenantLeaks([tenantA], [tenantA, tenantB])).toEqual([tenantB]);
+    expect(crossTenantLeaks([tenantA, tenantB], [tenantC])).toEqual([tenantC]);
+    expect(crossTenantLeaks([tenantA], [tenantA])).toEqual([]);
+
+    // And the widened `countryX` set is still a real boundary: it admits the country's own
+    // tenants and nothing from country Y, so a country_admin seeing `tenantC` still fails.
+    const authorised = await authorisedTenantIds();
+    expect(authorised.countryX).toEqual(expect.arrayContaining([tenantA, tenantB]));
+    expect(authorised.countryX).not.toContain(tenantC);
+    expect(crossTenantLeaks(authorised.countryX, [tenantC])).toEqual([tenantC]);
   });
 });
 
