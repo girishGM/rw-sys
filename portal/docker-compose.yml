@@ -10,8 +10,9 @@
 # `reward_config` is not this portal's schema to create (`01-DATABASE.md` — the portal only
 # ever runs the two authorised `ALTER`s against it), but a from-scratch compose environment has
 # no pre-existing corporate database to point at either. `postgres`'s own init mechanism loads
-# the same schema-only DDL `database/reward_config_postgres.sql` (repo root, one level above
-# `portal/`) documents as a *port* of the real system, purely so this file is genuinely
+# the same schema-only DDL `database/reward_config/reward_config_postgres.sql` (repo root, one
+# level above `portal/` — under `database/reward_config/` since the 2026-08-29 restructuring;
+# see T-155) documents as a *port* of the real system, purely so this file is genuinely
 # self-contained on a clean checkout — never a second source of truth for that schema, and
 # never used against any environment that already has a real `reward_config`.
 
@@ -25,7 +26,7 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./docker/postgres-init/01-create-app-role.sh:/docker-entrypoint-initdb.d/01-create-app-role.sh:ro
-      - ../database/reward_config_postgres.sql:/docker-entrypoint-initdb.d/02-reward-config-schema.sql:ro
+      - ../database/reward_config/reward_config_postgres.sql:/docker-entrypoint-initdb.d/02-reward-config-schema.sql:ro
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
       interval: 5s

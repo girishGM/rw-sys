@@ -201,6 +201,26 @@ describe('fetchRewards', () => {
     expect(result.data[0]).toEqual(listRow);
   });
 
+  it('T-158 — a legacy connectorType on one row no longer fails the whole list', async () => {
+    // Filed from a live product report: a `super_admin`'s unscoped `GET /rewards` includes
+    // `reward_systems` rows an e2e fixture wrote directly (bypassing `POST /rewards`'s own
+    // validation) with `connector_type = 'internal'` — a pre-rename value the current
+    // `REWARD_CONNECTOR_TYPES` enum no longer has. Before the fix, `rewardListItemSchema`'s
+    // `connectorType` used the same closed enum on read as on write, so this whole response
+    // failed `.safeParse` and `fetchRewards` threw the plain `Error` that
+    // `RewardsListPage.tsx` then rendered as the generic `UNKNOWN_ERROR_MESSAGE` — reproduced
+    // live in a real browser (T-158's completion report), not just here.
+    const legacyRow = { ...listRow, connectorType: 'internal' };
+    mockGet.mockResolvedValue({
+      data: { data: [listRow, legacyRow], meta: { page: 1, pageSize: 20, total: 2 } },
+    });
+
+    const result = await fetchRewards({});
+
+    expect(result.data).toHaveLength(2);
+    expect(result.data[1].connectorType).toBe('internal');
+  });
+
   it('rejects a list row that carries connectorConfigPreview — TC-11 is a contract test too', async () => {
     // `reward` (the detail fixture) carries `connectorConfigPreview`; spreading it into a list
     // row is exactly the shape a server bug would produce, and `rewardListItemSchema`'s

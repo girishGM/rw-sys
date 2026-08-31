@@ -103,6 +103,25 @@ beforeEach(() => {
 });
 
 describe('AddRuleModal', () => {
+  // T-160 TC-1/TC-2 — modal width and the Parameter Fields help text restored from the mockup.
+  it('renders at the wider "xl" Modal size, not the cramped default', () => {
+    renderModal();
+
+    expect(screen.getByRole('dialog', { name: /add rule/i })).toHaveClass('max-w-4xl');
+  });
+
+  it('renders the Parameter Fields heading and "Role matters" help text from the mockup', () => {
+    renderModal();
+
+    expect(screen.getByText(/parameter fields/i, { selector: 'h3' })).toBeInTheDocument();
+    expect(
+      screen.getByText(/what the maker fills in when applying this rule to a tracker component/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/role matters:/i)).toBeInTheDocument();
+    expect(screen.getByText('Compared value', { selector: 'strong' })).toBeInTheDocument();
+    expect(screen.getByText('Resolver input', { selector: 'strong' })).toBeInTheDocument();
+  });
+
   it('rejects a too-short rule code before calling the API — the shared Zod schema catches it client-side', async () => {
     const user = userEvent.setup();
     renderModal();
@@ -213,7 +232,10 @@ describe('AddRuleModal', () => {
       await user.click(screen.getByRole('button', { name: /add field/i }));
       await user.type(screen.getByPlaceholderText('minSpend'), 'targetComponentCode');
 
-      expect(screen.getByText('Resolver input')).toBeInTheDocument();
+      // `{ selector: 'span' }` targets the read-only role `Badge` specifically — T-160 added a
+      // static "Role matters: **Compared value** / **Resolver input**" help paragraph (rendered
+      // as `<strong>`) that shares this exact wording.
+      expect(screen.getByText('Resolver input', { selector: 'span' })).toBeInTheDocument();
     });
 
     it('TC-2: badges every other field key "Compared value" under the same resolver', async () => {
@@ -226,8 +248,8 @@ describe('AddRuleModal', () => {
       await user.click(screen.getByRole('button', { name: /add field/i }));
       await user.type(screen.getByPlaceholderText('minSpend'), 'value');
 
-      expect(screen.getByText('Compared value')).toBeInTheDocument();
-      expect(screen.queryByText('Resolver input')).not.toBeInTheDocument();
+      expect(screen.getByText('Compared value', { selector: 'span' })).toBeInTheDocument();
+      expect(screen.queryByText('Resolver input', { selector: 'span' })).not.toBeInTheDocument();
     });
 
     it('TC-3: switching the previewed resolver recomputes every badge immediately', async () => {
@@ -238,13 +260,13 @@ describe('AddRuleModal', () => {
       await user.click(screen.getByRole('option', { name: /tracker state lookup/i }));
       await user.click(screen.getByRole('button', { name: /add field/i }));
       await user.type(screen.getByPlaceholderText('minSpend'), 'targetComponentCode');
-      expect(screen.getByText('Resolver input')).toBeInTheDocument();
+      expect(screen.getByText('Resolver input', { selector: 'span' })).toBeInTheDocument();
 
       await user.click(screen.getByRole('combobox', { name: /resolver/i }));
       await user.click(screen.getByRole('option', { name: /json path payload/i }));
 
-      expect(screen.queryByText('Resolver input')).not.toBeInTheDocument();
-      expect(screen.getByText('Compared value')).toBeInTheDocument();
+      expect(screen.queryByText('Resolver input', { selector: 'span' })).not.toBeInTheDocument();
+      expect(screen.getByText('Compared value', { selector: 'span' })).toBeInTheDocument();
     });
 
     it('TC-4: the create-rule request payload never carries a `role` key on any field', async () => {

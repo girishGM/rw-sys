@@ -190,6 +190,38 @@ describe('CredentialService', () => {
       expect(result.mustChangePassword).toBe(false);
     });
 
+    /**
+     * T-161 — the regression, stated as the property a user actually experiences: having complied
+     * with the forced change, the next login must not demand it again.
+     *
+     * Before the fix this returned `true` on the second call, because the elapsed
+     * `password_expires_at` outlived the password it was attached to.
+     */
+    it('stops reporting mustChangePassword once the expired password has been changed', async () => {
+      const CHOSEN_PASSWORD = 'Sextant-Harbour-Lumen-19';
+      const { service, user } = buildWithUser(
+        { email: EMAIL },
+        { passwordExpiresAt: new Date(NOW.getTime() - MINUTE) },
+      );
+
+      const before = await service.authenticate({ email: EMAIL, password: PASSWORD, now: NOW });
+      expect(before.mustChangePassword).toBe(true);
+
+      await service.changePassword({
+        userId: user.id,
+        newPassword: CHOSEN_PASSWORD,
+        currentPassword: PASSWORD,
+        email: EMAIL,
+      });
+
+      const after = await service.authenticate({
+        email: EMAIL,
+        password: CHOSEN_PASSWORD,
+        now: NOW,
+      });
+      expect(after.mustChangePassword).toBe(false);
+    });
+
     it('flags a weakly-hashed password for opportunistic rehashing', async () => {
       const weak = await argon2.hash(PASSWORD, { ...ARGON2_OPTIONS, memoryCost: 8192 });
       const context = build();

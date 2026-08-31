@@ -1188,21 +1188,112 @@ describe('containment — TC-7, TC-8, TC-10, Verification step 4', () => {
     return sessionId;
   }
 
-  it('TC-7 — an optionId the tools never offered fails at plan time', async () => {
-    const sessionId = await sessionWithOfferedMerchants();
+  /**
+   * A plan attempt on a session that is **complete except for the merchant token under test**
+   * (T-164).
+   *
+   * Why the full conversation rather than a bare session: `buildPlan()` checks slot completeness
+   * *before* it resolves any option id, so a session carrying nothing but a merchant token dies at
+   * `AGENT_PLAN_INCOMPLETE` and never reaches the option resolver at all. TC-7 and TC-8 both used a
+   * bare session and both accepted `[400, 422]`, so both were green while asserting nothing about
+   * containment — the resolver they exist to test was never called. `converse()` fills every slot
+   * legitimately first; the extra turn then swaps only the merchants slot, which leaves the plan
+   * complete and the resolver as the one thing that can refuse it.
+   *
+   * `headers` exists for the T-164 regression test, which needs to pin the response's `traceId`.
+   */
+  async function planWithMerchantToken(
+    token: string,
+    headers: Readonly<Record<string, string>> = {},
+  ): Promise<request.Response> {
+    const sessionId = await converse('makerA', campaignCode());
 
-    // The model claims a merchant nobody offered it.
-    scriptedReplies = [say({ reply: 'Added.', slots: { merchants: ['m_999999'] } })];
+    scriptedReplies = [say({ reply: 'Swapped.', slots: { merchants: [token] } })];
     await post('makerA', `/campaign-agent/sessions/${sessionId}/messages`, {
-      message: 'add merchant 999999',
+      message: 'use that merchant instead',
     }).expect(200);
 
     // The turn is accepted (the slot store holds tokens); the *plan* is where it dies.
-    const response = await post('makerA', `/campaign-agent/sessions/${sessionId}/plan`);
-    expect([400, 422]).toContain(response.status);
+    let plan = post('makerA', `/campaign-agent/sessions/${sessionId}/plan`);
+    for (const [name, value] of Object.entries(headers)) plan = plan.set(name, value);
+    return plan;
+  }
+
+  /**
+   * The part of an error response that can carry information about *what* was rejected — the
+   * envelope minus `traceId` (T-164).
+   *
+   * `traceId` is excluded deliberately and not as a convenience. It is a per-request opaque id
+   * (`correlation.middleware.ts`), so it is structurally incapable of disclosing anything about a
+   * merchant, and it is the only field in the envelope whose value the server picks at random.
+   * Asserting containment against `JSON.stringify(response.body)` therefore tested the random field
+   * as well as the real ones: `merchantB` is a two-digit id, a `traceId` is a 32-hex-digit UUID, and
+   * a random UUID contains any given digit pair roughly 10% of the time. That is the flake T-164
+   * was filed for — measured at 7 collisions in 40 consecutive real responses, every one of them
+   * inside the UUID. Scoping the assertion to the fields that mean something loses no coverage,
+   * because a leak in `traceId` is not a leak the server is able to produce.
+   */
+  function disclosure(body: unknown): Record<string, unknown> {
+    const { error } = body as { error: Record<string, unknown> };
+    expect(typeof error.traceId).toBe('string');
+
+    const scoped = { ...error };
+    delete scoped.traceId;
+    return scoped;
+  }
+
+  it('TC-7 — an optionId the tools never offered fails at plan time', async () => {
+    // The model claims a merchant nobody offered it.
+    const response = await planWithMerchantToken('m_999999');
+
+    expect(response.status).toBe(400);
+    expect(response.body.error.code).toBe('AGENT_OPTION_NOT_RESOLVABLE');
+    // It names the option *kind* and nothing else — not the id it refused.
+    expect(response.body.error.details).toEqual([{ field: 'optionId', code: 'KIND_MERCHANTS' }]);
+    expect(JSON.stringify(disclosure(response.body))).not.toContain('999999');
   });
 
   it('TC-8 — another tenant’s merchant id is rejected the same way', async () => {
+    const foreign = await planWithMerchantToken(`m_${String(merchantB)}`);
+    const nowhere = await planWithMerchantToken('m_999999');
+
+    expect(foreign.status).toBe(400);
+    expect(foreign.body.error.code).toBe('AGENT_OPTION_NOT_RESOLVABLE');
+
+    // Nothing in the body says whether that merchant exists. Asserted against the envelope minus
+    // the random `traceId` — see `disclosure()` for why that exclusion is sound, not a loophole.
+    expect(JSON.stringify(disclosure(foreign.body))).not.toContain(String(merchantB));
+
+    // The property `agent.errors.ts` actually claims: *"a merchant id from tenant B and a merchant
+    // id from nowhere produce byte-identical responses"*. This is the assertion that would catch a
+    // regression a substring check cannot — a body that leaks existence without ever repeating the
+    // id (a different code, a different detail, a different status) still fails here.
+    expect(foreign.status).toBe(nowhere.status);
+    expect(disclosure(foreign.body)).toEqual(disclosure(nowhere.body));
+  });
+
+  it('T-164 — the containment check holds when the traceId itself contains the merchant id', async () => {
+    // `x-correlation-id` is echoed into the envelope's `traceId` when it is well-formed
+    // (`trace-id.ts`), which turns the random collision T-164 was filed for into a deterministic
+    // one. Without this test the fix has never been seen to fail.
+    const correlationId = `t164-${String(merchantB)}-collide`;
+    const response = await planWithMerchantToken(`m_${String(merchantB)}`, {
+      'X-Correlation-Id': correlationId,
+    });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error.traceId).toBe(correlationId);
+
+    // The raw body does carry the digits — inside the echoed trace id, and nowhere else. The old
+    // `expect(JSON.stringify(response.body)).not.toContain(String(merchantB))` fails here every
+    // time; the scoped assertion is unmoved by it.
+    expect(JSON.stringify(response.body)).toContain(String(merchantB));
+    expect(JSON.stringify(disclosure(response.body))).not.toContain(String(merchantB));
+  });
+
+  it('a session that never answered anything dies on completeness, before the resolver', async () => {
+    // What TC-7 and TC-8 were really exercising before T-164. Kept as its own case so the
+    // behaviour stays covered now that they no longer reach it.
     const sessionId = await sessionWithOfferedMerchants();
 
     scriptedReplies = [say({ reply: 'Added.', slots: { merchants: [`m_${String(merchantB)}`] } })];
@@ -1210,10 +1301,8 @@ describe('containment — TC-7, TC-8, TC-10, Verification step 4', () => {
       message: 'use the other tenant’s merchant',
     }).expect(200);
 
-    const response = await post('makerA', `/campaign-agent/sessions/${sessionId}/plan`);
-    expect([400, 422]).toContain(response.status);
-    // Nothing in the body says whether that merchant exists.
-    expect(JSON.stringify(response.body)).not.toContain(String(merchantB));
+    const response = await post('makerA', `/campaign-agent/sessions/${sessionId}/plan`).expect(422);
+    expect(response.body.error.code).toBe('AGENT_PLAN_INCOMPLETE');
   });
 
   it('TC-10 / step 4 — an injection payload in a rule name has no effect on the outcome', async () => {

@@ -13,7 +13,8 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "playwright:install": "playwright install --with-deps chromium",
     "perf:dashboard-fcp": "node -r ts-node/register/transpile-only perf/dashboard-fcp.ts",
-    "perf:dashboard-lighthouse": "node -r ts-node/register/transpile-only perf/dashboard-lighthouse.ts"
+    "perf:dashboard-lighthouse": "node -r ts-node/register/transpile-only perf/dashboard-lighthouse.ts",
+    "check:reward-config-path": "node -r ts-node/register/transpile-only utils/verify-reward-config-schema-path.ts"
   },
   "devDependencies": {
     "@playwright/test": "^1.47.0",

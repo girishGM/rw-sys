@@ -117,6 +117,27 @@ export interface PasswordUpdate {
   readonly passwordHash: string;
   readonly passwordAlgo: string;
   readonly previousHashes: readonly string[];
+  /**
+   * T-161. Clears `password_expires_at` alongside the hash — the caller is stating that this
+   * write is a *genuine password change*, so any forced-change deadline the old password carried
+   * is now satisfied.
+   *
+   * **Optional, and defaulting to "leave it alone", on purpose.** `replacePassword` has two
+   * callers and only one of them is a password change:
+   *
+   *  - `CredentialService.changePassword` — a real change. Passes `true`.
+   *  - `AuthService.rehashIfNeeded` — an opportunistic Argon2 work-factor upgrade that happens on
+   *    an ordinary login, re-hashing *the same password the user just typed*. It is not a change,
+   *    and clearing the deadline there would silently disarm the forced-change control for any
+   *    account whose stored hash happened to be due an upgrade: a freshly-issued temporary
+   *    password would lose its 72-hour expiry merely by being used to log in once.
+   *
+   * Making this an explicit flag rather than folding the `NULL` unconditionally into the UPDATE
+   * follows the same reasoning {@link CredentialRepository.replacePassword} already gives for not
+   * folding in a lockout clear: a security-relevant side effect belongs at the call site where a
+   * reviewer can see it, not hidden inside a shared write that every future caller inherits.
+   */
+  readonly clearPasswordExpiry?: boolean;
 }
 
 /**
@@ -387,6 +408,9 @@ export class CredentialRepository implements CredentialStore, CredentialProvisio
    * `LockoutService.clear()` exists for the reset flow to call explicitly. Folding it in here
    * would make every future caller of "change the password" silently also mean "unlock the
    * account", which is the kind of implicit behaviour a lockout bypass hides in.
+   *
+   * `password_expires_at` is cleared only when the caller asks for it — see
+   * {@link PasswordUpdate.clearPasswordExpiry}, which applies exactly the same reasoning.
    */
   async replacePassword(
     credentialId: number,
@@ -399,6 +423,8 @@ export class CredentialRepository implements CredentialStore, CredentialProvisio
          SET password_hash       = :passwordHash,
              password_algo       = :passwordAlgo,
              previous_hashes     = CAST(:previousHashes AS jsonb),
+             password_expires_at = CASE WHEN CAST(:clearPasswordExpiry AS boolean)
+                                        THEN NULL ELSE password_expires_at END,
              password_updated_at = now(),
              updated_at          = now()
        WHERE id = :credentialId
@@ -410,6 +436,11 @@ export class CredentialRepository implements CredentialStore, CredentialProvisio
           credentialId,
           passwordHash: update.passwordHash,
           passwordAlgo: update.passwordAlgo,
+          // `?? false` rather than passing `undefined` through: Sequelize renders an undefined
+          // replacement as NULL, and `CASE WHEN CAST(NULL AS boolean)` falls to the ELSE branch.
+          // That happens to be the right outcome, but by accident — an explicit boolean keeps the
+          // statement's meaning independent of how the driver treats a missing value.
+          clearPasswordExpiry: update.clearPasswordExpiry ?? false,
           // Stringified rather than passed as an array: Sequelize expands a JS array in a
           // replacement into a comma-separated SQL list, which is valid syntax and the wrong
           // value — `CAST` would then fail at runtime rather than at review time.

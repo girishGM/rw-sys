@@ -161,18 +161,34 @@ export function ParameterFieldsEditor({
 
   return (
     <div className="flex flex-col gap-3">
-      <div className="flex items-center justify-between">
+      <div className="flex items-start justify-between gap-4">
         <h3 className="text-sm font-semibold text-slate-900">
-          Parameters
+          Parameter Fields
           <span className="ml-2 font-normal text-slate-400">
-            the dynamic values a Maker supplies at campaign time
+            — what the Maker fills in when applying this rule to a tracker component
           </span>
         </h3>
-        <Button type="button" variant="secondary" size="sm" onClick={addField} disabled={disabled}>
+        <Button
+          type="button"
+          variant="secondary"
+          size="sm"
+          onClick={addField}
+          disabled={disabled}
+          className="shrink-0 whitespace-nowrap"
+        >
           <Plus className="size-4" aria-hidden="true" />
           Add field
         </Button>
       </div>
+      {/* T-160 — this explanatory copy previously existed only as a source comment on the
+          `role` badge below, never actually rendered to the screen (mockup:
+          `super-admin-rules-rewards-theme-preview.html:439-443`). Wording kept verbatim. */}
+      <p className="text-xs text-slate-500">
+        Role matters: <strong className="font-medium text-slate-700">Compared value</strong> is
+        checked against the resolved fact above, using the Maker&apos;s chosen operator.{' '}
+        <strong className="font-medium text-slate-700">Resolver input</strong> instead parameterizes
+        the lookup itself — e.g. which sibling component to check.
+      </p>
 
       {fields.length === 0 && (
         <p className="text-sm text-slate-500">
@@ -223,7 +239,9 @@ export function ParameterFieldsEditor({
               disabled={disabled}
             />
           </div>
-          <div className="col-span-1 pt-2">
+          {/* T-160 — `col-span-2`, not `-1`: at `-1` the "Required" label visibly ran into the
+              role Badge in the next column at every modal width tried, `xl` included. */}
+          <div className="col-span-2 pt-2">
             <Checkbox
               label="Required"
               checked={field.required}
@@ -241,7 +259,9 @@ export function ParameterFieldsEditor({
               )}
             </Badge>
           </div>
-          <div className="col-span-2 flex justify-end pt-1">
+          {/* T-160 — shrunk from `col-span-2` to `-1` (an icon-only button needs far less room
+              than that) to give the freed column back to "Required", above. */}
+          <div className="col-span-1 flex justify-end pt-1">
             <Button
               type="button"
               variant="ghost"

@@ -578,6 +578,38 @@ describe('CredentialRepository', () => {
 
       expect(db.lastCall.options.transaction).toBe(tx);
     });
+
+    // T-161. The behavioural proof that the column actually ends up NULL lives in
+    // `t161-forced-password-change.e2e-spec.ts`, against real Postgres — these two cases pin the
+    // flag's *routing*, which is the part a fake store cannot get wrong on the e2e path.
+    it('asks Postgres to clear password_expires_at when the caller says this is a real change', async () => {
+      const { db, repository } = build();
+
+      await repository.replacePassword(99, {
+        passwordHash: '$argon2id$new',
+        passwordAlgo: 'argon2id',
+        previousHashes: [],
+        clearPasswordExpiry: true,
+      });
+
+      expect(db.lastSql).toContain('password_expires_at');
+      expect(db.lastCall.options.replacements?.clearPasswordExpiry).toBe(true);
+    });
+
+    it('defaults to leaving password_expires_at alone when the flag is omitted', async () => {
+      // The opportunistic-rehash path (`AuthService.rehashIfNeeded`) omits it. If this defaulted
+      // the other way, logging in with a freshly-issued temporary password would silently disarm
+      // its own 72-hour deadline whenever the stored hash happened to be due a work-factor upgrade.
+      const { db, repository } = build();
+
+      await repository.replacePassword(99, {
+        passwordHash: '$argon2id$new',
+        passwordAlgo: 'argon2id',
+        previousHashes: [],
+      });
+
+      expect(db.lastCall.options.replacements?.clearPasswordExpiry).toBe(false);
+    });
   });
 
   describe('runInTransaction', () => {

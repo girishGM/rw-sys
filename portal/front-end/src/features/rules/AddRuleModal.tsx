@@ -160,11 +160,17 @@ export function AddRuleModal({ open, onClose }: AddRuleModalProps) {
   }
 
   return (
+    // T-160 — the mockup (`Super-Admin-Create-Rule-Master-Screen.png`) shows a visibly wider
+    // dialog than the previous default (`size="md"`, ~512px). `size="lg"` (~672px) was tried
+    // first, per this task's own instruction, but a real-browser check showed it still cramped
+    // once a Parameter Fields row renders — the "Required" checkbox label clipped and the Label
+    // input's placeholder truncated — so this uses the newly added `xl` (~896px) instead.
     <Modal
       open={open}
       onClose={handleClose}
       title="Add rule"
       description="Author a new global rule."
+      size="xl"
     >
       <form
         onSubmit={(event) => {

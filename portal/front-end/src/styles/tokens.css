@@ -133,6 +133,35 @@ td[class~='text-slate-400'] {
 }
 
 /**
+ * T-157 — the persistent sidebar (`layouts/Sidebar.tsx`'s one `<aside>`, confirmed by grep to be
+ * the only element in the whole front-end carrying both an `aside` tag and a `bg-white` class) was
+ * `bg-white` — visually almost identical, in every theme, to `AppShell.tsx`'s own `bg-slate-50`
+ * main-content wrapper (`#ffffff` vs `#f8fafc` by default, a ~1% lightness difference), so the
+ * sidebar read as part of the page rather than a distinct navigation panel.
+ *
+ * Reusing `--color-slate-200` (already redefined per theme in the blocks above/below, never a new
+ * hex value) gives a panel background clearly darker than the page's own `slate-50` while staying
+ * *lighter* than `hover:bg-slate-100`/`bg-primary-50`'s own resting values would suggest is
+ * possible — i.e. hovering or selecting a nav row lightens it against the panel in all three
+ * themes, the direction a highlight should move, not the reverse.
+ *
+ * `Sidebar.tsx` itself is deliberately not touched (T-157 `Files owned`: it lists that file only
+ * for a `NavGroup` change this task turned out not to need — `NavGroup` already renders a
+ * parent-with-children as a link-less toggle button, ignoring `node.path` entirely, so the new
+ * `rules`/`rewards` parent rows needed no component change either). This overrides the Tailwind
+ * `bg-white` utility for exactly that one `<aside>`, the same higher-specificity-selector
+ * technique the `text-slate-400` block above uses to fix a specific pre-existing utility-class
+ * usage without editing the component that wrote it. The mobile nav drawer (`components/Drawer.tsx`,
+ * a shared T-021 component used well beyond the sidebar) is deliberately left at its own default
+ * `bg-white` — changing every Drawer's background portal-wide to fix one caller's contrast would be
+ * a much bigger, out-of-scope footprint, and a full-screen overlay drawer already reads as a
+ * distinct panel from the page behind it without this fix.
+ */
+aside.bg-white {
+  background-color: var(--color-slate-200);
+}
+
+/**
  * T-129 — the three selectable themes (13-REWARD-MASTER-VALUE-SOURCES.md §6; palette lifted
  * from `project-plan/requirements/super-admin-rules-rewards-theme-preview.html`'s own theme
  * picker, per that task's implementation note 1: "match its palette rather than re-deriving

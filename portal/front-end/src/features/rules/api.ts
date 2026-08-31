@@ -5,29 +5,38 @@
  * schema — not just cast — so a server/SPA contract drift surfaces as a caught, reported error
  * on this feature rather than as a silent `undefined` deep in a form.
  */
+import { z } from 'zod';
 import { useMutation, useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query';
 import {
   assignRuleCountryRequestSchema,
+  createFieldApiLookupProviderRequestSchema,
+  createFieldContextProviderRequestSchema,
   createRuleCategoryRequestSchema,
   createRuleRequestSchema,
   createRuleSubCategoryRequestSchema,
+  fieldApiLookupProviderEnvelopeSchema,
   fieldApiLookupProviderListEnvelopeSchema,
+  fieldContextProviderEnvelopeSchema,
   fieldContextProviderListEnvelopeSchema,
   ruleCategoryEnvelopeSchema,
   ruleCategoryListEnvelopeSchema,
   ruleCountryAssignmentEnvelopeSchema,
   ruleCountryAssignmentListEnvelopeSchema,
   ruleEnvelopeSchema,
-  ruleListEnvelopeSchema,
   ruleOperatorListEnvelopeSchema,
   ruleParametersEnvelopeSchema,
   ruleResolverListEnvelopeSchema,
+  ruleSchema,
   ruleSubCategoryEnvelopeSchema,
   ruleSubCategoryListEnvelopeSchema,
+  updateFieldApiLookupProviderRequestSchema,
+  updateFieldContextProviderRequestSchema,
   updateRuleCategoryRequestSchema,
   updateRuleRequestSchema,
   updateRuleSubCategoryRequestSchema,
   type AssignRuleCountryRequest,
+  type CreateFieldApiLookupProviderRequest,
+  type CreateFieldContextProviderRequest,
   type CreateRuleCategoryRequest,
   type CreateRuleRequest,
   type CreateRuleSubCategoryRequest,
@@ -40,6 +49,8 @@ import {
   type RuleParameters,
   type RuleResolver,
   type RuleSubCategory,
+  type UpdateFieldApiLookupProviderRequest,
+  type UpdateFieldContextProviderRequest,
   type UpdateRuleCategoryRequest,
   type UpdateRuleRequest,
   type UpdateRuleSubCategoryRequest,
@@ -72,16 +83,76 @@ export function rulesQueryKey(params: RuleListParams = {}): readonly [string, Ru
   return ['rules', params] as const;
 }
 
+/**
+ * T-159 — the envelope's own shape, `ruleSchema` deliberately excluded (below). `.strict()`, same
+ * discipline the shared package's own `ruleListEnvelopeSchema` applies: a genuinely malformed
+ * response (wrong content-type, `data` not an array, `meta` missing/reshaped) still fails here
+ * exactly as it always has.
+ */
+const ruleListResponseShapeSchema = z
+  .object({
+    data: z.array(z.unknown()),
+    meta: z
+      .object({ page: z.number().int(), pageSize: z.number().int(), total: z.number().int() })
+      .strict(),
+  })
+  .strict();
+
+/**
+ * T-159 — root-caused live against the real dev database: `GET /rules`'s read paths
+ * intentionally never reject a legacy `rule_master.parameters` blob
+ * (`rule-master.model.ts`'s "never throws" getter, `rules.service.ts`'s own header), but the
+ * *shared*, `.strict()` `ruleSchema` this file used to validate the whole page against in one
+ * shot is deliberately **stricter** — T-122's `valueSourceOnlyOnSelect` refinement exists
+ * specifically to reject a `valueSource` on a non-`select` field (tested directly against
+ * `ruleParameterFieldWithRoleSchema` in `rule.schema.spec.ts`), and is not something this task
+ * may weaken (AGENT-PROTOCOL §7 — "never weaken a guard to make a test green"). Reproduced live:
+ * `rule_master.id=1790` (`ruleCode: 'T037E2E_RULE_SIBLING'`), a leftover row predating that
+ * refinement, carries a `type: 'string'` field with a `valueSource` — invalid under today's
+ * rules, but still exactly what the server honestly has stored and honestly returns. Sorted by
+ * `name:asc` with the default `pageSize` of 20, that one row lands on page 2 of 3, so the old
+ * single `ruleListEnvelopeSchema.safeParse(response.data)` — which validated the whole `data`
+ * array as one unit — failed for the **entire page**, not just that row, on every "Next" click
+ * past page 1. This is the same class of bug T-074's own comment on this schema already names
+ * ("one bad row must not break the whole list"), reproduced one layer up: this file's own
+ * `fetchRule`/`fetchRuleParameters` single-row reads are unaffected by this fix (a legacy row
+ * that fails still 404s from the campaign wizard's point of view rather than crashing everyone
+ * else's list — no worse than before this fix, and out of T-159's "Next" pagination scope).
+ *
+ * The fix mirrors T-074's shape but applies at the row level instead of a single normalised
+ * field: {@link ruleListResponseShapeSchema} still validates the envelope strictly, but each row
+ * of `data` is now validated **independently** against `ruleSchema`. A row that fails is dropped,
+ * logged (`console.error` — this is data the write path can no longer produce since T-122, so
+ * every occurrence is a legacy artifact worth a human's attention) and excluded from the page;
+ * every other row on that page, and every other page, is unaffected. `meta` is returned exactly
+ * as the server reported it — never patched down to the post-drop row count — so
+ * `RulesListPage.tsx`'s pager (driven entirely by `meta.page`/`meta.pageSize`/`meta.total`, per
+ * that file's own header) keeps counting and paging correctly regardless of how many rows on a
+ * given page were dropped.
+ */
 export async function fetchRules(params: RuleListParams): Promise<RuleListResult> {
   try {
     const response = await api.get<unknown>('/rules', { params });
-    const parsed = ruleListEnvelopeSchema.safeParse(response.data);
-    if (!parsed.success) {
+    const shape = ruleListResponseShapeSchema.safeParse(response.data);
+    if (!shape.success) {
       throw new Error(
-        `Rules list response did not match the expected shape: ${parsed.error.message}`,
+        `Rules list response did not match the expected shape: ${shape.error.message}`,
       );
     }
-    return parsed.data;
+
+    const rows: Rule[] = [];
+    shape.data.data.forEach((row, index) => {
+      const parsedRow = ruleSchema.safeParse(row);
+      if (parsedRow.success) {
+        rows.push(parsedRow.data);
+      } else {
+        console.error(
+          `Rules list row ${String(index)} did not match the shared schema and was dropped: ${parsedRow.error.message}`,
+        );
+      }
+    });
+
+    return { data: rows, meta: shape.data.meta };
   } catch (error) {
     throw toApiError(error);
   }
@@ -508,8 +579,75 @@ export async function fetchFieldContextProviders(): Promise<readonly FieldContex
   }
 }
 
+/** The root key every `field-context-providers` query hangs off (mirrors `RULES_ROOT_KEY`). */
+export const FIELD_CONTEXT_PROVIDERS_ROOT_KEY = ['field-context-providers'] as const;
+
 export function useFieldContextProvidersQuery() {
-  return useQuery({ queryKey: ['field-context-providers'], queryFn: fetchFieldContextProviders });
+  return useQuery({
+    queryKey: FIELD_CONTEXT_PROVIDERS_ROOT_KEY,
+    queryFn: fetchFieldContextProviders,
+  });
+}
+
+// --- T-162: value-source registries write endpoints (T-121 already built and gated them;
+// this task only adds the mutation hooks that call them) -------------------------------------
+
+export async function createFieldContextProvider(
+  input: CreateFieldContextProviderRequest,
+): Promise<FieldContextProvider> {
+  try {
+    const payload = createFieldContextProviderRequestSchema.parse(input);
+    const response = await api.post<unknown>('/field-context-providers', payload);
+    const parsed = fieldContextProviderEnvelopeSchema.safeParse(response.data);
+    if (!parsed.success) {
+      throw new Error(
+        `Create-field-context-provider response did not match the expected shape: ${parsed.error.message}`,
+      );
+    }
+    return parsed.data.data;
+  } catch (error) {
+    throw toApiError(error);
+  }
+}
+
+export function useCreateFieldContextProviderMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: createFieldContextProvider,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: FIELD_CONTEXT_PROVIDERS_ROOT_KEY });
+    },
+  });
+}
+
+export async function updateFieldContextProvider(
+  id: number,
+  input: UpdateFieldContextProviderRequest,
+): Promise<FieldContextProvider> {
+  try {
+    const payload = updateFieldContextProviderRequestSchema.parse(input);
+    const response = await api.patch<unknown>(`/field-context-providers/${String(id)}`, payload);
+    const parsed = fieldContextProviderEnvelopeSchema.safeParse(response.data);
+    if (!parsed.success) {
+      throw new Error(
+        `Update-field-context-provider response did not match the expected shape: ${parsed.error.message}`,
+      );
+    }
+    return parsed.data.data;
+  } catch (error) {
+    throw toApiError(error);
+  }
+}
+
+export function useUpdateFieldContextProviderMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, input }: { id: number; input: UpdateFieldContextProviderRequest }) =>
+      updateFieldContextProvider(id, input),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: FIELD_CONTEXT_PROVIDERS_ROOT_KEY });
+    },
+  });
 }
 
 export async function fetchFieldApiLookupProviders(): Promise<readonly FieldApiLookupProvider[]> {
@@ -527,9 +665,70 @@ export async function fetchFieldApiLookupProviders(): Promise<readonly FieldApiL
   }
 }
 
+/** The root key every `field-api-lookup-providers` query hangs off. */
+export const FIELD_API_LOOKUP_PROVIDERS_ROOT_KEY = ['field-api-lookup-providers'] as const;
+
 export function useFieldApiLookupProvidersQuery() {
   return useQuery({
-    queryKey: ['field-api-lookup-providers'],
+    queryKey: FIELD_API_LOOKUP_PROVIDERS_ROOT_KEY,
     queryFn: fetchFieldApiLookupProviders,
+  });
+}
+
+export async function createFieldApiLookupProvider(
+  input: CreateFieldApiLookupProviderRequest,
+): Promise<FieldApiLookupProvider> {
+  try {
+    const payload = createFieldApiLookupProviderRequestSchema.parse(input);
+    const response = await api.post<unknown>('/field-api-lookup-providers', payload);
+    const parsed = fieldApiLookupProviderEnvelopeSchema.safeParse(response.data);
+    if (!parsed.success) {
+      throw new Error(
+        `Create-field-api-lookup-provider response did not match the expected shape: ${parsed.error.message}`,
+      );
+    }
+    return parsed.data.data;
+  } catch (error) {
+    throw toApiError(error);
+  }
+}
+
+export function useCreateFieldApiLookupProviderMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: createFieldApiLookupProvider,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: FIELD_API_LOOKUP_PROVIDERS_ROOT_KEY });
+    },
+  });
+}
+
+export async function updateFieldApiLookupProvider(
+  id: number,
+  input: UpdateFieldApiLookupProviderRequest,
+): Promise<FieldApiLookupProvider> {
+  try {
+    const payload = updateFieldApiLookupProviderRequestSchema.parse(input);
+    const response = await api.patch<unknown>(`/field-api-lookup-providers/${String(id)}`, payload);
+    const parsed = fieldApiLookupProviderEnvelopeSchema.safeParse(response.data);
+    if (!parsed.success) {
+      throw new Error(
+        `Update-field-api-lookup-provider response did not match the expected shape: ${parsed.error.message}`,
+      );
+    }
+    return parsed.data.data;
+  } catch (error) {
+    throw toApiError(error);
+  }
+}
+
+export function useUpdateFieldApiLookupProviderMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, input }: { id: number; input: UpdateFieldApiLookupProviderRequest }) =>
+      updateFieldApiLookupProvider(id, input),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: FIELD_API_LOOKUP_PROVIDERS_ROOT_KEY });
+    },
   });
 }

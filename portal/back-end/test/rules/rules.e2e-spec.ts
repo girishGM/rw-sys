@@ -19,6 +19,7 @@ import { QueryTypes } from 'sequelize';
 import type { Sequelize } from 'sequelize-typescript';
 import * as argon2 from 'argon2';
 import request from 'supertest';
+import { ruleListEnvelopeSchema, ruleSchema } from '@reward-portal/shared';
 import { AppModule } from '@/app.module';
 import { ARGON2_OPTIONS } from '@/modules/auth/auth.constants';
 import { SEQUELIZE } from '@/database/sequelize.provider';
@@ -809,6 +810,131 @@ describe('T-111 — GET /rules?categoryId=/subCategoryId=/search=', () => {
     expect(response.status).toBe(200);
     const ruleCodes = (response.body.data as { ruleCode: string }[]).map((rule) => rule.ruleCode);
     expect(ruleCodes).toEqual(['RULE_COMP_NOT_COMPLETED_001']);
+  });
+});
+
+describe('T-159 — GET /rules pagination tolerates a legacy row the shared read schema rejects', () => {
+  /**
+   * Reproduces the reported defect against the real database, not a hand-authored mock: a
+   * legacy `rule_master` row written before T-122's `valueSourceOnlyOnSelect` refinement existed
+   * (`type: 'string'` carrying a `valueSource` — the exact shape of the live dev-DB row this
+   * task's own diagnosis found, `rule_master.id=1790`/`T037E2E_RULE_SIBLING`) is inserted here
+   * directly with a raw `INSERT`, bypassing `RulesService.create` entirely — the only way to get
+   * such a row into the table at all, since every write path has enforced this refinement since
+   * T-122 (`rules.service.ts#assertValueSourceProvidersExist`'s own header).
+   *
+   * `search=T159PAGINATION` (T-111) scopes every query in this block to exactly the 4 rows
+   * created here, regardless of how many other global rules the shared dev database happens to
+   * hold — the same reason the real bug was hard to see structurally: the failure depends on
+   * *where* a bad row lands relative to `pageSize`, not on the row in isolation, and this keeps
+   * that positioning deterministic instead of riding on the current row count of a shared DB.
+   */
+  const SEARCH_TERM = 'T159PAGINATION';
+  let dirtyRowId: number;
+
+  async function insertLegacyInvalidRule(code: string): Promise<number> {
+    const parameters = JSON.stringify({
+      fields: [
+        {
+          key: 'targetComponentId',
+          label: 'Target component',
+          type: 'string',
+          required: true,
+          valueSource: { kind: 'CONTEXT_LOOKUP', contextProvider: 'SIBLING_COMPONENTS' },
+        },
+      ],
+    });
+    const [created] = await sql<{ id: number }>(
+      `INSERT INTO reward_config.rule_master
+         (tenant_id, sub_category_id, rule_code, name, expression, parameters, created_by, status)
+       VALUES (NULL, :subCategoryId, :code, :code, NULL, :parameters, NULL, 'active')
+       RETURNING id`,
+      { subCategoryId, code, parameters },
+    );
+    createdRuleIds.add(created.id);
+    return created.id;
+  }
+
+  beforeAll(async () => {
+    // Sorted `name:asc`, `pageSize=2`: page 1 = [A, B], page 2 = [C (the dirty row), D] — the
+    // dirty row deliberately does **not** land on page 1, mirroring the live bug report exactly
+    // ("Previous" back to page 1 always worked; "Next" past it always failed).
+    await createRule({ ruleCode: `${SEARCH_TERM}_A`, name: `${SEARCH_TERM}_A` });
+    await createRule({ ruleCode: `${SEARCH_TERM}_B`, name: `${SEARCH_TERM}_B` });
+    dirtyRowId = await insertLegacyInvalidRule(`${SEARCH_TERM}_C`);
+    await createRule({ ruleCode: `${SEARCH_TERM}_D`, name: `${SEARCH_TERM}_D` });
+  });
+
+  it('page 1 (no dirty row) returns exactly the two clean rows', async () => {
+    const response = await get(
+      'super',
+      `/rules?search=${SEARCH_TERM}&sort=name:asc&pageSize=2&page=1`,
+    );
+    expect(response.status).toBe(200);
+    expect((response.body.data as { ruleCode: string }[]).map((rule) => rule.ruleCode)).toEqual([
+      `${SEARCH_TERM}_A`,
+      `${SEARCH_TERM}_B`,
+    ]);
+    expect(response.body.meta).toEqual({ page: 1, pageSize: 2, total: 4 });
+  });
+
+  it(
+    'page 2 (dirty row included) is still a genuine 200 over real HTTP against real Postgres — ' +
+      'the server never throws on this row, only a naive whole-array client schema does',
+    async () => {
+      const response = await get(
+        'super',
+        `/rules?search=${SEARCH_TERM}&sort=name:asc&pageSize=2&page=2`,
+      );
+
+      // TC-1 — reproduced live: this is a genuine 200 with a well-formed body, exactly as the
+      // original diagnosis found. The bug was never a server-side failure.
+      expect(response.status).toBe(200);
+      expect(response.body.meta).toEqual({ page: 2, pageSize: 2, total: 4 });
+      const ids = (response.body.data as { id: number; ruleCode: string }[]).map((r) => r.id);
+      expect(ids).toContain(dirtyRowId);
+      expect(response.body.data as unknown[]).toHaveLength(2);
+
+      // The defect, reproduced against this exact real round trip: the whole-array envelope
+      // schema `fetchRules` used to validate the *entire* response with (pre-fix) fails the
+      // whole page over one bad row, real Postgres data included — not a synthetic fixture.
+      const wholeArrayResult = ruleListEnvelopeSchema.safeParse(response.body);
+      expect(wholeArrayResult.success).toBe(false);
+
+      // The fix, proven against the same real payload: validating each row of `data`
+      // independently (the algorithm `fetchRules` now uses) drops exactly the one dirty row and
+      // keeps every other row on the page — including `meta`, untouched, so the pager still
+      // counts and pages correctly regardless of how many rows were dropped.
+      const rows = response.body.data as unknown[];
+      const validRows = rows.filter((row) => ruleSchema.safeParse(row).success);
+      const invalidRows = rows.filter((row) => !ruleSchema.safeParse(row).success);
+      expect(invalidRows).toHaveLength(1);
+      expect((invalidRows[0] as { id: number }).id).toBe(dirtyRowId);
+      expect(validRows.map((row) => (row as { ruleCode: string }).ruleCode)).toEqual([
+        `${SEARCH_TERM}_D`,
+      ]);
+    },
+  );
+
+  it('Previous back to page 1 from a fetch that included the dirty row still works', async () => {
+    // Confirms the pager's own round trip (page 2 → page 1), not just page 2 in isolation —
+    // the reported symptom was specifically that "Previous" always worked, so this pins that
+    // still holds true with the dirty row present in the same dataset.
+    const page2 = await get(
+      'super',
+      `/rules?search=${SEARCH_TERM}&sort=name:asc&pageSize=2&page=2`,
+    );
+    expect(page2.status).toBe(200);
+
+    const page1 = await get(
+      'super',
+      `/rules?search=${SEARCH_TERM}&sort=name:asc&pageSize=2&page=1`,
+    );
+    expect(page1.status).toBe(200);
+    expect((page1.body.data as { ruleCode: string }[]).map((rule) => rule.ruleCode)).toEqual([
+      `${SEARCH_TERM}_A`,
+      `${SEARCH_TERM}_B`,
+    ]);
   });
 });
 

@@ -12,12 +12,15 @@ export interface ModalProps {
   description?: string;
   children: ReactNode;
   footer?: ReactNode;
-  size?: 'sm' | 'md' | 'lg';
+  size?: 'sm' | 'md' | 'lg' | 'xl';
   /** Set false only when the caller provides its own confirming affordance for close. */
   closeOnEscape?: boolean;
 }
 
-const SIZE_CLASSES = { sm: 'max-w-sm', md: 'max-w-lg', lg: 'max-w-2xl' };
+// T-160 — `xl` added for `AddRuleModal`'s Parameter Fields rows, which are cramped at `lg`
+// (max-w-2xl, ~672px): a real-browser check showed the "Required" checkbox label clipped and
+// the Label input's placeholder truncated once a field row renders.
+const SIZE_CLASSES = { sm: 'max-w-sm', md: 'max-w-lg', lg: 'max-w-2xl', xl: 'max-w-4xl' };
 
 /**
  * T-021 TC-4 — on open, focus moves inside; `Tab` is trapped; `Esc` closes; focus returns

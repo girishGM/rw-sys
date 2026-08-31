@@ -67,6 +67,7 @@ import { AGENT_NAV_CONFIGS } from '@/database/migrations/T049_001_seed_agent_nav
 import { RULE_CATEGORY_NAV_CONFIGS } from '@/database/migrations/T107_001_seed_rule_category_nav';
 import { REWARD_CATEGORY_NAV_CONFIGS } from '@/database/migrations/T117_001_seed_reward_category_nav';
 import { RULE_VALUE_SOURCES_NAV_CONFIGS } from '@/database/migrations/T146_001_seed_rule_value_sources_nav';
+import { NEW_NAV_ROWS as RULES_REWARDS_NAV_CONFIGS } from '@/database/migrations/T157_001_nest_rules_rewards_nav';
 import type { PortalRole } from '@/database/portal-models';
 import { expectErrorEnvelope } from '../common/support/error-envelope';
 // T-055 — a `super_admin` login now ends in an MFA challenge; this completes it through the real
@@ -240,13 +241,25 @@ function expectBootstrapShape() {
   }).data;
 }
 
-/** The shape every `role_nav_configs` seed migration exports. */
+/** The shape every `role_nav_configs` seed migration exports. `parentNavKey` is optional because
+ * only `T157_001` (and, after `NAV_PARENT_OVERRIDES` below, three rows `T107_001`/`T117_001`/
+ * `T146_001` originally seeded flat) ever populate it — every earlier migration's own row shape
+ * simply omits the field, which is structurally `undefined`, normalised to `null` by
+ * `effectiveParent` below. */
 interface SeededNavRow {
   role: string;
   navKey: string;
   label: string;
   path: string;
   sortOrder: number;
+  parentNavKey?: string | null;
+}
+
+/** `row.parentNavKey`, with `undefined` (every pre-T157 migration's row shape) normalised to
+ * `null` — the two are the same "no parent, this is a root" state, just spelled differently
+ * depending on whether the exporting migration ever declared the field at all. */
+function effectiveParent(row: SeededNavRow): string | null {
+  return row.parentNavKey ?? null;
 }
 
 /**
@@ -270,15 +283,52 @@ const NAV_SEED_MIGRATIONS: { readonly file: string; readonly rows: readonly Seed
   { file: 'T107_001_seed_rule_category_nav.ts', rows: RULE_CATEGORY_NAV_CONFIGS },
   { file: 'T117_001_seed_reward_category_nav.ts', rows: REWARD_CATEGORY_NAV_CONFIGS },
   { file: 'T146_001_seed_rule_value_sources_nav.ts', rows: RULE_VALUE_SOURCES_NAV_CONFIGS },
+  // T-157 — only its two *inserted* rows (`rules_all`/`rewards_all`, already carrying their own
+  // `parentNavKey`) belong in this INSERT-only registry; its other half (re-parenting three rows
+  // the migrations above already registered) is `NAV_PARENT_OVERRIDES`' job, the same INSERT/
+  // UPDATE split `t004-seeds-bootstrap.e2e-spec.ts`'s own `PERMISSION_SEED_EXTRAS`/
+  // `PERMISSION_UPDATE_MIGRATIONS` make for `role_entity_permissions`.
+  { file: 'T157_001_nest_rules_rewards_nav.ts', rows: RULES_REWARDS_NAV_CONFIGS },
 ];
 
-/** Every seeded nav row, from every seeding migration, flattened. */
-const SEEDED_NAV_ROWS: readonly SeededNavRow[] = NAV_SEED_MIGRATIONS.flatMap(
-  (migration) => migration.rows,
+/**
+ * `(role, navKey)` pairs an already-registered migration seeded with no parent, later re-parented
+ * *in place* by `T157_001` (`RENESTED_ROWS`, that migration's own second half). Applied as an
+ * override rather than edited into `T107_001`/`T117_001`/`T146_001`'s own exported constants
+ * (files this task does not own, R9) — the same reason `t004-seeds-bootstrap.e2e-spec.ts`'s
+ * `PERMISSION_UPDATE_MIGRATIONS`/`applyPermissionUpdateOverrides` exist for
+ * `role_entity_permissions`.
+ */
+const NAV_PARENT_OVERRIDES: {
+  readonly role: string;
+  readonly navKey: string;
+  readonly parentNavKey: string;
+}[] = [
+  { role: 'super_admin', navKey: 'rule_categories', parentNavKey: 'rules' },
+  { role: 'super_admin', navKey: 'rule_value_sources', parentNavKey: 'rules' },
+  { role: 'super_admin', navKey: 'reward_categories', parentNavKey: 'rewards' },
+];
+
+function withNavParentOverrides(rows: readonly SeededNavRow[]): SeededNavRow[] {
+  return rows.map((row) => {
+    const override = NAV_PARENT_OVERRIDES.find(
+      (candidate) => candidate.role === row.role && candidate.navKey === row.navKey,
+    );
+    return override === undefined ? row : { ...row, parentNavKey: override.parentNavKey };
+  });
+}
+
+/** Every seeded nav row, from every seeding migration, flattened, with `NAV_PARENT_OVERRIDES`
+ * applied — this is the post-`T157_001` shape the live table actually has. */
+const SEEDED_NAV_ROWS: readonly SeededNavRow[] = withNavParentOverrides(
+  NAV_SEED_MIGRATIONS.flatMap((migration) => migration.rows),
 );
 
 /**
- * The nav keys the seed migrations give `role`, in the order the endpoint returns them.
+ * The **root-level** nav keys the seed migrations give `role`, in the order the endpoint returns
+ * them at the top of `body.nav` — i.e. every seeded row for `role` whose `parentNavKey` is `null`
+ * (every row, for every role except `super_admin` as of T-157; see `seededNavChildren` for the
+ * nested half).
  *
  * The comparator mirrors `bootstrap.service.ts`'s `order: [['sortOrder','ASC'], ['navKey','ASC']]`
  * exactly, tiebreaker included. The previous version sorted on `sortOrder` alone, which only
@@ -288,7 +338,27 @@ const SEEDED_NAV_ROWS: readonly SeededNavRow[] = NAV_SEED_MIGRATIONS.flatMap(
  */
 function seededNavKeys(role: string, rows: readonly SeededNavRow[] = SEEDED_NAV_ROWS): string[] {
   return rows
-    .filter((row) => row.role === role)
+    .filter((row) => row.role === role && effectiveParent(row) === null)
+    .slice()
+    .sort((left, right) =>
+      left.sortOrder !== right.sortOrder
+        ? left.sortOrder - right.sortOrder
+        : left.navKey.localeCompare(right.navKey),
+    )
+    .map((row) => row.navKey);
+}
+
+/** The nav keys the seed migrations nest under `parentNavKey` for `role`, in the same order
+ * `body.nav`'s matching node's own `children` array returns them (T-157: `super_admin`'s `rules`/
+ * `rewards` groups are the first real case; every other role's parent has no children today, so
+ * this returns `[]` for them, matching the flat behaviour this suite already asserted). */
+function seededNavChildren(
+  role: string,
+  parentNavKey: string,
+  rows: readonly SeededNavRow[] = SEEDED_NAV_ROWS,
+): string[] {
+  return rows
+    .filter((row) => row.role === role && effectiveParent(row) === parentNavKey)
     .slice()
     .sort((left, right) =>
       left.sortOrder !== right.sortOrder
@@ -545,9 +615,13 @@ describe('TC-1…TC-6 — one correct payload per role', () => {
     async (key, role) => {
       const { body } = await bootstrapOf(key);
 
-      // The seed has no parented rows, so every seeded item is a root with no children.
+      // Root level first: every role but `super_admin` still has no parented rows at all (T-157
+      // nests `super_admin`'s own "Rules"/"Rewards"), so `seededNavChildren` naturally returns
+      // `[]` for the rest and this loop covers the pre-T157 "flat menu, no children" case too.
       expect(body.nav.map((item) => item.key)).toEqual(seededNavKeys(role));
-      expect(body.nav.every((item) => item.children.length === 0)).toBe(true);
+      for (const item of body.nav) {
+        expect(item.children.map((child) => child.key)).toEqual(seededNavChildren(role, item.key));
+      }
     },
   );
 

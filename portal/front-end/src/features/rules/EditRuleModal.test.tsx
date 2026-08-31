@@ -194,13 +194,16 @@ describe('EditRuleModal', () => {
       </QueryClientProvider>,
     );
 
-    expect(screen.getByText('Compared value')).toBeInTheDocument();
+    // `{ selector: 'span' }` targets the read-only role `Badge` specifically — T-160
+    // (`ParameterFieldsEditor`, shared by this modal) added a static "Role matters: **Compared
+    // value** / **Resolver input**" help paragraph (rendered as `<strong>`) with this same wording.
+    expect(screen.getByText('Compared value', { selector: 'span' })).toBeInTheDocument();
 
     await user.click(screen.getByRole('combobox', { name: /resolver/i }));
     await user.click(screen.getByRole('option', { name: /tracker state lookup/i }));
 
-    expect(screen.getByText('Resolver input')).toBeInTheDocument();
-    expect(screen.queryByText('Compared value')).not.toBeInTheDocument();
+    expect(screen.getByText('Resolver input', { selector: 'span' })).toBeInTheDocument();
+    expect(screen.queryByText('Compared value', { selector: 'span' })).not.toBeInTheDocument();
   });
 
   // T-125 — the same field-builder value-source picker `AddRuleModal.test.tsx` covers; this only

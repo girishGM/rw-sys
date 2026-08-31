@@ -89,7 +89,10 @@ describe('ParameterFieldsEditor', () => {
     ];
     render(<ParameterFieldsEditor fields={fields} onChange={vi.fn()} />);
 
-    expect(screen.getByText('Compared value')).toBeInTheDocument();
+    // `{ selector: 'span' }` targets the read-only role `Badge` specifically — T-160 added a
+    // static "Role matters: **Compared value** / **Resolver input**" help paragraph (rendered
+    // as `<strong>`) above the field rows, which shares this exact wording.
+    expect(screen.getByText('Compared value', { selector: 'span' })).toBeInTheDocument();
   });
 
   it('badges a field "Resolver input" when its key is in resolverInputFieldKeys', () => {
@@ -105,8 +108,8 @@ describe('ParameterFieldsEditor', () => {
       />,
     );
 
-    expect(screen.getByText('Resolver input')).toBeInTheDocument();
-    expect(screen.getByText('Compared value')).toBeInTheDocument();
+    expect(screen.getByText('Resolver input', { selector: 'span' })).toBeInTheDocument();
+    expect(screen.getByText('Compared value', { selector: 'span' })).toBeInTheDocument();
   });
 
   // T-125 — the value-source picker for a `select` field (13-REWARD-MASTER-VALUE-SOURCES.md §3).

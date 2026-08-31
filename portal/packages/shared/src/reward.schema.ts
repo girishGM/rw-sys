@@ -63,11 +63,33 @@ export type RewardDeliveryMode = z.infer<typeof rewardDeliveryModeSchema>;
 /**
  * `reward_systems.connector_type` — a constrained vocabulary (implementation note 6), grounded in
  * the two values already live (`internal_api`, `file_export`) plus `webhook`/`manual` for
- * connector shapes no legacy row uses yet.
+ * connector shapes no legacy row uses yet. This is the **write** schema — `POST`/`PATCH /rewards`
+ * reject anything outside it, satisfying implementation note 6 to the letter ("validate against
+ * explicit enums... not free text").
  */
 export const REWARD_CONNECTOR_TYPES = ['internal_api', 'file_export', 'webhook', 'manual'] as const;
 export const rewardConnectorTypeSchema = z.enum(REWARD_CONNECTOR_TYPES);
 export type RewardConnectorType = z.infer<typeof rewardConnectorTypeSchema>;
+
+/**
+ * T-158 — the **read** shape for `connector_type`, deliberately looser than
+ * {@link rewardConnectorTypeSchema}. `reward_config.reward_systems.connector_type` has no CHECK
+ * constraint (`varchar(20)`, same as `reward_type` — see {@link rewardTypeSchema}'s own note on
+ * that column), and rows written outside `POST /rewards` (this dev DB's own e2e fixture leftovers,
+ * confirmed directly: 16 `reward_systems` rows carry `connector_type = 'internal'`, a pre-rename
+ * value the current enum no longer includes) genuinely exist. Before this change,
+ * `rewardListItemSchema`/`rewardSchema` used the strict enum on read too, so **one** such row
+ * anywhere in a caller's scope failed `.safeParse` for the *entire* list — reproduced live
+ * (T-158): a `super_admin`'s unscoped `GET /rewards` includes every legacy row, so the whole page
+ * rendered the generic `UNKNOWN_ERROR_MESSAGE` while a narrower-scoped `country_admin`, whose one
+ * visible reward happened to carry a valid value, saw no error at all. A write path that only
+ * ever accepts the closed enum (`createRewardRequestSchema`/`updateRewardRequestSchema`, both
+ * unchanged) cannot produce this value going forward; a read path must still tolerate whatever is
+ * already stored, exactly the same asymmetry {@link rewardTypeSchema} already documents for its
+ * sibling column. Bounded to the column's own width so a legacy value still cannot carry an
+ * unbounded blob.
+ */
+export const rewardConnectorTypeReadSchema = z.string().min(1).max(20);
 
 /**
  * `reward_systems.reward_type` is deliberately **not** a closed enum, unlike `delivery_mode`/
@@ -117,7 +139,8 @@ const rewardCommonFields = {
   description: z.string().nullable(),
   rewardType: rewardTypeSchema,
   deliveryMode: rewardDeliveryModeSchema,
-  connectorType: rewardConnectorTypeSchema,
+  // T-158 — the read schema, not the write one; see `rewardConnectorTypeReadSchema`'s own note.
+  connectorType: rewardConnectorTypeReadSchema,
   maintenanceWindowEnabled: z.boolean(),
   maintenanceSchedule: jsonObjectSchema,
   retryEnabled: z.boolean(),

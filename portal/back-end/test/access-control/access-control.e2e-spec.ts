@@ -14,6 +14,18 @@
  * and every one of them snapshots the row set first (via a real `GET`, the seed constants below
  * are the fallback source of truth) and restores it via a real `PUT` in a `finally` block, the
  * same discipline `test/rbac/rbac.e2e-spec.ts` TC-16 established for a single-row mutation.
+ *
+ * **T-153.** "The seed constants below are the fallback source of truth" used to mean only
+ * `T004_001`'s own `ROLE_ENTITY_PERMISSIONS` — stale the moment a later migration
+ * (`T042_001`/`T047_002`/`T106_001`/`T116_002`/`T121_002`/`T126_002`) added a `checker` row of
+ * its own, because `PUT /permissions/:role` is a full replace (`access-control.service.ts` note
+ * 5): `restorePermissions()`'s incomplete "seed" silently *deleted* every one of those newer rows
+ * on every restore, not merely omitted them from an assertion. Reproduced live, in isolation:
+ * running this suite alone dropped `reward_config.role_entity_permissions` from 99 to 92 rows,
+ * exactly the seven named in T-153's own evidence. Fixed by merging in every later migration's
+ * own export, the same `PERMISSION_SEED_EXTRAS` pattern
+ * `test/database/t004-seeds-bootstrap.e2e-spec.ts` already uses (T-071) — see `seedPermissions()`
+ * below, and the regression test at the end of this file.
  */
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
@@ -32,6 +44,17 @@ import { ROLE_DASHBOARD_WIDGETS } from '@/database/migrations/T004_003_seed_role
 import { ROLE_ENTITY_PERMISSIONS } from '@/database/migrations/T004_001_seed_role_entity_permissions';
 // T-072 — see the T-062 describe block below for why this is imported here.
 import { up as applyCampaignPausePermissions } from '@/database/migrations/T047_003_campaign_pause_permissions';
+// T-153 — `role_entity_permissions` is not seeded by `T004_001` alone (see `seedPermissions()`
+// below for why this matters to *this* suite specifically). Same registry
+// `test/database/t004-seeds-bootstrap.e2e-spec.ts`'s own `PERMISSION_SEED_EXTRAS` already
+// tracks (T-071) — imported here from each migration's own export, not copied, for the same
+// "cannot drift from what the migration itself does" reason that file gives.
+import { DEFINITION_REQUEST_PERMISSIONS } from '@/database/migrations/T042_001_seed_definition_request_permissions';
+import { GRPC_GRANT_PERMISSIONS } from '@/database/migrations/T047_002_seed_grpc_grant_permissions';
+import { RULE_CATEGORY_PERMISSIONS } from '@/database/migrations/T106_001_seed_rule_category_permissions';
+import { REWARD_CATEGORY_PERMISSIONS } from '@/database/migrations/T116_002_seed_reward_category_permissions';
+import { FIELD_VALUE_SOURCE_PERMISSIONS } from '@/database/migrations/T121_002_seed_field_value_source_registries';
+import { TENANT_CURRENCY_PERMISSIONS } from '@/database/migrations/T126_002_seed_tenant_currency_permissions';
 import { loginCompletingMfa } from '../auth/support/super-admin-mfa';
 import {
   deletePortalUsersByEmail,
@@ -323,10 +346,47 @@ function seedWidgetItems() {
   }));
 }
 
+/**
+ * Every migration that seeds `reward_config.role_entity_permissions` **besides** `T004_001`
+ * (T-153, mirroring `test/database/t004-seeds-bootstrap.e2e-spec.ts`'s own
+ * `PERMISSION_SEED_EXTRAS`, T-071). `seedPermissions()` below is `restorePermissions()`'s
+ * source of truth for "the seed" — omitting a row here does not just leave a gap in an
+ * assertion, the way it would in that other suite; it makes `restorePermissions()` actively
+ * *delete* that row from the live database, because `PUT /permissions/:role` is a full replace
+ * (implementation note 5 in `access-control.service.ts`): any entity the live row set has but
+ * the submitted `permissions` object doesn't is dropped as "no longer wanted", not "not part of
+ * this restore's concern". That is T-153's root cause — `MUTATION_ROLE` (`checker`) holds seven
+ * rows from `T106_001`/`T116_002`/`T121_002`/`T126_002` (added after this suite was written)
+ * that `seedPermissions()` never included, so every `restorePermissions()` call (every test's own
+ * `finally`, plus this file's `afterAll`) silently deleted them — reproduced live, in isolation
+ * (running only this suite drops `role_entity_permissions` from 99 to 92 rows, exactly the seven
+ * named in T-153's own evidence), confirmed by removing this merge and re-running the regression
+ * test below.
+ */
+const PERMISSION_SEED_EXTRAS: readonly (readonly {
+  role: string;
+  entity: string;
+  actions: readonly string[];
+}[])[] = [
+  DEFINITION_REQUEST_PERMISSIONS,
+  GRPC_GRANT_PERMISSIONS,
+  RULE_CATEGORY_PERMISSIONS,
+  REWARD_CATEGORY_PERMISSIONS,
+  FIELD_VALUE_SOURCE_PERMISSIONS,
+  TENANT_CURRENCY_PERMISSIONS,
+];
+
 function seedPermissions(): Record<string, string[]> {
   const permissions: Record<string, string[]> = {};
   for (const row of ROLE_ENTITY_PERMISSIONS) {
     if (row.role === MUTATION_ROLE) permissions[row.entity] = [...row.actions];
+  }
+  // T-153 — merge in every later migration's own rows for MUTATION_ROLE too, or this function's
+  // result silently omits any entity that gained a `checker` permission after `T004_001`.
+  for (const extra of PERMISSION_SEED_EXTRAS) {
+    for (const row of extra) {
+      if (row.role === MUTATION_ROLE) permissions[row.entity] = [...row.actions];
+    }
   }
   return permissions;
 }
@@ -815,6 +875,47 @@ describe('T-033 — changing another role does not affect the acting super_admin
       expect(ownAfter.body.data.user.role).toBe('super_admin');
     } finally {
       await restoreWidgets();
+    }
+  });
+});
+
+/**
+ * T-153 regression guard. Proven to fail on the unfixed code: reverting `seedPermissions()`'s
+ * `PERMISSION_SEED_EXTRAS` merge above (back to reading only `ROLE_ENTITY_PERMISSIONS`) reproduces
+ * exactly this test's failure — `restorePermissions()` deletes all seven rows, so the `after`
+ * assertions below fail on every one of them. Deliberately calls `restorePermissions()` directly
+ * (the same helper every other test's own `finally` and this file's `afterAll` already call)
+ * rather than driving a full HTTP round trip through some other route, because the defect is in
+ * that shared helper's own restore behaviour, not in any one caller.
+ */
+describe('T-153 — restorePermissions() must not delete permissions seeded after T004_001', () => {
+  const EXTRA_ENTITIES = [
+    'rule_category',
+    'rule_sub_category',
+    'reward_category',
+    'reward_sub_category',
+    'field_context_provider',
+    'field_api_lookup_provider',
+    'tenant_currency',
+  ] as const;
+
+  it('checker keeps its rule/reward category, value-source and tenant-currency permissions across a restore', async () => {
+    const before = await get('super', `/admin/access-control/permissions/${MUTATION_ROLE}`);
+    expect(before.status).toBe(200);
+
+    // Precondition: every entity this test guards is actually present before the restore runs —
+    // otherwise a false pass here would prove nothing (the row could already be missing from an
+    // earlier, unrelated failure).
+    for (const entity of EXTRA_ENTITIES) {
+      expect(before.body.data.permissions).toHaveProperty(entity);
+    }
+
+    await restorePermissions();
+
+    const after = await get('super', `/admin/access-control/permissions/${MUTATION_ROLE}`);
+    expect(after.status).toBe(200);
+    for (const entity of EXTRA_ENTITIES) {
+      expect(after.body.data.permissions[entity]).toEqual(before.body.data.permissions[entity]);
     }
   });
 });

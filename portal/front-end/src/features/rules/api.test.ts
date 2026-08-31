@@ -14,6 +14,8 @@ vi.mock('../../lib/apiClient', () => ({
 
 import {
   assignRuleCountry,
+  createFieldApiLookupProvider,
+  createFieldContextProvider,
   createRule,
   deleteRule,
   fetchFieldApiLookupProviders,
@@ -29,6 +31,8 @@ import {
   ruleQueryKey,
   rulesQueryKey,
   unassignRuleCountry,
+  updateFieldApiLookupProvider,
+  updateFieldContextProvider,
   updateRule,
 } from './api';
 import { ApiError } from '../../lib/apiError';
@@ -123,6 +127,53 @@ describe('fetchRules', () => {
     const error = await fetchRules({}).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(ApiError);
     expect((error as ApiError).code).toBe('PERM_DENIED');
+  });
+
+  // T-159 — reproduced live against the real dev database: a legacy row predating T-122's
+  // `valueSourceOnlyOnSelect` refinement (`rule_master.id=1790`, `T037E2E_RULE_SIBLING` — a
+  // `type: 'string'` field carrying a `valueSource`, which the write path can no longer produce
+  // but a pre-existing row can still hold) used to fail `ruleListEnvelopeSchema.safeParse` for
+  // the *entire page* it landed on, not just that row — the generic "Something went wrong" on
+  // every "Next" click past page 1 of the real Rules screen, even though the HTTP response was a
+  // genuine 200. The fix drops only the offending row; every valid row on the same page, and the
+  // pager's own `meta`, are unaffected.
+  it('drops a legacy row whose parameters violate the shared schema instead of failing the whole page (T-159)', async () => {
+    const invalidLegacyRow = {
+      ...rule,
+      id: 1790,
+      ruleCode: 'T037E2E_RULE_SIBLING',
+      name: 'T037E2E_RULE_SIBLING',
+      parameters: {
+        fields: [
+          {
+            key: 'targetComponentId',
+            label: 'Target component',
+            type: 'string',
+            required: true,
+            valueSource: { kind: 'CONTEXT_LOOKUP', contextProvider: 'SIBLING_COMPONENTS' },
+            role: 'compare_value',
+          },
+        ],
+      },
+    };
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    mockGet.mockResolvedValue({
+      data: {
+        data: [rule, invalidLegacyRow],
+        meta: { page: 2, pageSize: 20, total: 56 },
+      },
+    });
+
+    const result = await fetchRules({ page: 2 });
+
+    expect(result.data).toEqual([rule]);
+    // `meta` is reported exactly as the server sent it — never patched down to the post-drop
+    // row count — so `RulesListPage.tsx`'s pager keeps counting/paging correctly.
+    expect(result.meta).toEqual({ page: 2, pageSize: 20, total: 56 });
+    expect(consoleError).toHaveBeenCalledTimes(1);
+
+    consoleError.mockRestore();
   });
 });
 
@@ -386,5 +437,121 @@ describe('field value-source registries', () => {
     const result = await fetchFieldApiLookupProviders();
     expect(mockGet).toHaveBeenCalledWith('/field-api-lookup-providers');
     expect(result).toHaveLength(1);
+  });
+});
+
+// T-162 — the write endpoints T-121 already built and gated; this task only adds the calls.
+describe('field value-source registries — writes (T-162)', () => {
+  const contextProvider = {
+    id: 1,
+    providerCode: 'SIBLING_COMPONENTS',
+    name: 'Sibling components',
+    description: null,
+    status: 'active',
+  };
+
+  const apiLookupProvider = {
+    id: 1,
+    providerCode: 'PRODUCT_CATALOG',
+    name: 'Product catalog',
+    description: null,
+    endpointUrl: 'https://internal.example.com/catalog',
+    httpMethod: 'GET',
+    authType: 'none',
+    responseValueKey: 'id',
+    responseLabelKey: 'name',
+    status: 'planned',
+  };
+
+  it('createFieldContextProvider posts to /field-context-providers (TC-1)', async () => {
+    mockPost.mockResolvedValue({ data: { data: contextProvider } });
+
+    const result = await createFieldContextProvider({
+      providerCode: 'SIBLING_COMPONENTS',
+      name: 'Sibling components',
+    });
+
+    expect(mockPost).toHaveBeenCalledWith(
+      '/field-context-providers',
+      expect.objectContaining({ providerCode: 'SIBLING_COMPONENTS' }),
+    );
+    expect(result).toEqual(contextProvider);
+  });
+
+  it('createFieldContextProvider maps a duplicate-code conflict into an ApiError (TC-4)', async () => {
+    mockPost.mockRejectedValue({
+      isAxiosError: true,
+      response: {
+        status: 409,
+        data: {
+          error: { code: 'FIELD_CONTEXT_PROVIDER_CODE_EXISTS', message: 'Already exists.' },
+        },
+      },
+    });
+
+    const error = await createFieldContextProvider({
+      providerCode: 'SIBLING_COMPONENTS',
+      name: 'Sibling components',
+    }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).code).toBe('FIELD_CONTEXT_PROVIDER_CODE_EXISTS');
+  });
+
+  it('updateFieldContextProvider patches /field-context-providers/:id (TC-2)', async () => {
+    mockPatch.mockResolvedValue({ data: { data: { ...contextProvider, name: 'New name' } } });
+
+    const result = await updateFieldContextProvider(1, { name: 'New name' });
+
+    expect(mockPatch).toHaveBeenCalledWith('/field-context-providers/1', { name: 'New name' });
+    expect(result.name).toBe('New name');
+  });
+
+  it('createFieldApiLookupProvider posts to /field-api-lookup-providers (TC-3)', async () => {
+    mockPost.mockResolvedValue({ data: { data: apiLookupProvider } });
+
+    const result = await createFieldApiLookupProvider({
+      providerCode: 'PRODUCT_CATALOG',
+      name: 'Product catalog',
+      endpointUrl: 'https://internal.example.com/catalog',
+      responseValueKey: 'id',
+      responseLabelKey: 'name',
+    });
+
+    expect(mockPost).toHaveBeenCalledWith(
+      '/field-api-lookup-providers',
+      expect.objectContaining({ providerCode: 'PRODUCT_CATALOG' }),
+    );
+    expect(result).toEqual(apiLookupProvider);
+  });
+
+  it('createFieldApiLookupProvider maps a duplicate-code conflict into an ApiError (TC-4)', async () => {
+    mockPost.mockRejectedValue({
+      isAxiosError: true,
+      response: {
+        status: 409,
+        data: {
+          error: { code: 'FIELD_API_LOOKUP_PROVIDER_CODE_EXISTS', message: 'Already exists.' },
+        },
+      },
+    });
+
+    const error = await createFieldApiLookupProvider({
+      providerCode: 'PRODUCT_CATALOG',
+      name: 'Product catalog',
+      endpointUrl: 'https://internal.example.com/catalog',
+      responseValueKey: 'id',
+      responseLabelKey: 'name',
+    }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).code).toBe('FIELD_API_LOOKUP_PROVIDER_CODE_EXISTS');
+  });
+
+  it('updateFieldApiLookupProvider patches /field-api-lookup-providers/:id (TC-3)', async () => {
+    mockPatch.mockResolvedValue({ data: { data: { ...apiLookupProvider, name: 'New name' } } });
+
+    const result = await updateFieldApiLookupProvider(1, { name: 'New name' });
+
+    expect(mockPatch).toHaveBeenCalledWith('/field-api-lookup-providers/1', { name: 'New name' });
+    expect(result.name).toBe('New name');
   });
 });

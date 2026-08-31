@@ -10,11 +10,39 @@
  */
 import {
   REWARD_KINDS,
+  createRewardRequestSchema,
   createRewardVersionRequestSchema,
   isRewardVersionValue,
+  rewardListItemSchema,
+  rewardSchema,
   rewardVersionValueSchema,
 } from './reward.schema';
 import { rewardVersionSchema, updateRewardVersionRequestSchema } from './version.schema';
+
+/** One valid `GET /rewards` row — every field `rewardListItemSchema` requires. */
+function validRewardListRow() {
+  return {
+    id: 1,
+    systemCode: 'CASHBACK_STANDARD',
+    name: 'Standard cashback',
+    description: null,
+    rewardType: 'monetary',
+    deliveryMode: 'realtime' as const,
+    connectorType: 'internal_api',
+    maintenanceWindowEnabled: false,
+    maintenanceSchedule: {},
+    retryEnabled: true,
+    retryConfig: {},
+    merchantId: null,
+    categoryId: 1,
+    categoryName: 'Uncategorized',
+    subCategoryId: null,
+    subCategoryName: null,
+    status: 'active' as const,
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z',
+  };
+}
 
 function validRewardVersionResponse() {
   return {
@@ -281,5 +309,66 @@ describe('rewardVersionSchema — the response contract the SPA validates', () =
         rewardKind: 'GIFT_CARD',
       }).success,
     ).toBe(false);
+  });
+});
+
+/**
+ * T-158 — a `super_admin`'s `GET /rewards` (unscoped: every `reward_systems` row, not just the
+ * caller's assigned ones) rendered the SPA's generic `UNKNOWN_ERROR_MESSAGE` instead of the list,
+ * root-caused directly against a real local Postgres: 16 rows carry `connector_type = 'internal'`
+ * — a pre-rename value the current `REWARD_CONNECTOR_TYPES` enum no longer includes, left behind
+ * by e2e fixtures that write directly to `reward_config.reward_systems` and bypass `POST
+ * /rewards`'s own validation. `rewardListItemSchema`/`rewardSchema` used the same strict enum
+ * (`rewardConnectorTypeSchema`) for reads as for writes, so `.safeParse` failed on the *whole*
+ * array the moment any one row carried it — a `country_admin` whose one visible reward happened
+ * to carry a valid value never saw the failure at all, which is exactly why this shipped
+ * unnoticed. These cases pin the read/write split the fix introduces: reads tolerate a legacy
+ * value (this is the regression proof — red on `rewardConnectorTypeSchema`, green on
+ * `rewardConnectorTypeReadSchema`), writes still reject one, same as before. */
+describe('reward connectorType — read is lenient, write stays a closed enum (T-158)', () => {
+  it('rewardListItemSchema accepts a legacy connectorType a POST would never have accepted', () => {
+    const row = { ...validRewardListRow(), connectorType: 'internal' };
+    expect(rewardListItemSchema.safeParse(row).success).toBe(true);
+  });
+
+  it('rewardSchema (detail) accepts the same legacy value', () => {
+    const detail = {
+      ...validRewardListRow(),
+      connectorConfigPreview: null,
+      connectorType: 'internal',
+    };
+    expect(rewardSchema.safeParse(detail).success).toBe(true);
+  });
+
+  it('a whole list still fails closed on a genuinely malformed row — this is not "accept anything"', () => {
+    // An empty string carries no information at all; the read schema still bounds shape/length
+    // (`rewardConnectorTypeReadSchema`'s own `min(1).max(20)`), it just no longer requires
+    // membership in the closed enum.
+    const row = { ...validRewardListRow(), connectorType: '' };
+    expect(rewardListItemSchema.safeParse(row).success).toBe(false);
+  });
+
+  it('createRewardRequestSchema (write) still rejects the same legacy value — TC regression guard', () => {
+    const result = createRewardRequestSchema.safeParse({
+      systemCode: 'CASHBACK_STANDARD',
+      name: 'Standard cashback',
+      rewardType: 'monetary',
+      connectorType: 'internal',
+      categoryId: 1,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('createRewardRequestSchema (write) still accepts every current enum value', () => {
+    for (const connectorType of ['internal_api', 'file_export', 'webhook', 'manual'] as const) {
+      const result = createRewardRequestSchema.safeParse({
+        systemCode: 'CASHBACK_STANDARD',
+        name: 'Standard cashback',
+        rewardType: 'monetary',
+        connectorType,
+        categoryId: 1,
+      });
+      expect(result.success).toBe(true);
+    }
   });
 });
