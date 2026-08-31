@@ -66,6 +66,38 @@ const PROMO_COMPONENT_ONLY: RewardOption = {
   promoCodeBindLevels: ['component'],
 };
 
+/** A `FIXED_AMOUNT` reward whose author left no amount — the Maker supplies it at attach time. */
+const CASHBACK_UNSET_REWARD: RewardOption = {
+  rewardPolicyId: 44,
+  policyCode: 'POL_CASH_UNSET',
+  policyName: 'Signup cashback',
+  rewardId: 4,
+  rewardName: 'Cashback',
+  rewardType: 'monetary',
+  rewardVersionId: 401,
+  unitType: 'currency',
+  unitCode: null,
+  amount: null,
+  rewardKind: 'FIXED_AMOUNT',
+  promoCodeBindLevels: null,
+};
+
+/** A `POINTS` reward left unset the same way. */
+const POINTS_UNSET_REWARD: RewardOption = {
+  rewardPolicyId: 55,
+  policyCode: 'POL_POINTS_UNSET',
+  policyName: 'Loyalty stripes',
+  rewardId: 5,
+  rewardName: 'Stripe points',
+  rewardType: 'points',
+  rewardVersionId: 501,
+  unitType: 'points',
+  unitCode: null,
+  amount: null,
+  rewardKind: 'POINTS',
+  promoCodeBindLevels: null,
+};
+
 const JOURNEY: Journey = {
   campaignId: 1,
   campaignRewards: [],
@@ -199,7 +231,7 @@ describe('RewardsStep · T-127 Promo Code', () => {
     await within(slot).findByTestId('promo-code-config-picker');
     await user.click(within(slot).getByRole('button', { name: /attach/i }));
 
-    expect(onAttach).toHaveBeenCalledWith('campaign', null, 22, null);
+    expect(onAttach).toHaveBeenCalledWith('campaign', null, 22, null, null, null);
   });
 
   it('passes the maker’s pick through to the attach call once the service exists', async () => {
@@ -216,7 +248,7 @@ describe('RewardsStep · T-127 Promo Code', () => {
     await user.click(screen.getByRole('option', { name: 'Raya 2026 codes' }));
     await user.click(within(slot).getByRole('button', { name: /attach/i }));
 
-    expect(onAttach).toHaveBeenCalledWith('component', 71, 22, 'RAYA_2026');
+    expect(onAttach).toHaveBeenCalledWith('component', 71, 22, 'RAYA_2026', null, null);
   });
 
   it('TC-6: a non-PROMO_CODE reward shows no promo UI and attaches exactly as before', async () => {
@@ -230,7 +262,7 @@ describe('RewardsStep · T-127 Promo Code', () => {
     expect(mockGet).not.toHaveBeenCalled();
 
     await user.click(within(slot).getByRole('button', { name: /attach/i }));
-    expect(onAttach).toHaveBeenCalledWith('campaign', null, 11, null);
+    expect(onAttach).toHaveBeenCalledWith('campaign', null, 11, null, null, null);
   });
 
   it('does not offer a PROMO_CODE reward at a level its bindLevels excludes', async () => {
@@ -262,7 +294,82 @@ describe('RewardsStep · T-127 Promo Code', () => {
     await chooseReward(user, slot, /standard cashback/i);
     await user.click(within(slot).getByRole('button', { name: /attach/i }));
 
-    expect(onAttach).toHaveBeenCalledWith('campaign', null, 11, null);
+    expect(onAttach).toHaveBeenCalledWith('campaign', null, 11, null, null, null);
+  });
+});
+
+/**
+ * Cashback/points — the `FIXED_AMOUNT`/`POINTS` siblings of T-127's promo code flow above. A
+ * reward whose author left no amount at creation time exposes an input here instead of the
+ * promo-code picker, gated the identical way: the Kind decides, never the level, and the Attach
+ * button stays disabled until the value is supplied (unlike promo code, there is no legitimate
+ * reason to attach one of these with the value permanently unset).
+ */
+describe('RewardsStep · cashback and points left unset at creation time', () => {
+  it('reveals a cashback amount + currency input for a FIXED_AMOUNT reward with no amount', async () => {
+    const user = userEvent.setup();
+    const { onAttach } = renderStep([CASHBACK_UNSET_REWARD]);
+    const slot = campaignSlot();
+
+    await chooseReward(user, slot, /signup cashback/i);
+
+    expect(within(slot).getByLabelText(/cashback amount/i)).toBeInTheDocument();
+    // Nothing supplied yet — the button must not let an unset amount through.
+    expect(within(slot).getByRole('button', { name: /attach/i })).toBeDisabled();
+
+    await user.type(within(slot).getByLabelText(/cashback amount/i), '25.50');
+    await user.type(within(slot).getByLabelText(/^currency/i), 'myr');
+    expect(within(slot).getByRole('button', { name: /attach/i })).toBeEnabled();
+
+    await user.click(within(slot).getByRole('button', { name: /attach/i }));
+    expect(onAttach).toHaveBeenCalledWith(
+      'campaign',
+      null,
+      44,
+      null,
+      { amount: '25.50', currency: 'MYR' },
+      null,
+    );
+  });
+
+  it('reveals a points input for a POINTS reward with no amount', async () => {
+    const user = userEvent.setup();
+    const { onAttach } = renderStep([POINTS_UNSET_REWARD]);
+    const slot = campaignSlot();
+
+    await chooseReward(user, slot, /loyalty stripes/i);
+
+    expect(within(slot).getByRole('button', { name: /attach/i })).toBeDisabled();
+    await user.type(within(slot).getByLabelText('Points'), '250');
+    expect(within(slot).getByRole('button', { name: /attach/i })).toBeEnabled();
+
+    await user.click(within(slot).getByRole('button', { name: /attach/i }));
+    expect(onAttach).toHaveBeenCalledWith('campaign', null, 55, null, null, 250);
+  });
+
+  it('a reward that already has an amount shows no input at all — nothing left for the Maker to set', () => {
+    renderStep([CASH_REWARD]);
+    const slot = campaignSlot();
+
+    expect(within(slot).queryByLabelText(/cashback amount/i)).not.toBeInTheDocument();
+  });
+
+  it('clears a cashback pick when the maker switches to a different reward in the same slot', async () => {
+    const user = userEvent.setup();
+    const { onAttach } = renderStep([CASHBACK_UNSET_REWARD, CASH_REWARD]);
+    const slot = campaignSlot();
+
+    await chooseReward(user, slot, /signup cashback/i);
+    await user.type(within(slot).getByLabelText(/cashback amount/i), '25.50');
+    await user.type(within(slot).getByLabelText(/^currency/i), 'MYR');
+
+    // Switch to the already-priced reward: the cashback input must disappear, and the attach
+    // call must carry no leftover pick.
+    await chooseReward(user, slot, /standard cashback/i);
+    expect(within(slot).queryByLabelText(/cashback amount/i)).not.toBeInTheDocument();
+
+    await user.click(within(slot).getByRole('button', { name: /attach/i }));
+    expect(onAttach).toHaveBeenCalledWith('campaign', null, 11, null, null, null);
   });
 });
 

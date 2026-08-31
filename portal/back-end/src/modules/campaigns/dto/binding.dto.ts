@@ -18,12 +18,15 @@
 import {
   IsIn,
   IsInt,
+  IsNumber,
   IsObject,
   IsOptional,
   IsPositive,
   IsString,
   Length,
+  Matches,
   MaxLength,
+  Min,
   MinLength,
 } from 'class-validator';
 import {
@@ -124,4 +127,30 @@ export class AttachRewardDto {
   @IsString()
   @Length(1, 200)
   promoCodeConfig?: string;
+
+  /**
+   * The Maker's chosen cashback amount, for a `FIXED_AMOUNT` reward whose author left
+   * `value_config` unset at creation time — the same division of labour `promoCodeConfig`
+   * above already documents: whether this is *allowed* at all depends on the reward's live
+   * `reward_kind`, a question no decorator can answer, so `BindingsService` answers it
+   * (`CashbackAmountNotApplicableError`).
+   */
+  @IsOptional()
+  @IsString()
+  @Matches(/^\d{1,14}(\.\d{1,4})?$/, {
+    message: 'cashbackAmount must be a non-negative decimal amount with at most 4 places',
+  })
+  cashbackAmount?: string;
+
+  @IsOptional()
+  @IsString()
+  @Matches(/^[A-Z]{3}$/, { message: 'cashbackCurrency must be a 3-letter ISO-4217 code' })
+  cashbackCurrency?: string;
+
+  /** The Maker's chosen point count, for a `POINTS` reward left unset at creation time. Same
+   * Kind-dependent gating as `cashbackAmount`, via `PointsNotApplicableError`. */
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  points?: number;
 }

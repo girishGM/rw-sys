@@ -73,7 +73,9 @@ import {
 } from '@reward-portal/shared';
 import { AUDIT_ACTION, AUDIT_ENTITY, ROW_ACTIVE, ROW_INACTIVE } from './campaigns.constants';
 import {
+  CashbackAmountNotApplicableError,
   OperatorNotAllowedError,
+  PointsNotApplicableError,
   PromoCodeConfigNotApplicableError,
   RewardAlreadyAttachedError,
   RewardNotAssignedToCountryError,
@@ -491,13 +493,33 @@ export class BindingsService {
       }
 
       // T-127 — everything Kind-dependent, decided from the reward's own live version and never
-      // from anything the client said about it.
+      // from anything the client said about it. Cashback/points follow the identical pattern,
+      // added alongside it rather than generalised into one gate: each is its own single-field
+      // check against its own Kind, and collapsing three call sites that happen to share a shape
+      // into one parameterised method would make a future fourth Kind's gate harder to add
+      // in isolation, not easier.
       await this.assertPromoCodeAttachable(policy, dto, transaction);
+      await this.assertCashbackAttachable(policy, dto, transaction);
+      await this.assertPointsAttachable(policy, dto, transaction);
 
       const id = await this.insertRewardAssignment(campaign, dto, policy.id, transaction);
 
       if (dto.promoCodeConfig !== undefined) {
         await this.writePromoCodeConfig(policy, dto.promoCodeConfig, transaction);
+      }
+      if (dto.cashbackAmount !== undefined) {
+        // Schema-level `.refine()` already guarantees `cashbackCurrency` is present whenever
+        // `cashbackAmount` is (campaign.schema.ts), so the `!` here restates a fact the wire
+        // contract already enforced, not an unchecked assumption.
+        await this.writeCashbackAmount(
+          policy,
+          dto.cashbackAmount,
+          dto.cashbackCurrency!,
+          transaction,
+        );
+      }
+      if (dto.points !== undefined) {
+        await this.writePoints(policy, dto.points, transaction);
       }
 
       await this.audit.record(
@@ -515,6 +537,10 @@ export class BindingsService {
             // Recorded only when it was actually supplied, so the audit trail of the ordinary
             // attach is byte-for-byte what T-037 already wrote (TC-6).
             ...(dto.promoCodeConfig === undefined ? {} : { promoCodeConfig: dto.promoCodeConfig }),
+            ...(dto.cashbackAmount === undefined
+              ? {}
+              : { cashbackAmount: dto.cashbackAmount, cashbackCurrency: dto.cashbackCurrency }),
+            ...(dto.points === undefined ? {} : { points: dto.points }),
           },
         },
         transaction,
@@ -599,6 +625,67 @@ export class BindingsService {
     await policy.update({ config: { ...policy.config, promoCodeConfig } } as never, {
       transaction,
     });
+  }
+
+  /**
+   * The `FIXED_AMOUNT` sibling of {@link assertPromoCodeAttachable} — same reasoning, same
+   * shape: reads the reward's live version, never the request, and rejects `cashbackAmount`
+   * outright on anything that is not `FIXED_AMOUNT` rather than silently dropping it.
+   */
+  private async assertCashbackAttachable(
+    policy: RewardPolicy,
+    dto: AttachRewardDto,
+    transaction: Transaction,
+  ): Promise<void> {
+    if (dto.cashbackAmount === undefined) return;
+    const version =
+      (await this.activeRewardVersionsByReward([policy.rewardSystemId], transaction)).get(
+        policy.rewardSystemId,
+      ) ?? null;
+    const kind: RewardKind | null = version?.rewardKind ?? null;
+    if (kind !== 'FIXED_AMOUNT') {
+      throw new CashbackAmountNotApplicableError(policy.id);
+    }
+  }
+
+  /** The `POINTS` sibling of {@link assertCashbackAttachable}. */
+  private async assertPointsAttachable(
+    policy: RewardPolicy,
+    dto: AttachRewardDto,
+    transaction: Transaction,
+  ): Promise<void> {
+    if (dto.points === undefined) return;
+    const version =
+      (await this.activeRewardVersionsByReward([policy.rewardSystemId], transaction)).get(
+        policy.rewardSystemId,
+      ) ?? null;
+    const kind: RewardKind | null = version?.rewardKind ?? null;
+    if (kind !== 'POINTS') {
+      throw new PointsNotApplicableError(policy.id);
+    }
+  }
+
+  /** Persists the maker's chosen cashback amount/currency into the policy's own `config` JSON —
+   * the `FIXED_AMOUNT` sibling of {@link writePromoCodeConfig}; same merge-not-replace reasoning,
+   * same `readPolicyAmount` read-back (`amount`/`currency` are two of the three keys it reads). */
+  private async writeCashbackAmount(
+    policy: RewardPolicy,
+    amount: string,
+    currency: string,
+    transaction: Transaction,
+  ): Promise<void> {
+    await policy.update({ config: { ...policy.config, amount, currency } } as never, {
+      transaction,
+    });
+  }
+
+  /** The `POINTS` sibling of {@link writeCashbackAmount}. */
+  private async writePoints(
+    policy: RewardPolicy,
+    points: number,
+    transaction: Transaction,
+  ): Promise<void> {
+    await policy.update({ config: { ...policy.config, points } } as never, { transaction });
   }
 
   /** `DELETE /campaigns/:id/rewards/:level/:assignmentId`. Soft, for the same reason rule

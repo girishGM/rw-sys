@@ -550,15 +550,29 @@ export function CampaignWizardPage() {
             rewardOptions={rewardOptionsQuery.data ?? []}
             worstCasePayout={capsQuery.data?.worstCasePayout ?? []}
             disabled={readOnly}
-            onAttach={(level: RewardLevel, refId, rewardPolicyId, promoCodeConfig) => {
-              // T-127 — `promoCodeConfig` is omitted, never sent as `null`: the shared contract
-              // is `.strict()` and the key is optional, so "nothing picked" is an absent key.
+            onAttach={(
+              level: RewardLevel,
+              refId,
+              rewardPolicyId,
+              promoCodeConfig,
+              cashback,
+              points,
+            ) => {
+              // T-127 (and the cashback/points siblings alongside it) — each value is omitted,
+              // never sent as `null`: the shared contract is `.strict()` and every key here is
+              // optional, so "nothing picked" is an absent key, not a `null` one.
               const promoCode = promoCodeConfig === null ? {} : { promoCodeConfig };
+              const cashbackFields =
+                cashback === null
+                  ? {}
+                  : { cashbackAmount: cashback.amount, cashbackCurrency: cashback.currency };
+              const pointsField = points === null ? {} : { points };
+              const extra = { ...promoCode, ...cashbackFields, ...pointsField };
               run(
                 attachReward.mutateAsync(
                   refId === null
-                    ? { level, rewardPolicyId, ...promoCode }
-                    : { level, refId, rewardPolicyId, ...promoCode },
+                    ? { level, rewardPolicyId, ...extra }
+                    : { level, refId, rewardPolicyId, ...extra },
                 ),
               );
             }}

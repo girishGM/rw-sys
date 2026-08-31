@@ -65,6 +65,10 @@ export const CAMPAIGN_ERROR_CODE = Object.freeze({
   REWARD_NOT_ATTACHABLE_AT_LEVEL: 'REWARD_NOT_ATTACHABLE_AT_LEVEL',
   /** T-127 — a Promo Code Config sent for a reward whose live version is not `PROMO_CODE`. */
   PROMO_CODE_CONFIG_NOT_APPLICABLE: 'PROMO_CODE_CONFIG_NOT_APPLICABLE',
+  /** A cashback amount/currency sent for a reward whose live version is not `FIXED_AMOUNT`. */
+  CASHBACK_AMOUNT_NOT_APPLICABLE: 'CASHBACK_AMOUNT_NOT_APPLICABLE',
+  /** A points value sent for a reward whose live version is not `POINTS`. */
+  POINTS_NOT_APPLICABLE: 'POINTS_NOT_APPLICABLE',
   /** T-124/T-141 — a `SIBLING_COMPONENTS` field bound to a component that is not strictly
    * earlier, in the same tracker, than the component the binding itself is on. */
   SIBLING_COMPONENT_NOT_EARLIER: 'SIBLING_COMPONENT_NOT_EARLIER',
@@ -290,6 +294,34 @@ export class PromoCodeConfigNotApplicableError extends AppError {
     super(CAMPAIGN_ERROR_CODE.PROMO_CODE_CONFIG_NOT_APPLICABLE, 400, {
       ...options,
       details: [{ field: 'promoCodeConfig', code: `POLICY_${rewardPolicyId}` }],
+      logContext: { ...options.logContext, rewardPolicyId },
+    });
+  }
+}
+
+/**
+ * 400 — a `cashbackAmount`/`cashbackCurrency` was sent for a reward whose live version is not
+ * `FIXED_AMOUNT`. Same rejected-not-ignored reasoning as {@link PromoCodeConfigNotApplicableError}:
+ * the value's only destination is the policy's `config` JSON, so silently accepting it would leave
+ * the maker believing they set an amount that will never be read.
+ */
+export class CashbackAmountNotApplicableError extends AppError {
+  constructor(rewardPolicyId: number, options: AppErrorOptions = {}) {
+    super(CAMPAIGN_ERROR_CODE.CASHBACK_AMOUNT_NOT_APPLICABLE, 400, {
+      ...options,
+      details: [{ field: 'cashbackAmount', code: `POLICY_${rewardPolicyId}` }],
+      logContext: { ...options.logContext, rewardPolicyId },
+    });
+  }
+}
+
+/** 400 — a `points` value was sent for a reward whose live version is not `POINTS`. Same
+ * reasoning as {@link CashbackAmountNotApplicableError}. */
+export class PointsNotApplicableError extends AppError {
+  constructor(rewardPolicyId: number, options: AppErrorOptions = {}) {
+    super(CAMPAIGN_ERROR_CODE.POINTS_NOT_APPLICABLE, 400, {
+      ...options,
+      details: [{ field: 'points', code: `POLICY_${rewardPolicyId}` }],
       logContext: { ...options.logContext, rewardPolicyId },
     });
   }

@@ -751,12 +751,32 @@ export const attachRewardRequestSchema = z
      * checkable today.
      */
     promoCodeConfig: z.string().min(1).max(200).optional(),
+    /**
+     * The Maker's chosen cashback amount + currency, for a `FIXED_AMOUNT` reward whose author
+     * left `value_config` unset at creation time (mirrors `promoCodeConfig`'s own division of
+     * labour — see this schema's own header on `promoCodeConfig` above). `moneySchema` matches
+     * `readPolicyAmount`'s own read-side pattern in `bindings.service.ts`, so a value written
+     * here is read back exactly the same way a reward author's own pre-set amount is.
+     */
+    cashbackAmount: moneySchema.optional(),
+    cashbackCurrency: currencyCodeSchema.optional(),
+    /** The Maker's chosen point count, for a `POINTS` reward left unset at creation time. Not a
+     * decimal string like money — mirrors `pointsValueConfigSchema`'s own shape in
+     * `reward.schema.ts`, which this attach-time value is filling in the same role for. */
+    points: z.number().nonnegative().optional(),
   })
   .strict()
   .refine((value) => (value.level === 'campaign') === (value.refId === undefined), {
     message: 'refId is required for tracker/component level and forbidden at campaign level',
     path: ['refId'],
-  });
+  })
+  .refine(
+    (value) => (value.cashbackAmount === undefined) === (value.cashbackCurrency === undefined),
+    {
+      message: 'cashbackAmount and cashbackCurrency must both be supplied together, or neither',
+      path: ['cashbackCurrency'],
+    },
+  );
 
 export type AttachRewardRequest = z.infer<typeof attachRewardRequestSchema>;
 

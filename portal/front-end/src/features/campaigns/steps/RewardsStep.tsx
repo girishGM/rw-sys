@@ -40,8 +40,16 @@ import { Badge } from '../../../components/Badge';
 import { Button } from '../../../components/Button';
 import { Card, CardBody, CardHeader } from '../../../components/Card';
 import { EmptyState } from '../../../components/EmptyState';
+import { Input } from '../../../components/Input';
 import { Select } from '../../../components/Select';
 import { PromoCodeConfigPicker } from '../PromoCodeConfigPicker';
+
+/** The Maker's chosen cashback amount, for a `FIXED_AMOUNT` reward left unset at creation time —
+ * mirrors `promoCodeConfig`'s own "only ever set for the one Kind that needs it" convention. */
+export interface CashbackAttachValue {
+  readonly amount: string;
+  readonly currency: string;
+}
 
 export interface RewardsStepProps {
   readonly journey: Journey | undefined;
@@ -54,6 +62,10 @@ export interface RewardsStepProps {
     rewardPolicyId: number,
     /** T-127 — only ever non-null for a `PROMO_CODE` reward whose picker offered a choice. */
     promoCodeConfig: string | null,
+    /** Only ever non-null for a `FIXED_AMOUNT` reward left unset at creation time. */
+    cashback: CashbackAttachValue | null,
+    /** Only ever non-null for a `POINTS` reward left unset at creation time. */
+    points: number | null,
   ) => void;
   readonly onDetach: (level: RewardLevel, assignmentId: number) => void;
 }
@@ -211,6 +223,9 @@ function Slot({
 }: SlotProps) {
   const [policyId, setPolicyId] = useState<string | null>(null);
   const [promoCodeConfig, setPromoCodeConfig] = useState<string | null>(null);
+  const [cashbackAmount, setCashbackAmount] = useState('');
+  const [cashbackCurrency, setCashbackCurrency] = useState('');
+  const [points, setPoints] = useState('');
   const available = options.filter(
     (option) =>
       !assignments.some((entry) => entry.rewardPolicyId === option.rewardPolicyId) &&
@@ -218,6 +233,15 @@ function Slot({
   );
   const selected = available.find((option) => String(option.rewardPolicyId) === policyId) ?? null;
   const needsPromoCodeConfig = selected?.rewardKind === 'PROMO_CODE';
+  const needsCashbackAmount = selected?.rewardKind === 'FIXED_AMOUNT' && selected.amount === null;
+  const needsPoints = selected?.rewardKind === 'POINTS' && selected.amount === null;
+
+  function resetPickers() {
+    setPromoCodeConfig(null);
+    setCashbackAmount('');
+    setCashbackCurrency('');
+    setPoints('');
+  }
 
   return (
     <div className="grid gap-3">
@@ -271,14 +295,20 @@ function Slot({
             }))}
             onChange={(next) => {
               setPolicyId(next);
-              // A config picked for one reward means nothing for the next one.
-              setPromoCodeConfig(null);
+              // A pick made for one reward means nothing for the next one.
+              resetPickers();
             }}
           />
           <Button
             type="button"
             variant="secondary"
-            disabled={disabled || policyId === null}
+            disabled={
+              disabled ||
+              policyId === null ||
+              (needsCashbackAmount &&
+                (cashbackAmount.trim() === '' || cashbackCurrency.trim() === '')) ||
+              (needsPoints && points.trim() === '')
+            }
             onClick={() => {
               if (policyId === null) return;
               onAttach(
@@ -286,9 +316,13 @@ function Slot({
                 refId,
                 Number(policyId),
                 needsPromoCodeConfig ? promoCodeConfig : null,
+                needsCashbackAmount
+                  ? { amount: cashbackAmount.trim(), currency: cashbackCurrency.trim() }
+                  : null,
+                needsPoints ? Number(points) : null,
               );
               setPolicyId(null);
-              setPromoCodeConfig(null);
+              resetPickers();
             }}
           >
             <Plus className="size-4" aria-hidden="true" />
@@ -304,6 +338,51 @@ function Slot({
             value={promoCodeConfig}
             onChange={setPromoCodeConfig}
             disabled={disabled}
+          />
+        )}
+
+        {/* FIXED_AMOUNT left unset at reward-creation time — the Maker supplies the amount and
+            currency here, at attach time, mirroring the promo-code picker's own "the Kind
+            decides, never the level" convention. Required, unlike the promo code picker: there
+            is no legitimate reason to attach a reward whose amount will never be set. */}
+        {needsCashbackAmount && (
+          <div className="flex gap-2">
+            <Input
+              label="Cashback amount"
+              className="flex-1"
+              placeholder="e.g. 10.00"
+              value={cashbackAmount}
+              disabled={disabled}
+              onChange={(event) => {
+                setCashbackAmount(event.target.value);
+              }}
+            />
+            <Input
+              label="Currency"
+              className="w-24"
+              placeholder="MYR"
+              maxLength={3}
+              value={cashbackCurrency}
+              disabled={disabled}
+              onChange={(event) => {
+                setCashbackCurrency(event.target.value.toUpperCase());
+              }}
+            />
+          </div>
+        )}
+
+        {/* POINTS left unset at reward-creation time — same convention as cashback above. */}
+        {needsPoints && (
+          <Input
+            label="Points"
+            type="number"
+            min={0}
+            placeholder="e.g. 100"
+            value={points}
+            disabled={disabled}
+            onChange={(event) => {
+              setPoints(event.target.value);
+            }}
           />
         )}
       </div>

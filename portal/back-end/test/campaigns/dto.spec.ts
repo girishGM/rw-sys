@@ -445,5 +445,82 @@ describe('T-037 DTOs', () => {
         }),
       ).not.toEqual([]);
     });
+
+    // Cashback/points — the FIXED_AMOUNT/POINTS siblings of promoCodeConfig above. Same division
+    // of labour: shape here, Kind-dependent *applicability* is `BindingsService`'s question.
+    it('accepts an attachment carrying a cashback amount and currency together', () => {
+      expect(
+        errorsFor(AttachRewardDto, {
+          level: 'campaign',
+          rewardPolicyId: 3,
+          cashbackAmount: '25.50',
+          cashbackCurrency: 'MYR',
+        }),
+      ).toEqual([]);
+    });
+
+    it('rejects a cashback amount with no currency', () => {
+      expect(
+        errorsFor(AttachRewardDto, {
+          level: 'campaign',
+          rewardPolicyId: 3,
+          cashbackAmount: '25.50',
+        }),
+      ).toContain('matchesSharedContract');
+    });
+
+    it('rejects a cashback currency with no amount', () => {
+      expect(
+        errorsFor(AttachRewardDto, {
+          level: 'campaign',
+          rewardPolicyId: 3,
+          cashbackCurrency: 'MYR',
+        }),
+      ).toContain('matchesSharedContract');
+    });
+
+    it('rejects a malformed cashback amount', () => {
+      expect(
+        errorsFor(AttachRewardDto, {
+          level: 'campaign',
+          rewardPolicyId: 3,
+          cashbackAmount: 'not-a-number',
+          cashbackCurrency: 'MYR',
+        }),
+      ).toContain('matches');
+    });
+
+    it('rejects a cashback currency that is not a 3-letter code', () => {
+      expect(
+        errorsFor(AttachRewardDto, {
+          level: 'campaign',
+          rewardPolicyId: 3,
+          cashbackAmount: '25.50',
+          cashbackCurrency: 'myr',
+        }),
+      ).toContain('matches');
+    });
+
+    it('an attachment with no cashback fields is still valid — that is the normal path', () => {
+      expect(errorsFor(AttachRewardDto, { level: 'campaign', rewardPolicyId: 3 })).toEqual([]);
+    });
+
+    it('accepts an attachment carrying a points value', () => {
+      expect(
+        errorsFor(AttachRewardDto, { level: 'campaign', rewardPolicyId: 3, points: 250 }),
+      ).toEqual([]);
+    });
+
+    it('rejects a negative points value', () => {
+      expect(
+        errorsFor(AttachRewardDto, { level: 'campaign', rewardPolicyId: 3, points: -1 }),
+      ).toContain('min');
+    });
+
+    it('rejects a non-number points value', () => {
+      expect(
+        errorsFor(AttachRewardDto, { level: 'campaign', rewardPolicyId: 3, points: '250' }),
+      ).toContain('isNumber');
+    });
   });
 });
