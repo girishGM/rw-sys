@@ -111,6 +111,29 @@ describe('T-PC-041 — cross-tenant isolation, identical probe across REST/gRPC/
     expect(tenantA).not.toBe(tenantB);
   });
 
+  it('REST: DELETE (archive) under tenant B against tenant A’s configId returns 404, never archives it', async () => {
+    const { tenantId: tenantA, configId } = await harness.createBoundConfig({
+      codePrefix: 'XTR4-',
+    });
+    const tenantB = harness.freshTenant();
+
+    const response = await request(harness.app.getHttpServer())
+      .delete(`/api/v1/promo-code-configs/${configId}`)
+      .query({ tenantId: tenantB, actorId: randomUUID() })
+      .set(...authHeader());
+
+    expect(response.status).toBe(404);
+
+    // Tenant A's own row is still ACTIVE — never archived by tenant B's attempt.
+    const stillActive = await request(harness.app.getHttpServer())
+      .get('/api/v1/promo-code-configs')
+      .query({ tenantId: tenantA })
+      .set(...authHeader());
+    const ids = (stillActive.body.configs as Array<{ id: string }>).map((c) => c.id);
+    expect(ids).toContain(configId);
+    expect(tenantA).not.toBe(tenantB);
+  });
+
   // --- gRPC -------------------------------------------------------------------------------------
 
   it('gRPC: GenerateCode under tenant B against tenant A’s bindRefId never resolves tenant A’s binding', async () => {

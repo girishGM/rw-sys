@@ -98,17 +98,12 @@ describe('T-PC-041 — Kafka poison-message / resource-exhaustion sweep (real Re
     // restart, no new harness. A well-formed message right after it must still succeed normally.
     const correlationId = randomUUID();
     const resultMessage = await withOutboxPump(harness.outboxWorker, async () => {
-      await harness.publishGenerateRequested(
-        GENERATE_REQUESTED_TOPIC,
-        correlationId,
-        tenantId,
-        {
-          bindLevel: 'CAMPAIGN',
-          bindRefId,
-          customerId: 'cust-after-poison',
-          merchantId: null,
-        },
-      );
+      await harness.publishGenerateRequested(GENERATE_REQUESTED_TOPIC, correlationId, tenantId, {
+        bindLevel: 'CAMPAIGN',
+        bindRefId,
+        customerId: 'cust-after-poison',
+        merchantId: null,
+      });
       return waitForKafkaMessage(GENERATE_RESULT_TOPIC, 60_000, (key) => key === correlationId);
     });
 
@@ -137,18 +132,13 @@ describe('T-PC-041 — Kafka poison-message / resource-exhaustion sweep (real Re
     }
 
     const resultMessage = await withOutboxPump(harness.outboxWorker, async () => {
-      await harness.publishGenerateRequested(
-        GENERATE_REQUESTED_TOPIC,
-        correlationId,
-        tenantId,
-        {
-          bindLevel: 'CAMPAIGN',
-          bindRefId,
-          customerId: 'cust-large-metadata',
-          merchantId: null,
-          activityContext: { amount: '10.00', currency: 'USD', metadata: largeMetadata },
-        },
-      );
+      await harness.publishGenerateRequested(GENERATE_REQUESTED_TOPIC, correlationId, tenantId, {
+        bindLevel: 'CAMPAIGN',
+        bindRefId,
+        customerId: 'cust-large-metadata',
+        merchantId: null,
+        activityContext: { amount: '10.00', currency: 'USD', metadata: largeMetadata },
+      });
       return waitForKafkaMessage(GENERATE_RESULT_TOPIC, 60_000, (key) => key === correlationId);
     });
 

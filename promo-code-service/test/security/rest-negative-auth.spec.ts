@@ -55,9 +55,12 @@ describe('T-PC-041 — REST negative-authorization sweep, every admin/bind endpo
            )`,
         { replacements: { tenantId } },
       );
-      await sequelize.query('DELETE FROM promo_code.promo_code_config WHERE tenant_id = :tenantId', {
-        replacements: { tenantId },
-      });
+      await sequelize.query(
+        'DELETE FROM promo_code.promo_code_config WHERE tenant_id = :tenantId',
+        {
+          replacements: { tenantId },
+        },
+      );
     }
     await sequelize.close();
     await app.close();
@@ -94,7 +97,9 @@ describe('T-PC-041 — REST negative-authorization sweep, every admin/bind endpo
         rewardUnit: 'USD',
       });
     if (response.status !== 201) {
-      throw new Error(`seedConfig: create failed (${response.status}): ${JSON.stringify(response.body)}`);
+      throw new Error(
+        `seedConfig: create failed (${response.status}): ${JSON.stringify(response.body)}`,
+      );
     }
     return { tenantId, actorId, configId: response.body.id as string };
   }
@@ -120,16 +125,18 @@ describe('T-PC-041 — REST negative-authorization sweep, every admin/bind endpo
       {
         name: 'POST /api/v1/promo-code-configs',
         request: (server) =>
-          request(server).post('/api/v1/promo-code-configs').send({
-            tenantId: seeded.tenantId,
-            actorId: seeded.actorId,
-            name: `t-pc-041 route-sweep ${randomUUID()}`,
-            codeLength: 8,
-            characterSet: 'ALPHANUMERIC',
-            rewardValueType: 'FIXED_AMOUNT',
-            rewardValue: 5,
-            rewardUnit: 'USD',
-          }),
+          request(server)
+            .post('/api/v1/promo-code-configs')
+            .send({
+              tenantId: seeded.tenantId,
+              actorId: seeded.actorId,
+              name: `t-pc-041 route-sweep ${randomUUID()}`,
+              codeLength: 8,
+              characterSet: 'ALPHANUMERIC',
+              rewardValueType: 'FIXED_AMOUNT',
+              rewardValue: 5,
+              rewardUnit: 'USD',
+            }),
       },
       {
         name: 'PATCH /api/v1/promo-code-configs/:id',
@@ -175,9 +182,7 @@ describe('T-PC-041 — REST negative-authorization sweep, every admin/bind endpo
     });
 
     it('TC-2 (adjacent): an empty bearer token returns 401', async () => {
-      const response = await route
-        .request(app.getHttpServer())
-        .set('Authorization', 'Bearer ');
+      const response = await route.request(app.getHttpServer()).set('Authorization', 'Bearer ');
       expect(response.status).toBe(401);
     });
 
