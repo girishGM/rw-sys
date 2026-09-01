@@ -17,8 +17,16 @@ services:
     name: test-app-tracking-service
     runtime: docker
     plan: free
+    rootDir: test-app
     dockerfilePath: tracking-service/Dockerfile
-    dockerContext: tracking-service
+    # Deliberately the workspace root (`test-app/`, i.e. `rootDir` itself), not the
+    # `tracking-service/` subdirectory — this is an npm-workspaces project, so the lockfile
+    # (`package-lock.json`) and the sibling `frontend/package.json` the Dockerfile also needs to
+    # resolve the workspace graph only exist at that level. Confirmed by actually building this
+    # image both ways locally: a narrower context fails at `npm ci` with
+    # "/package-lock.json" not found; this one builds and runs cleanly (real login against
+    # portal/back-end verified). See tracking-service/Dockerfile's own header comment.
+    dockerContext: .
     healthCheckPath: /health
     envVars:
       - key: PORT
@@ -44,8 +52,10 @@ services:
     name: test-app-frontend
     runtime: docker
     plan: free
+    rootDir: test-app
     dockerfilePath: frontend/Dockerfile.render
-    dockerContext: frontend
+    # Same reasoning as test-app-tracking-service above — the workspace root, not `frontend/`.
+    dockerContext: .
     healthCheckPath: /nginx-health
     envVars:
       # Bare hostname only — no https://, no trailing slash (nginx.conf.template builds the
