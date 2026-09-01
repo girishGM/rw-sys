@@ -487,4 +487,191 @@ describe('T-PC-021 — PromoCodeGenerationService', () => {
     const row = await fetchPromoCodeRow(success.promoCodeId);
     expect(row?.expires_at).toBeNull();
   });
+
+  // ---------------------------------------------------------------------------------------------
+  // T-PC-054 — `tenantId`/`bindRefId`/`merchantId` accept a plain, bounded string (`min(1).max(64)`
+  // in `generation-request.types.ts`), not only a UUID. That schema is the one shared validator
+  // both the gRPC `GenerateCode` RPC (T-PC-031) and the Kafka `generate.requested` consumer
+  // (T-PC-030) funnel through before calling `generateCode` (this service's own R10) — exercising
+  // it directly, with `transport` set to each real value in turn, is this task's own way of
+  // proving the validator is genuinely shared without editing either transport's owned test files.
+  //
+  // `bindConfigDirect` below deliberately bypasses `CampaignBindingService.bind()` (its own
+  // `create-campaign-promo-config.dto.ts` is still UUID-only for `tenantId`/`bindRefId`/`boundBy`
+  // pending the separate, in-flight T-PC-053 task, owned by a different agent) and inserts through
+  // `CampaignBindingRepository.create` instead, the same "call the repository directly, skip the
+  // service's own DTO" pattern `seedActiveConfig` above already uses for `promoCodeConfigRepository`.
+  // ---------------------------------------------------------------------------------------------
+  function freshPortalTenant(id = `portal-tenant-${randomUUID()}`): string {
+    tenantIds.push(id);
+    return id;
+  }
+
+  async function bindConfigDirect(
+    tenantId: string,
+    promoCodeConfigId: string,
+    bindRefId: string,
+    bindLevel: 'CAMPAIGN' | 'TRACKER' | 'COMPONENT' = 'CAMPAIGN',
+  ): Promise<void> {
+    await bindingRepository.create(tenantId, {
+      promoCodeConfigId,
+      bindLevel,
+      bindRefId,
+      boundBy: randomUUID(),
+    });
+  }
+
+  // TC-1
+  it('TC-1: generateCode() called directly with a plain-string tenantId/bindRefId passes validation and proceeds to business logic', async () => {
+    const tenantId = freshPortalTenant();
+    const configId = await seedActiveConfig(tenantId);
+    const bindRefId = `campaign-${randomUUID()}`;
+    await bindConfigDirect(tenantId, configId, bindRefId);
+
+    const result = await service.generateCode(
+      generateInput({ tenantId, bindRefId, correlationId: randomUUID() }),
+    );
+
+    expect(result.status).toBe('SUCCESS');
+    const success = result as Extract<GenerationResult, { status: 'SUCCESS' }>;
+    const row = await fetchPromoCodeRow(success.promoCodeId);
+    expect(row?.tenant_id).toBe(tenantId);
+  });
+
+  // TC-2: the value the real gRPC adapter (T-PC-031) sets on every request it builds.
+  it("TC-2: the same plain-string ids with transport 'GRPC' pass validation identically", async () => {
+    const tenantId = freshPortalTenant();
+    const configId = await seedActiveConfig(tenantId);
+    const bindRefId = `campaign-${randomUUID()}`;
+    await bindConfigDirect(tenantId, configId, bindRefId);
+
+    const result = await service.generateCode(
+      generateInput({ tenantId, bindRefId, transport: 'GRPC', correlationId: randomUUID() }),
+    );
+
+    expect(result.status).toBe('SUCCESS');
+  });
+
+  // TC-3: the value the real Kafka consumer (T-PC-030) sets — proves the same validator, not a
+  // transport-specific copy of it (R10), and that the KAFKA-only outbox side effect still fires.
+  it("TC-3: the same plain-string ids with transport 'KAFKA' pass validation identically", async () => {
+    const tenantId = freshPortalTenant();
+    const configId = await seedActiveConfig(tenantId);
+    const bindRefId = `campaign-${randomUUID()}`;
+    await bindConfigDirect(tenantId, configId, bindRefId);
+
+    const result = await service.generateCode(
+      generateInput({ tenantId, bindRefId, transport: 'KAFKA', correlationId: randomUUID() }),
+    );
+
+    expect(result.status).toBe('SUCCESS');
+    const success = result as Extract<GenerationResult, { status: 'SUCCESS' }>;
+    const outboxRows = await fetchOutboxRows(success.promoCodeId);
+    expect(outboxRows).toHaveLength(1);
+  });
+
+  // TC-4: this task changes format only, never optionality — `merchantId` omitted must still work.
+  it('TC-4: merchantId omitted (still optional) is unaffected by this change', async () => {
+    const tenantId = freshPortalTenant();
+    const configId = await seedActiveConfig(tenantId);
+    const bindRefId = `campaign-${randomUUID()}`;
+    await bindConfigDirect(tenantId, configId, bindRefId);
+    const input = generateInput({ tenantId, bindRefId, correlationId: randomUUID() });
+    delete (input as Record<string, unknown>).merchantId;
+
+    const result = await service.generateCode(input);
+
+    expect(result.status).toBe('SUCCESS');
+  });
+
+  // Adjacent to TC-4: merchantId also accepts a plain, bounded string, the third of the three
+  // fields this task widens, and its value round-trips into the row unchanged.
+  it('T-PC-054 adjacent: merchantId accepts a plain, bounded string, not only a UUID or null', async () => {
+    const tenantId = freshPortalTenant();
+    const configId = await seedActiveConfig(tenantId);
+    const bindRefId = `campaign-${randomUUID()}`;
+    await bindConfigDirect(tenantId, configId, bindRefId);
+
+    const result = await service.generateCode(
+      generateInput({
+        tenantId,
+        bindRefId,
+        merchantId: 'merchant-42',
+        correlationId: randomUUID(),
+      }),
+    );
+
+    expect(result.status).toBe('SUCCESS');
+    const success = result as Extract<GenerationResult, { status: 'SUCCESS' }>;
+    const row = await fetchPromoCodeRow(success.promoCodeId);
+    expect(row?.merchant_id).toBe('merchant-42');
+  });
+
+  // TC-5
+  it('TC-5: an idempotent retry with the same correlationId and a plain-string tenantId returns the original result, not a second row', async () => {
+    const tenantId = freshPortalTenant();
+    const configId = await seedActiveConfig(tenantId);
+    const bindRefId = `campaign-${randomUUID()}`;
+    await bindConfigDirect(tenantId, configId, bindRefId);
+    const correlationId = randomUUID();
+
+    const first = await service.generateCode(generateInput({ tenantId, bindRefId, correlationId }));
+    const second = await service.generateCode(
+      generateInput({ tenantId, bindRefId, correlationId }),
+    );
+
+    expect(first.status).toBe('SUCCESS');
+    expect(second.status).toBe('SUCCESS');
+    const firstSuccess = first as Extract<GenerationResult, { status: 'SUCCESS' }>;
+    const secondSuccess = second as Extract<GenerationResult, { status: 'SUCCESS' }>;
+    expect(firstSuccess.promoCodeId).toBe(secondSuccess.promoCodeId);
+    expect(firstSuccess.code).toBe(secondSuccess.code);
+
+    const rows = await sequelize.query(
+      'SELECT id FROM promo_code.promo_code WHERE tenant_id = :tenantId AND correlation_id = :correlationId',
+      { replacements: { tenantId, correlationId }, type: QueryTypes.SELECT },
+    );
+    expect(rows).toHaveLength(1);
+  });
+
+  // TC-6: regression coverage recorded in prose, same convention the T-PC-046 comment above this
+  // block already established for this file — reverting this task's `.min(1).max(64)` widening on
+  // `tenantId`/`bindRefId` in `generation-request.types.ts` back to `.uuid()` makes TC-1 above fail
+  // with `Invalid generation request: tenantId: tenantId must be a valid UUID`, proving TC-1
+  // genuinely exercises the fix rather than passing for an unrelated reason.
+
+  // Boundary, matching T-PC-052's `varchar(64)` column width exactly (same "validate at the
+  // boundary what the DB will actually accept" discipline T-PC-046's own customerId bound above
+  // already established for this file): 64 characters succeeds, 65 is rejected as INVALID_REQUEST
+  // before any DB work, never a raw pg 22001 "value too long" error.
+  it('T-PC-054 boundary: a tenantId of exactly 64 characters (the DB column bound) still succeeds', async () => {
+    const tenantId = freshPortalTenant('a'.repeat(64));
+    const configId = await seedActiveConfig(tenantId);
+    const bindRefId = 'b'.repeat(64);
+    await bindConfigDirect(tenantId, configId, bindRefId);
+
+    const result = await service.generateCode(
+      generateInput({ tenantId, bindRefId, correlationId: randomUUID() }),
+    );
+
+    expect(result.status).toBe('SUCCESS');
+  });
+
+  it('T-PC-054 boundary: a tenantId over 64 characters returns INVALID_REQUEST, never reaches the DB', async () => {
+    const tenantId = 'a'.repeat(65);
+    const correlationId = randomUUID();
+
+    const result = await service.generateCode(
+      generateInput({ tenantId, bindRefId: randomUUID(), correlationId }),
+    );
+
+    expect(result.status).toBe('FAILED');
+    expect(result.errorCode).toBe('INVALID_REQUEST');
+
+    const rows = await sequelize.query(
+      'SELECT id FROM promo_code.promo_code WHERE tenant_id = :tenantId AND correlation_id = :correlationId',
+      { replacements: { tenantId, correlationId }, type: QueryTypes.SELECT },
+    );
+    expect(rows).toHaveLength(0);
+  });
 });

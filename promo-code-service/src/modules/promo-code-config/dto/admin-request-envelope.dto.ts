@@ -5,7 +5,9 @@
  * service... every write is still re-validated against the resource it targets"), so the
  * verified internal caller (the portal backend) supplies both explicitly, and
  * `PromoCodeConfigRepository` (T-PC-010) is what actually enforces the `tenantId` boundary —
- * this DTO only checks *shape* (present, well-formed UUID), never trust.
+ * this DTO only checks *shape* (present, non-empty, <= 64 characters — matching the
+ * `varchar(64)` column T-PC-052 widened these portal-sourced ids to; T-PC-053 relaxed this from
+ * a UUID requirement, since a real portal id is not UUID-shaped), never trust.
  *
  * `actorId` becomes `created_by`/`updated_by` on the row and the audit trail's `changed_by`
  * (`01-DATABASE.md` §5) — required on every write, per implementation note 4's "every write is
@@ -24,8 +26,10 @@ import { z } from 'zod';
 import { PromoCodeConfigValidationError } from '../promo-code-config.errors';
 
 const adminRequestEnvelopeSchema = z.object({
-  tenantId: z.string().uuid('tenantId must be a valid UUID'),
-  actorId: z.string().uuid('actorId must be a valid UUID'),
+  // T-PC-053: portal-sourced ids (T-PC-052 widened the DB columns to varchar(64)); validate at
+  // the same boundary the DB will actually accept, not UUID-shaped.
+  tenantId: z.string().min(1, 'tenantId is required').max(64, 'tenantId must be <= 64 characters'),
+  actorId: z.string().min(1, 'actorId is required').max(64, 'actorId must be <= 64 characters'),
 });
 
 export interface AdminRequestEnvelope {
