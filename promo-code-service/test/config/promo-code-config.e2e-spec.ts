@@ -96,7 +96,7 @@ describe('T-PC-011 — PromoCodeConfig admin lifecycle (e2e)', () => {
       .query({ tenantId })
       .set(...authHeader());
     expect(listAfterCreate.status).toBe(200);
-    expect(listAfterCreate.body.configs.map((c: { id: string }) => c.id)).toContain(configId);
+    expect((listAfterCreate.body as { id: string }[]).map((c) => c.id)).toContain(configId);
 
     const archiveResponse = await request(app.getHttpServer())
       .delete(`/api/v1/promo-code-configs/${configId}`)
@@ -110,6 +110,6 @@ describe('T-PC-011 — PromoCodeConfig admin lifecycle (e2e)', () => {
       .query({ tenantId })
       .set(...authHeader());
     expect(listAfterArchive.status).toBe(200);
-    expect(listAfterArchive.body.configs.map((c: { id: string }) => c.id)).not.toContain(configId);
+    expect((listAfterArchive.body as { id: string }[]).map((c) => c.id)).not.toContain(configId);
   });
 });

@@ -28,6 +28,7 @@ import type { FindOptions, Model, ModelStatic } from 'sequelize';
 import type { Sequelize } from 'sequelize-typescript';
 import type { ScopedRepository } from '@/common/scope/scoped.repository';
 import type { CampaignAuditService } from '@/modules/campaigns/campaign-audit.service';
+import type { PromoCodeServiceClient } from '@/modules/promo-code-integration/promo-code-service.client';
 import {
   RuleCategory,
   RuleMaster,
@@ -95,6 +96,13 @@ function build({
     {} as unknown as Sequelize,
     scoped as unknown as ScopedRepository,
     {} as unknown as CampaignAuditService,
+    // T-166 — no path exercised in this file supplies a `promoCodeConfig`, so none of them may
+    // reach promo-code-service. A double that throws states that as an assertion rather than
+    // leaving it to be noticed: if an attach here ever starts binding, this file fails loudly.
+    {
+      bind: (): Promise<never> =>
+        Promise.reject(new Error('T-166: no promo-code-service bind is expected on this path')),
+    } as unknown as PromoCodeServiceClient,
   );
   return { service };
 }

@@ -1,0 +1,94 @@
+# Render Blueprint for promo-code-service — a DEMO/first-deploy topology, not a guaranteed
+# one-click production deploy (same caveat `portal/render.yaml`'s own header gives: Render's
+# Blueprint field names shift between versions and this was written without a live Render
+# account to verify against — if "New + Blueprint" rejects a field here, Render's own error
+# names exactly which one; fix or delete that line and re-sync, everything else is unaffected).
+#
+# This service reuses the SAME Postgres instance `portal/render.yaml` already provisions
+# (`reward-portal-db`) — a new schema (`promo_code`) and a new least-privilege role
+# (`promo_code_app`, created by this service's own T-PC-002 migration) on that one database, not
+# a second database (ARCHITECTURE.md §4/§5, T-PC-050's own Scope). There is deliberately no
+# `databases:` block below (implementation note 6) — this file never provisions Postgres itself.
+#
+# Render's `fromDatabase:` field-linking (which `portal/render.yaml` uses for its own
+# `reward-portal-db` env vars) only resolves references WITHIN the same Blueprint file. This is a
+# separate Blueprint (its own file, its own service group) pointed at that already-existing
+# database, so DB_HOST/DB_PORT/DB_NAME below are plain `sync: false` manual-entry vars instead —
+# the exact same pattern `portal/render.yaml` already uses for `DB_APP_PASSWORD`/`JWT_PRIVATE_KEY`:
+# a real value here would be a placeholder that looks like it works, which is exactly what
+# AGENT-PROTOCOL.md R4 forbids. A human copies these three from the portal's own Render Postgres
+# instance dashboard once, since it is the same physical database.
+#
+# Two roles, two credential groups, same split `portal/render.yaml` documents and T-PC-002's own
+# migration already creates correctly — this file must not collapse them into one:
+#   DB_APP_*        `promo_code_app` (least-privilege, scoped to the `promo_code` schema only,
+#                   AGENT-PROTOCOL.md R1) — what the running `runtime` container actually uses.
+#   DB_MIGRATION_*  the privileged role used ONLY by the `migrator` build target's one-off
+#                   `db:migrate` run (Dockerfile) — never read by the running service, and
+#                   deliberately not wired to any Render-managed service below (this Blueprint
+#                   declares no such job; running the migration against a live Render database
+#                   is a manual step, per this task's own Scope "Out" and `project-plan` T-167's
+#                   Render runbook, not something this file executes on its own).
+#
+# `KAFKA_BROKERS` similarly cannot be given a real value here: this Blueprint stands up no Kafka
+# cluster on Render (out of this task's scope — see Deviations in T-PC-050's completion report),
+# so it is `sync: false` too, to be pointed at a real reachable broker list once one exists,
+# rather than shipping a `localhost:9092` value that would only work against this project's own
+# local-dev Redpanda compose file.
+#
+# `INTERNAL_SERVICE_TOKEN` (src/modules/promo-code-config/internal-service-token-startup-check
+# .provider.ts, T-PC-011) is the shared bearer secret the portal's own
+# `PROMO_CODE_SERVICE_BASE_URL` REST client authenticates with (`04-API-CONTRACT.md` header) —
+# generating the actual value and setting it identically on both this service and the portal's
+# own API service (`portal/render.yaml`) is a manual step for whoever runs both Blueprints, not
+# something either file can express on its own.
+
+services:
+  - type: web
+    name: promo-code-service
+    runtime: docker
+    plan: free
+    dockerfilePath: Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "3010"
+
+      # --- Database: the `promo_code` schema on the portal's EXISTING `reward-portal-db`
+      # Render Postgres instance — copy these three from that instance's own dashboard.
+      - key: DB_HOST
+        sync: false
+      - key: DB_PORT
+        sync: false
+      - key: DB_NAME
+        sync: false
+      - key: DB_SSL
+        value: "true"
+
+      # DB_APP_* — the least-privilege `promo_code_app` role T-PC-002's migration creates.
+      - key: DB_APP_USERNAME
+        value: promo_code_app
+      - key: DB_APP_PASSWORD
+        sync: false
+
+      # DB_MIGRATION_* — used only by the `migrator` Docker build target's one-off CLI run
+      # (never by this running service). Render's own auto-created database user for
+      # `reward-portal-db` (`portal/render.yaml`'s own `DB_MIGRATION_*` comment explains the
+      # same "known simplification vs. the project's real security design" caveat).
+      - key: DB_MIGRATION_USERNAME
+        sync: false
+      - key: DB_MIGRATION_PASSWORD
+        sync: false
+
+      # --- Kafka: no broker is provisioned by this Blueprint (see header) — point this at a
+      # real, reachable cluster once one exists.
+      - key: KAFKA_BROKERS
+        sync: false
+
+      # --- Shared internal-service bearer secret with the portal's own API service — generate
+      # once, set identically on both sides via each service's own Render dashboard.
+      - key: INTERNAL_SERVICE_TOKEN
+        sync: false

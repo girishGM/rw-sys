@@ -14,37 +14,37 @@
  * calls `runOnce()` for this row until this test chooses to, so the row is guaranteed `PENDING`
  * at that point as far as this file's own code is concerned.
  *
- * ### A note on blast radius (flagged, not silently worked around — and confirmed, not just a
- * theoretical risk)
+ * ### A note on blast radius — closed by T-PC-045, not just documented
  *
- * `OutboxRepository.findPendingBatch()` (T-PC-022, outside this task's file scope) is a
- * deliberately global, unscoped query by that task's own design ("no `JOIN`, no extra predicate
- * here... risk losing that plan") — it fetches *any* `PENDING` row in the whole
- * `promo_code_outbox` table, not just rows a given test created. That means **any** other
- * concurrently-running process that calls `runOnce()` against the same real Postgres database —
- * including `kafka-round-trip.e2e-spec.ts`/`cross-transport-parity.e2e-spec.ts`'s own
- * `withOutboxPump` helper, running in a different Jest worker process under a full parallel
- * `npm test` — can and (confirmed during this task's own verification pass, not just
- * hypothesised) *does* occasionally publish this test's row before this test's own `pollUntil`
- * observes it as `PENDING`, since nothing scopes that query to "rows this test created." This is
- * the one race this suite cannot fully close from `test/e2e/**` alone — the fix belongs in
- * `OutboxRepository` (add tenant/row scoping, or a claim/lock step), which is `agent-promo-generation`'s
- * owned file, not this agent's (R8). Recorded here and in this task's completion report rather
- * than silently hidden, per `AGENT-PROTOCOL.md` §3 ("flag the flaw... let the architect decide").
+ * `OutboxRepository.findPendingBatch()` (T-PC-022) was, until T-PC-045, a deliberately global,
+ * unscoped query ("no `JOIN`, no extra predicate here... risk losing that plan") — it fetched
+ * *any* `PENDING` row in the whole `promo_code_outbox` table, not just rows a given test created.
+ * That meant **any** other concurrently-running process calling `runOnce()` against the same real
+ * Postgres database — including `kafka-round-trip.e2e-spec.ts`/`cross-transport-parity.e2e-spec.ts`'s
+ * own `withOutboxPump` helper, running in a different Jest worker process under a full parallel
+ * `npm test` — could and (confirmed during this task's own first verification pass) *did*
+ * occasionally publish this test's row before this test's own `pollUntil` observed it as `PENDING`.
+ * Filed as **T-PC-045** (`agent-promo-generation`, R8 — outside this task's own file scope to fix
+ * directly) and now `done`: `OutboxRepository`/`OutboxPublisherWorker` accept an optional
+ * `OutboxBatchScope` (`{ rowIds: [...] }`) that constrains a poll cycle to specific, already-known
+ * rows. Every `runOnce()` call in this file (below) and `withOutboxPump` (`setup/e2e-test-app.ts`)
+ * now passes one, so this suite no longer reaches into any other concurrently-running suite's own
+ * `PENDING` rows, and no other suite reaches into this file's row either — this closes the
+ * "row published early" and "row published twice" failure modes both, empirically re-verified
+ * clean under a full, plain `npm test` as part of this task's own completion report.
  *
  * Separately, this is also the one spec in this suite that stops/starts the single, shared local
  * Redpanda container (`docker-compose.yml`, T-PC-001) — every other spec here assumes that broker
  * stays up for its own real-broker round trip; the outage window is kept as short as physically
  * possible to minimise that overlap, but Jest's default multi-worker scheduling does not guarantee
- * isolation between files either way.
- *
- * **Given both of the above, this spec (and ideally this whole `test/e2e/**` directory) should be
- * run with `--runInBand`** (`npx jest --runInBand test/e2e`) for a fully reliable result — verified
- * repeatedly clean under that invocation during this task's own verification pass (including three
- * consecutive full-suite runs, TC-10). A permanent fix for the plain, literal `npm test` gate (a
- * dedicated, serialised Jest project for `test/e2e/**`) needs a `package.json`/Jest-config change
- * outside this agent's own file scope (`project.config.json` grants `package.json` only to
- * `agent-promo-foundation`) — flagged as a follow-up, not implemented here.
+ * isolation between files either way. **This spec (and ideally this whole `test/e2e/**` directory)
+ * should still be run with `--runInBand`** (`npx jest --runInBand test/e2e`) for that reason, even
+ * though the outbox-scoping race above is now closed — verified repeatedly clean under that
+ * invocation during this task's own verification pass. A permanent fix for the plain, literal
+ * `npm test` gate (a dedicated, serialised Jest project for `test/e2e/**`) needs a
+ * `package.json`/Jest-config change outside this agent's own file scope (`project.config.json`
+ * grants `package.json` only to `agent-promo-foundation`) — flagged as a follow-up, not implemented
+ * here.
  */
 import 'reflect-metadata';
 import { randomUUID } from 'node:crypto';
@@ -55,6 +55,7 @@ import {
   startRedpandaBroker,
   stopRedpandaBroker,
   waitForRedpandaReady,
+  waitForRedpandaStopped,
 } from './setup/testcontainers.config';
 import { E2ETestHarness, pollUntil, waitForKafkaMessage } from './setup/e2e-test-app';
 
@@ -125,12 +126,18 @@ describe('T-PC-040 — outbox publish survives a real broker outage (gate G2) (e
     await harness.kafkaConsumer.stop();
 
     // 2. Stop the broker — the row above is confirmed PENDING and nothing has attempted to
-    //    publish it yet (autostart is off; see this file's own header).
+    //    publish it yet (autostart is off; see this file's own header). `docker compose stop`'s
+    //    own grace period means the container can still genuinely be reachable for a moment after
+    //    this resolves (`waitForRedpandaStopped`'s own header) — wait for the outage to actually be
+    //    observable before asserting a publish attempt against it must fail.
     await stopRedpandaBroker();
+    await waitForRedpandaStopped(15_000);
     try {
       // 3. A publish attempt while the broker is down must fail — proving the row genuinely could
-      //    not have published during this window, not that this test merely assumes so.
-      await harness.outboxWorker.runOnce();
+      //    not have published during this window, not that this test merely assumes so. Scoped to
+      //    this test's own already-known row id (T-PC-045's `OutboxBatchScope`) so this cycle never
+      //    also reaches into some other, concurrently-running suite's own PENDING row.
+      await harness.outboxWorker.runOnce({ rowIds: [committedRow.id] });
 
       const rowDuringOutage = await findOutboxRow(tenantId, correlationId);
       expect(rowDuringOutage).not.toBeNull();
@@ -146,7 +153,7 @@ describe('T-PC-040 — outbox publish survives a real broker outage (gate G2) (e
     //    loss across the outage (gate G2). Driven by explicit `runOnce()` calls, same
     //    deterministic-polling discipline as the rest of this suite.
     const publishedRow = await pollUntil(async () => {
-      await harness.outboxWorker.runOnce();
+      await harness.outboxWorker.runOnce({ rowIds: [committedRow.id] });
       const row = await findOutboxRow(tenantId, correlationId);
       return row && row.status === 'PUBLISHED' ? row : null;
     }, 30_000);

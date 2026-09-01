@@ -31,6 +31,23 @@
  * (`GENERATE_REQUESTED_CONSUMER_GROUP`) and processing each partition's messages sequentially
  * (kafkajs's own `eachMessage` already guarantees in-partition ordering — nothing extra needed
  * here to preserve it).
+ *
+ * **T-PC-047.** `processMessage` runs its entire body inside `CorrelationContextService.run(...)`,
+ * so every log line for a given message — including the retry/backoff warnings and the final DLQ
+ * error, not just whatever `PromoCodeGenerationService` itself logs — carries a `correlationId`.
+ * The context is seeded *before* the authoritative parse/validate loop below even runs (best
+ * effort, tolerant of a completely malformed payload): `raw.key` is this producer's own partition
+ * key, which is always `correlationId` by convention (implementation note 4 above); a best-effort
+ * `JSON.parse` of `raw.value` refines that to the envelope's own `correlationId`/`tenantId` when the
+ * payload happens to be well-formed JSON with those fields, even if envelope/payload *validation*
+ * (the authoritative kind, below) later fails. Deliberately a single top-level wrap, not a nested
+ * one per retry attempt — `CorrelationContextService.run`'s context is fixed for its whole callback,
+ * and re-parsing per attempt would only ever recompute the identical value. One entry-point log
+ * line is emitted as soon as the context is established, same discipline
+ * `correlation-context.middleware.ts` documents for the HTTP transport ("a request that touches no
+ * other logger call site still has at least one structured line to grep by correlationId") — the
+ * Kafka/gRPC "once wired" follow-up that middleware's own header explicitly flags this task as
+ * closing.
  */
 import {
   Inject,
@@ -42,6 +59,10 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { Kafka, logLevel, type Consumer, type EachMessagePayload } from 'kafkajs';
 import { PromoCodeGenerationService } from '../modules/generation/promo-code-generation.service';
+import {
+  CorrelationContextService,
+  type CorrelationContext,
+} from '../observability/logging/correlation-context.service';
 import { DlqProducerService } from './dlq-producer.service';
 import { parseEnvelope } from './envelope.schema';
 import { parseGenerateRequestedPayload } from './generate-requested-payload.schema';
@@ -77,6 +98,7 @@ export class GenerateRequestedConsumer implements OnModuleInit, OnModuleDestroy 
     private readonly configService: ConfigService,
     @Inject(RETRY_BACKOFF_BASE_MS) private readonly backoffBaseMs: number,
     @Inject(RETRY_BACKOFF_MAX_MS) private readonly backoffMaxMs: number,
+    private readonly correlationContext: CorrelationContextService,
   ) {}
 
   /**
@@ -141,6 +163,41 @@ export class GenerateRequestedConsumer implements OnModuleInit, OnModuleDestroy 
    * go through the identical bounded-retry-then-DLQ path.
    */
   async processMessage(raw: RawKafkaMessage): Promise<ProcessOutcome> {
+    return this.correlationContext.run(this.buildBestEffortContext(raw), () => {
+      this.logger.log(`${GENERATE_REQUESTED_TOPIC} message received`);
+      return this.processMessageWithContext(raw);
+    });
+  }
+
+  /**
+   * Best-effort `correlationId`/`tenantId` for logging purposes only — never used for anything
+   * that affects the actual processing/retry/DLQ decision below, which always re-derives its own
+   * authoritative values from `parseEnvelope`/`parseGenerateRequestedPayload`. Tolerant of
+   * completely malformed JSON (TC-4's own scenario): a parse failure here just leaves the context
+   * at `raw.key`-only (or `''`, if even the key is absent), rather than throwing before the real
+   * retry loop gets a chance to run.
+   */
+  private buildBestEffortContext(raw: RawKafkaMessage): CorrelationContext {
+    let correlationId = raw.key ?? '';
+    let tenantId: string | undefined;
+    try {
+      const parsed: unknown = JSON.parse(raw.value ?? '');
+      if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+        const candidate = parsed as Record<string, unknown>;
+        if (typeof candidate.correlationId === 'string' && candidate.correlationId.length > 0) {
+          correlationId = candidate.correlationId;
+        }
+        if (typeof candidate.tenantId === 'string') {
+          tenantId = candidate.tenantId;
+        }
+      }
+    } catch {
+      // Best-effort only — see this method's own header comment.
+    }
+    return { correlationId, tenantId, transport: 'KAFKA', rpc: GENERATE_REQUESTED_TOPIC };
+  }
+
+  private async processMessageWithContext(raw: RawKafkaMessage): Promise<ProcessOutcome> {
     let lastErrorMessage = 'unknown error';
     let bestEffortEnvelope: Record<string, unknown> | null = null;
 

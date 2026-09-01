@@ -27,6 +27,7 @@ import type { PromoCodeGenerationService } from '@/modules/generation/promo-code
 import type { PromoCodeConfigRepository } from '@/modules/promo-code-config/promo-code-config.repository';
 import type { GenerationResult } from '@/modules/generation/generation-result.types';
 import type { PromoCodeConfig } from '@/modules/promo-code-config/promo-code-config.entity';
+import { CorrelationContextService } from '@/observability/logging/correlation-context.service';
 
 const PROTO_PATH = join(__dirname, '..', '..', 'proto', 'promo_code.v1.proto');
 const CONTROLLER_SOURCE_PATH = join(
@@ -36,6 +37,14 @@ const CONTROLLER_SOURCE_PATH = join(
   'src',
   'grpc',
   'promo-code.controller.ts',
+);
+const GRPC_SERVER_MODULE_SOURCE_PATH = join(
+  __dirname,
+  '..',
+  '..',
+  'src',
+  'grpc',
+  'grpc-server.module.ts',
 );
 
 function fakeContextWithCall(call: unknown): ExecutionContext {
@@ -116,10 +125,11 @@ describe('T-PC-031 — PromoCodeController (unit, mocked generation service/repo
   function buildController(
     generateCode: jest.Mock,
     list: jest.Mock = jest.fn().mockResolvedValue([]),
+    correlationContext: CorrelationContextService = new CorrelationContextService(),
   ): PromoCodeController {
     const generationService = { generateCode } as unknown as PromoCodeGenerationService;
     const repository = { list } as unknown as PromoCodeConfigRepository;
-    return new PromoCodeController(generationService, repository);
+    return new PromoCodeController(generationService, repository, correlationContext);
   }
 
   const successResult: GenerationResult = {
@@ -287,6 +297,88 @@ describe('T-PC-031 — PromoCodeController (unit, mocked generation service/repo
     ).rejects.toMatchObject({
       error: expect.objectContaining({ code: GrpcStatus.INVALID_ARGUMENT }),
     });
+  });
+
+  // T-PC-047 (this task's own numbering) — TC-2: the domain service call, which happens deep
+  // inside `generateCode()`'s own async body, still sees the correlation context
+  // `CorrelationContextService.run(...)` set at the RPC entry point — proving the wrap actually
+  // reaches the call, not just the synchronous part of the method before the first `await`.
+  it('TC-2: correlation_id/tenant_id/transport/rpc are visible to code called from generateCode()', async () => {
+    const correlationContext = new CorrelationContextService();
+    let observedDuringCall: unknown;
+    const generateCode = jest.fn().mockImplementation(async () => {
+      observedDuringCall = correlationContext.getCurrent();
+      return successResult;
+    });
+    const controller = buildController(generateCode, undefined, correlationContext);
+
+    await controller.generateCode({
+      correlationId: 'corr-t-pc-047',
+      tenantId: 'tenant-t-pc-047',
+      bindLevel: 'CAMPAIGN',
+      bindRefId: 'ref-1',
+      customerId: 'cust-1',
+      merchantId: '',
+    });
+
+    expect(observedDuringCall).toEqual({
+      correlationId: 'corr-t-pc-047',
+      tenantId: 'tenant-t-pc-047',
+      transport: 'GRPC',
+      rpc: 'GenerateCode',
+    });
+    // No leakage after the RPC returns — `getCurrent()` is only ever populated for the duration of
+    // the AsyncLocalStorage `run()` call this RPC's entry point owns.
+    expect(correlationContext.getCurrent()).toBeUndefined();
+  });
+
+  // TC-3: two concurrent calls never see each other's context (AsyncLocalStorage isolation, not
+  // just "the last call's value happened to still be correct").
+  it('TC-3: two concurrent GenerateCode calls never observe each other correlation context', async () => {
+    const correlationContext = new CorrelationContextService();
+    const observed: Record<string, unknown> = {};
+    const generateCode = jest.fn().mockImplementation(async () => {
+      const current = correlationContext.getCurrent();
+      // Yield once so the two calls' async bodies genuinely interleave.
+      await new Promise((resolve) => setImmediate(resolve));
+      observed[current?.correlationId as string] = correlationContext.getCurrent()?.correlationId;
+      return successResult;
+    });
+    const controller = buildController(generateCode, undefined, correlationContext);
+
+    await Promise.all([
+      controller.generateCode({
+        correlationId: 'corr-a',
+        tenantId: 'tenant-1',
+        bindLevel: 'CAMPAIGN',
+        bindRefId: 'ref-1',
+        customerId: 'cust-a',
+        merchantId: '',
+      }),
+      controller.generateCode({
+        correlationId: 'corr-b',
+        tenantId: 'tenant-1',
+        bindLevel: 'CAMPAIGN',
+        bindRefId: 'ref-1',
+        customerId: 'cust-b',
+        merchantId: '',
+      }),
+    ]);
+
+    expect(observed).toEqual({ 'corr-a': 'corr-a', 'corr-b': 'corr-b' });
+  });
+
+  // TC-1 (T-PC-047's own numbering): a fast, no-broker/no-Postgres-required regression guard for
+  // the defect's root cause — `GrpcServerModule` (this task's own fix target) must import
+  // `LoggingModule`, or `Logger.overrideLogger`/`CorrelationContextService` never reach this
+  // process's DI graph at all, no matter what the controller itself does. Proven to fail on the
+  // pre-fix source (reverting `grpc-server.module.ts`'s `imports` array back to
+  // `[PromoCodeGenerationModule, PromoCodeConfigModule]` makes this assertion false) — see this
+  // task's completion report.
+  it('TC-1: GrpcServerModule imports LoggingModule (the T-PC-047 fix target)', () => {
+    const moduleSource = readFileSync(GRPC_SERVER_MODULE_SOURCE_PATH, 'utf8');
+    expect(moduleSource).toMatch(/LoggingModule/);
+    expect(moduleSource).toMatch(/imports:\s*\[[^\]]*LoggingModule[^\]]*\]/);
   });
 });
 

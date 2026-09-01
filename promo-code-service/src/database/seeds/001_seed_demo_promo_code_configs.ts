@@ -24,6 +24,13 @@
  * and this uniqueness rule is a partial *index* (`CREATE UNIQUE INDEX ... WHERE ...`), not a
  * constraint; `ON CONSTRAINT` against it fails at runtime with "constraint ... does not exist"
  * (confirmed against the real migrated schema while implementing this task).
+ *
+ * T-PC-052: `DEMO_TENANT_ID` (`seed-data.constants.ts`) defaults to the plain string `'1'` —
+ * matching the portal's own `int`-typed `tenants.id` for its first-seeded `DEMO` tenant, not a
+ * UUID — and is overridable via the optional `DEMO_PORTAL_TENANT_ID` env var for an environment
+ * where the portal's demo tenant isn't id `1` (a re-seeded or shared dev DB). `project-plan`
+ * T-167's own verification notes can confirm/correct the real value with one query:
+ * `SELECT id FROM reward_config.tenants WHERE tenant_code = 'DEMO';`.
  */
 /* eslint-disable no-console -- T-PC-003: this is a CLI entrypoint; printing status IS its job. */
 import 'reflect-metadata';

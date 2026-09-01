@@ -22,6 +22,7 @@
 import { execFile } from 'node:child_process';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
+import { connect } from 'node:net';
 
 const execFileAsync = promisify(execFile);
 
@@ -84,5 +85,58 @@ export async function waitForRedpandaReady(timeoutMs: number): Promise<void> {
       throw new Error(`waitForRedpandaReady: broker not ready after ${timeoutMs}ms`);
     }
     await wait(500);
+  }
+}
+
+/** Resolves `true` if a raw TCP connect to `host:port` succeeds within `timeoutMs`, `false`
+ * otherwise (refused, reset, or timed out) — never rejects. */
+function isPortOpen(host: string, port: number, timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = connect({ host, port, timeout: timeoutMs });
+    const settle = (open: boolean): void => {
+      socket.removeAllListeners();
+      socket.destroy();
+      resolve(open);
+    };
+    socket.once('connect', () => settle(true));
+    socket.once('timeout', () => settle(false));
+    socket.once('error', () => settle(false));
+  });
+}
+
+/**
+ * The mirror image of {@link waitForRedpandaReady}: polls both the admin readiness endpoint *and*
+ * a raw TCP connect to the real Kafka listener port (`KAFKA_BROKERS`, the port `KafkaProducerService`
+ * actually publishes on) until neither answers, or throws once `timeoutMs` elapses. Checking the
+ * admin API alone is not enough — `docker compose stop`'s own graceful shutdown
+ * (`stop_grace_period`) means the container process, and each of its listeners, can each stop
+ * accepting connections at slightly different moments, and Redpanda can still be genuinely
+ * reachable and serving *producer* requests for a real, observed window *after* the admin API has
+ * already stopped answering (confirmed directly during this task's own verification pass: a
+ * `runOnce()` call issued immediately after the admin API alone was already unreachable
+ * occasionally still published successfully). `outbox-broker-outage.e2e-spec.ts`'s TC-6 calls this
+ * immediately after `stopRedpandaBroker()` and before asserting a publish attempt must fail, so
+ * that assertion is against an *observed* outage on the actual producer path, not an assumed one —
+ * the same "assert the observable property" discipline `AGENT-PROTOCOL.md` §3 already requires
+ * everywhere else in this suite, extended to the outage's own start edge as well as its end.
+ */
+export async function waitForRedpandaStopped(timeoutMs: number): Promise<void> {
+  const [kafkaHost, kafkaPortRaw] = (KAFKA_BROKERS[0] ?? 'localhost:9092').split(':');
+  const kafkaPort = Number(kafkaPortRaw);
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const [adminOpen, kafkaOpen] = await Promise.all([
+      fetch(REDPANDA_READY_URL, { signal: AbortSignal.timeout(1_000) })
+        .then(() => true)
+        .catch(() => false),
+      isPortOpen(kafkaHost, kafkaPort, 1_000),
+    ]);
+    if (!adminOpen && !kafkaOpen) {
+      return;
+    }
+    if (Date.now() > deadline) {
+      throw new Error(`waitForRedpandaStopped: broker still reachable after ${timeoutMs}ms`);
+    }
+    await wait(200);
   }
 }

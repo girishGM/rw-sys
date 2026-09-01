@@ -15,7 +15,10 @@
  * (`field-value-source-lookup.service.spec.ts`) covers the branching logic around that seam with a
  * double; this suite covers the seam itself.
  *
- * Covers TC-1…TC-8 and both verification steps.
+ * Covers TC-1…TC-8 and verification step 1. Verification step 2 originally asserted directly
+ * against the real seeded `PROMO_CODE_CONFIG_SERVICE` row (`GET .../api/PROMO_CODE_CONFIG_SERVICE`
+ * → 501); T-169 replaced that with a suite-owned fixture in TC-4 below once T-165 made "stays
+ * `planned` forever" a false premise for that specific row — see TC-4's own comment.
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
@@ -49,6 +52,9 @@ const STAMP = Date.now();
 const TRACKER_CODE = `t123test_trk_${STAMP}`;
 const ACTIVE_PROVIDER_CODE = `T123_FIXTURE_${STAMP}`;
 const BEARER_PROVIDER_CODE = `T123_FIXTURE_AUTH_${STAMP}`;
+/** T-169: a suite-owned, always-`planned` fixture for TC-4 — see that test for why this replaced
+ * asserting against the real seeded `PROMO_CODE_CONFIG_SERVICE` row. */
+const PLANNED_PROVIDER_CODE = `T123_FIXTURE_PLANNED_${STAMP}`;
 /** Must never appear in any response body — verification step 2. */
 const SECRET_TOKEN = `t123-secret-${STAMP}`;
 
@@ -332,13 +338,44 @@ describe('T-123 — context lookup', () => {
 });
 
 describe('T-123 — API lookup', () => {
-  it('verification step 2 / TC-4: a planned provider is 501, no network call attempted', async () => {
-    // PROMO_CODE_CONFIG_SERVICE is seeded by T-121 with endpoint_url = a non-URL placeholder
-    // string. If this task ever attempted a real fetch against it, the failure would surface as
-    // a 502 (a malformed-URL error), not a 501 — so observing 501 here is itself proof no call
-    // was attempted, not merely a restatement of the status branch.
-    const res = await get('maker', '/field-value-sources/api/PROMO_CODE_CONFIG_SERVICE');
+  it('TC-4: a planned provider is 501, no network call attempted', async () => {
+    // T-169: this used to assert against the real seeded `PROMO_CODE_CONFIG_SERVICE` row, on the
+    // premise (T-121's own seed) that it stays `planned` forever. T-165 breaks that premise on
+    // purpose — its entire job is to flip that one provider to `active` with a real `endpoint_url`
+    // and `auth_type = 'bearer'` (see `T165_001_activate_promo_code_config_service_provider.ts`).
+    // `auth_config_enc` stays `NULL` until a follow-up manual admin step, so once that migration
+    // has run, this same call returns 502 (`FieldApiLookupUpstreamError`, missing bearer token),
+    // not 501 — the old assertion was accidentally coupled to a global row's mutable status, not
+    // to the `planned` behaviour TC-4 actually specifies. Reproduced live against the real,
+    // already-activated `PROMO_CODE_CONFIG_SERVICE` row on the shared dev Postgres while
+    // diagnosing this task (received 502, not 501) — see the completion report.
+    //
+    // Fixed by using a fixture this suite creates and owns instead, the same "test fixture only,
+    // not a seeded real one" approach TC-6/TC-7 already use below, so TC-4 no longer depends on
+    // any real seeded row's status. This also proves "no network call attempted" more strongly
+    // than the old endpoint-shape reasoning: the fixture's `endpoint_url` points at this suite's
+    // own live local server, and `apiCallReceived` is asserted `false` after the request — a
+    // request that reached the server, not just a URL that would have failed differently.
+    let apiCallReceived = false;
+    currentHandler = (_req, res) => {
+      apiCallReceived = true;
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify([{ id: 1, name: 'must never be reached' }]));
+    };
+
+    const created = await post('super', '/field-api-lookup-providers', {
+      providerCode: PLANNED_PROVIDER_CODE,
+      name: 'T-169 planned fixture',
+      endpointUrl: `http://127.0.0.1:${localServerPort}/lookup`,
+      responseValueKey: 'id',
+      responseLabelKey: 'name',
+      status: 'planned',
+    });
+    expect(created.status).toBe(201);
+
+    const res = await get('maker', `/field-value-sources/api/${PLANNED_PROVIDER_CODE}`);
     expect(res.status).toBe(501);
+    expect(apiCallReceived).toBe(false);
   });
 
   it('TC-5: an unknown API lookup provider code is a 404', async () => {

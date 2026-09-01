@@ -97,7 +97,7 @@ describe('T-PC-041 — Kafka poison-message / resource-exhaustion sweep (real Re
     // The consumer process is the exact same one that just DLQ'd the poison message above — no
     // restart, no new harness. A well-formed message right after it must still succeed normally.
     const correlationId = randomUUID();
-    const resultMessage = await withOutboxPump(harness.outboxWorker, async () => {
+    const resultMessage = await withOutboxPump(harness, tenantId, correlationId, async () => {
       await harness.publishGenerateRequested(GENERATE_REQUESTED_TOPIC, correlationId, tenantId, {
         bindLevel: 'CAMPAIGN',
         bindRefId,
@@ -131,7 +131,7 @@ describe('T-PC-041 — Kafka poison-message / resource-exhaustion sweep (real Re
       largeMetadata[`key_${i}`] = 'x'.repeat(40);
     }
 
-    const resultMessage = await withOutboxPump(harness.outboxWorker, async () => {
+    const resultMessage = await withOutboxPump(harness, tenantId, correlationId, async () => {
       await harness.publishGenerateRequested(GENERATE_REQUESTED_TOPIC, correlationId, tenantId, {
         bindLevel: 'CAMPAIGN',
         bindRefId,

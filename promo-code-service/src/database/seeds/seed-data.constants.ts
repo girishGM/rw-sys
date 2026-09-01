@@ -15,14 +15,33 @@
  * cross-reference (implementation note 4). It also doubles as the idempotent cleanup key — see
  * the task file's own "Rollback" section: `DELETE FROM promo_code.promo_code_config WHERE
  * created_by = '<this constant>'` removes exactly (and only) the rows this seed inserts.
+ *
+ * T-PC-052: these were originally hardcoded UUIDs with no relationship to any real portal id —
+ * exactly the root cause `project-plan` T-170's report identified (`assertConfigActive` matches
+ * the *stored* `tenant_id` against the caller's, so an unrelated seed value made end-to-end
+ * testing against a real portal impossible no matter what the portal sent). Migration 009
+ * widened the columns these values land in from `uuid` to `varchar(64)`; these are now plain
+ * string ids that match the portal's own `int`-typed `tenants.id`/`admin_users.id` shape rather
+ * than a UUID that can never match one.
+ *
+ * `DEMO_TENANT_ID` defaults to `'1'` and is read from the optional `DEMO_PORTAL_TENANT_ID` env
+ * var — the portal's own `T900_002_seed_demo_countries_tenants_merchants.ts` seeds its `DEMO`
+ * tenant as the first row inserted into an identity column, so `'1'` is correct in a fresh
+ * environment. An environment where the portal's demo tenant isn't id `1` (a re-seeded or shared
+ * dev DB) can override it via `DEMO_PORTAL_TENANT_ID` without another migration —
+ * `project-plan` T-167's own verification notes can confirm/correct the real value with one
+ * query: `SELECT id FROM reward_config.tenants WHERE tenant_code = 'DEMO';`.
  */
-export const DEMO_ACTOR_ID = '00000000-0000-4000-8000-000000000001';
+export const DEMO_ACTOR_ID = 'demo-actor';
 
 // A single demo tenant, plus one demo merchant nested under it — enough to cover both the
 // tenant-wide (`merchant_id IS NULL`) and merchant-scoped shapes `01-DATABASE.md` §1 describes,
-// without inventing a sprawling roster no other Wave 0 task needs.
-export const DEMO_TENANT_ID = '00000000-0000-4000-8000-0000000000a1';
-export const DEMO_MERCHANT_ID = '00000000-0000-4000-8000-0000000000b1';
+// without inventing a sprawling roster no other Wave 0 task needs. Only `DEMO_TENANT_ID` is
+// env-overridable (`DEMO_PORTAL_TENANT_ID`) — it's the one value `assertConfigActive` actually
+// matches against a caller-supplied id (task file implementation note 4); `DEMO_MERCHANT_ID`/
+// `DEMO_ACTOR_ID` are local-only demo values with no equivalent cross-service match to satisfy.
+export const DEMO_TENANT_ID = process.env.DEMO_PORTAL_TENANT_ID || '1';
+export const DEMO_MERCHANT_ID = 'demo-merchant';
 
 export interface DemoPromoCodeConfigSeed {
   tenant_id: string;

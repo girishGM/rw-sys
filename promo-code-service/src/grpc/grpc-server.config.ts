@@ -72,6 +72,44 @@ function parsePort(): number {
 }
 
 /**
+ * T-PC-048. `codes_generated_total`/`promo_code_generation_duration_seconds` only reflect real
+ * generation once `GrpcServerModule` imports `MetricsModule` (see that module's own T-PC-048
+ * note) — but that instrumentation is useless to an operator unless *this* process's own
+ * `GET /metrics` is reachable: `GrpcMicroserviceRootModule` bootstraps via
+ * `NestFactory.createMicroservice`/no HTTP listener at all before this task, so a scraper aimed
+ * only at the HTTP `AppModule` process never sees a gRPC-originated generation (the defect this
+ * task fixes — see `grpc-server.main.ts`'s own header). `GRPC_METRICS_PORT` (default 9101,
+ * distinct from the HTTP `AppModule`'s own default `PORT` 3010 and the Kafka consumer process's
+ * own `KAFKA_METRICS_PORT` default 9102, so all three can run on one dev machine at once without
+ * colliding) is this process's own metrics HTTP port.
+ */
+export const DEFAULT_GRPC_METRICS_PORT = 9101;
+
+export function parseGrpcMetricsPort(): number {
+  const raw = process.env.GRPC_METRICS_PORT;
+  if (raw === undefined || raw.trim().length === 0) {
+    return DEFAULT_GRPC_METRICS_PORT;
+  }
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(
+      `Invalid gRPC server configuration: GRPC_METRICS_PORT must be a positive integer, got "${raw}"`,
+    );
+  }
+  return parsed;
+}
+
+/**
+ * `GRPC_METRICS_ENABLED` (default enabled) — this task's own Rollback lever, same
+ * `GRPC_SERVER_ENABLED` convention above: set to `"false"` to keep the gRPC transport itself
+ * running while turning off just its `GET /metrics` HTTP listener, with nothing left to tear
+ * down separately (no socket is ever opened).
+ */
+export function isGrpcMetricsListenerEnabled(): boolean {
+  return process.env.GRPC_METRICS_ENABLED !== 'false';
+}
+
+/**
  * Returns `null` when `GRPC_SERVER_ENABLED=false` — the transport is deliberately absent, not
  * misconfigured. Otherwise validates and loads the mTLS certificate material eagerly (never lazily
  * on the first connection), throwing synchronously so a missing/unreadable cert fails boot loudly

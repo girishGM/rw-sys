@@ -32,6 +32,19 @@
  * own header already documents, just exercised here against a real broker instead of a mocked
  * producer.
  *
+ * **T-PC-045 follow-through**: `withOutboxPump` now always drives `runOnce({ rowIds: [...] })`
+ * scoped to the one outbox row its own caller's `tenantId`/`correlationId` resolves to, never a
+ * bare unscoped `runOnce()` — T-PC-045 added `OutboxBatchScope` (`outbox.repository.ts`) precisely
+ * so an e2e caller like this one stops reaching into every other concurrently-running suite's own
+ * `PENDING` rows. Before the row exists yet (the consumer hasn't committed it), a tick is a no-op —
+ * there is nothing this caller could own yet to scope to, and skipping is strictly safer than
+ * falling back to an unscoped fetch. This closes the exact two failure modes T-PC-045's own filed
+ * evidence and this task's own verification pass reproduced under a full, parallel `npm test`: a
+ * different file's row being published before that file observed it `PENDING`
+ * (`outbox-broker-outage.e2e-spec.ts` TC-6), and the same row being published twice because two
+ * concurrent unscoped batches both fetched it before either marked it `PUBLISHED`
+ * (`kafka-round-trip.e2e-spec.ts` TC-4/TC-8).
+ *
  * Fixture provisioning (`createBoundConfig`) goes through the real REST endpoints
  * (`POST /api/v1/promo-code-configs`, `POST /api/v1/campaign-promo-configs`) exactly as
  * `reward-redemption-service`'s own operators would, per this task's implementation note 6 ("via
@@ -116,20 +129,56 @@ function getFreePort(): Promise<number> {
 }
 
 /**
- * Runs `fn` while `worker.runOnce()` is driven repeatedly on a short interval in the background —
- * for a spec that needs a real outbox row to actually reach `PUBLISHED` without turning on the
- * (deliberately disabled under `NODE_ENV=test`) autostart poller. `runOnce()` failures are
- * swallowed here exactly as `OutboxPublisherWorker.start()`'s own real `setInterval` callback
- * already swallows them (that method's own header) — a mid-pump failure (e.g. TC-6's own broker
- * outage) is expected, not a defect in this harness.
+ * The one PK this task's own e2e suite ever needs to resolve `promo_code.promo_code_outbox.id`
+ * from — the same `tenant_id`/`correlation_id` join `outbox-broker-outage.e2e-spec.ts`'s own local
+ * `findOutboxRow` already uses, generalised here so `withOutboxPump` can scope every `runOnce()`
+ * call it drives (T-PC-045) instead of reaching into the whole, globally-shared table.
+ */
+export async function findOutboxRowId(
+  sequelize: Sequelize,
+  tenantId: string,
+  correlationId: string,
+): Promise<string | null> {
+  const rows = await sequelize.query<{ id: string }>(
+    `SELECT o.id
+       FROM promo_code.promo_code_outbox o
+       JOIN promo_code.promo_code p ON p.id = o.promo_code_id
+      WHERE p.tenant_id = :tenantId AND p.correlation_id = :correlationId`,
+    { type: QueryTypes.SELECT, replacements: { tenantId, correlationId } },
+  );
+  return rows[0]?.id ?? null;
+}
+
+/**
+ * Runs `fn` while `harness.outboxWorker.runOnce({ rowIds: [...] })` is driven repeatedly on a
+ * short interval in the background, scoped to the single outbox row `tenantId`/`correlationId`
+ * resolves to (T-PC-045) — for a spec that needs a real outbox row to actually reach `PUBLISHED`
+ * without turning on the (deliberately disabled under `NODE_ENV=test`) autostart poller and
+ * without ever touching a row this caller doesn't own (this file's own header). Until the row is
+ * committed (the Kafka consumer hasn't processed the request yet), each tick is a no-op — there is
+ * nothing yet to scope to, and an unscoped fallback would reintroduce exactly the race this
+ * function exists to close. `runOnce()` failures are swallowed here exactly as
+ * `OutboxPublisherWorker.start()`'s own real `setInterval` callback already swallows them (that
+ * method's own header) — a mid-pump failure (e.g. TC-6's own broker outage) is expected, not a
+ * defect in this harness.
  */
 export async function withOutboxPump<T>(
-  worker: OutboxPublisherWorker,
+  harness: Pick<E2ETestHarness, 'sequelize' | 'outboxWorker'>,
+  tenantId: string,
+  correlationId: string,
   fn: () => Promise<T>,
   intervalMs = 200,
 ): Promise<T> {
+  let scopedRowId: string | null = null;
   const timer = setInterval(() => {
-    worker.runOnce().catch(() => undefined);
+    void (async () => {
+      if (!scopedRowId) {
+        scopedRowId = await findOutboxRowId(harness.sequelize, tenantId, correlationId);
+      }
+      if (scopedRowId) {
+        await harness.outboxWorker.runOnce({ rowIds: [scopedRowId] });
+      }
+    })().catch(() => undefined);
   }, intervalMs);
   try {
     return await fn();

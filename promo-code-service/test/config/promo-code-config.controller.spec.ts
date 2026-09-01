@@ -120,7 +120,8 @@ describe('T-PC-011 — PromoCodeConfigController (REST)', () => {
       .set(...authHeader(VALID_TOKEN()));
 
     expect(response.status).toBe(200);
-    expect(response.body.configs).toEqual(
+    expect(Array.isArray(response.body)).toBe(true);
+    expect(response.body).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           id: created.id,
@@ -131,6 +132,56 @@ describe('T-PC-011 — PromoCodeConfigController (REST)', () => {
         }),
       ]),
     );
+  });
+
+  // T-PC-049 TC-1/TC-2/TC-3/TC-4: the list route's top-level envelope is a bare array, not
+  // `{ configs: [...] }` — the portal's generic lookup proxy
+  // (`FieldValueSourceLookupService.apiLookup()`) requires `Array.isArray(body)`.
+  it('T-PC-049 TC-1/TC-2: GET returns a bare array, not an object with a configs key', async () => {
+    const tenantId = freshTenant();
+    await createConfig(tenantId, randomUUID());
+
+    const response = await request(app.getHttpServer())
+      .get('/api/v1/promo-code-configs')
+      .query({ tenantId })
+      .set(...authHeader(VALID_TOKEN()));
+
+    expect(response.status).toBe(200);
+    expect(Array.isArray(response.body)).toBe(true);
+    expect((response.body as { configs?: unknown }).configs).toBeUndefined();
+  });
+
+  // T-PC-049 TC-3: each array item still carries exactly the thin summary fields, nothing else.
+  it('T-PC-049 TC-3: array items carry exactly id/name/rewardValueType/rewardValue/rewardUnit', async () => {
+    const tenantId = freshTenant();
+    await createConfig(tenantId, randomUUID());
+
+    const response = await request(app.getHttpServer())
+      .get('/api/v1/promo-code-configs')
+      .query({ tenantId })
+      .set(...authHeader(VALID_TOKEN()));
+
+    expect(response.status).toBe(200);
+    expect(Array.isArray(response.body)).toBe(true);
+    for (const item of response.body as Record<string, unknown>[]) {
+      expect(Object.keys(item).sort()).toEqual(
+        ['id', 'name', 'rewardValueType', 'rewardValue', 'rewardUnit'].sort(),
+      );
+    }
+  });
+
+  // T-PC-049 TC-4: no matching configs for a tenant returns 200 with an empty array, not 404
+  // and not `{ configs: [] }`.
+  it('T-PC-049 TC-4: no matching configs returns 200 with an empty bare array', async () => {
+    const tenantId = freshTenant();
+
+    const response = await request(app.getHttpServer())
+      .get('/api/v1/promo-code-configs')
+      .query({ tenantId })
+      .set(...authHeader(VALID_TOKEN()));
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual([]);
   });
 
   // TC-2
@@ -169,7 +220,7 @@ describe('T-PC-011 — PromoCodeConfigController (REST)', () => {
       .set(...authHeader(VALID_TOKEN()));
 
     expect(response.status).toBe(200);
-    const ids = response.body.configs.map((c: { id: string }) => c.id);
+    const ids = (response.body as { id: string }[]).map((c) => c.id);
     expect(ids).toEqual(expect.arrayContaining([tenantWide.id, merchantScoped.id]));
   });
 
@@ -190,7 +241,7 @@ describe('T-PC-011 — PromoCodeConfigController (REST)', () => {
       .set(...authHeader(VALID_TOKEN()));
 
     expect(response.status).toBe(200);
-    const ids = response.body.configs.map((c: { id: string }) => c.id);
+    const ids = (response.body as { id: string }[]).map((c) => c.id);
     expect(ids).toContain(toArchive.id);
     expect(ids).not.toContain(active.id);
   });

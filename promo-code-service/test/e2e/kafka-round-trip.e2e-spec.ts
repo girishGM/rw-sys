@@ -62,7 +62,7 @@ describe('T-PC-040 — Kafka round trip (real Redpanda, real Postgres) (e2e)', (
     const { tenantId, bindRefId } = await harness.createBoundConfig({ codePrefix: 'KAFKA1-' });
     const correlationId = randomUUID();
 
-    const resultMessage = await withOutboxPump(harness.outboxWorker, async () => {
+    const resultMessage = await withOutboxPump(harness, tenantId, correlationId, async () => {
       await harness.publishGenerateRequested(
         GENERATE_REQUESTED_TOPIC,
         correlationId,
@@ -109,7 +109,7 @@ describe('T-PC-040 — Kafka round trip (real Redpanda, real Postgres) (e2e)', (
     const correlationId = randomUUID();
     const data = activityData('cust-tc4', bindRefId);
 
-    const firstResult = await withOutboxPump(harness.outboxWorker, async () => {
+    const firstResult = await withOutboxPump(harness, tenantId, correlationId, async () => {
       await harness.publishGenerateRequested(
         GENERATE_REQUESTED_TOPIC,
         correlationId,

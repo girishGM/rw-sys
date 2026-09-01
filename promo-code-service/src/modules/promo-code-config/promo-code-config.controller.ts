@@ -47,17 +47,18 @@ export class PromoCodeConfigController {
 
   // `04-API-CONTRACT.md` §1. `tenantId` required (400 via `parseListPromoCodeConfigsQuery` if
   // missing, TC-3); `status` defaults server-side to `ACTIVE` (implementation note 6, TC-1);
-  // `merchantId` optional (TC-4). Response is the thin summary shape only (TC-2).
+  // `merchantId` optional (TC-4). Response is a bare array of the thin summary shape (TC-2;
+  // T-PC-049 — the portal's generic lookup proxy requires a bare array, not a wrapped object).
   @Get()
   async list(
     @Query() query: Record<string, unknown>,
-  ): Promise<{ configs: ReturnType<typeof toPromoCodeConfigSummary>[] }> {
+  ): Promise<ReturnType<typeof toPromoCodeConfigSummary>[]> {
     const parsed: ListPromoCodeConfigsQueryDto = parseListPromoCodeConfigsQuery(query);
     const configs = await this.service.list(parsed.tenantId, {
       merchantId: parsed.merchantId,
       status: parsed.status,
     });
-    return { configs: configs.map(toPromoCodeConfigSummary) };
+    return configs.map(toPromoCodeConfigSummary);
   }
 
   // `04-API-CONTRACT.md` §3. `body` carries both the `{ tenantId, actorId }` envelope and the

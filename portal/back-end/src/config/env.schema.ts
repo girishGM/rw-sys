@@ -242,6 +242,38 @@ export const envSchema = z.object({
    * because a container-network scraper (Prometheus, in the same compose network) must still
    * reach it by service name. */
   METRICS_HOST: z.string().optional(),
+
+  // --- T-166: the outbound promo-code-service bind call -------------------------------------
+  // (`promo-code-service-plan/04-API-CONTRACT.md` §2). Both keys are declared here rather than
+  // read from `process.env` inside `PromoCodeServiceClient`, and that is not a style choice:
+  // `@nestjs/config` assigns only the **validated** object back to `process.env`, and zod strips
+  // unknown keys — so a variable that reaches this process from a `.env` file and is missing from
+  // this schema is silently dropped (this file's `LOGIN_THROTTLE_RELAX_FACTOR` block records the
+  // same finding, T-057's D-3). A client reading `process.env` directly would therefore see
+  // `undefined` for a value the operator did set, and fail every bind for a reason no one could
+  // find.
+  //
+  // Both are optional, and unset means **the bind call cannot be made** — `PromoCodeServiceClient`
+  // fails closed with its own 502 rather than attaching locally without registering remotely.
+  // That is deliberate and is the opposite of the usual "optional → weaker" hazard: an unset value
+  // here can only ever *refuse* an attach, never silently permit an unregistered one. Making them
+  // required instead would fail the boot of every deployment that has no promo-code-service and
+  // never attaches a `PROMO_CODE` reward — which is every deployment today.
+
+  /**
+   * Base URL of the promo-code-service instance (`http://localhost:3010` locally). Introduced by
+   * T-165 for `db:migrate` only; T-166 is the first **runtime** consumer, which is why it appears
+   * in this schema now and did not before. No trailing slash is required — the client normalises.
+   */
+  PROMO_CODE_SERVICE_BASE_URL: z.string().optional(),
+
+  /**
+   * Bearer token presented to promo-code-service's `InternalServiceTokenGuard`. Must equal that
+   * service's own `INTERNAL_SERVICE_TOKEN`. A secret: never committed with a real value (R4) —
+   * `.env.example` carries a placeholder, the real local value lives in `.env.development`, which
+   * is git-ignored.
+   */
+  PROMO_CODE_SERVICE_INTERNAL_TOKEN: z.string().optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;
