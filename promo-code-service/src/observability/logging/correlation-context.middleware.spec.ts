@@ -1,6 +1,11 @@
 import type { Request, Response } from 'express';
 import { CorrelationContextMiddleware } from './correlation-context.middleware';
 import { CorrelationContextService } from './correlation-context.service';
+import type { StructuredLoggerService } from './structured-logger.service';
+
+function fakeLogger(): StructuredLoggerService {
+  return { log: jest.fn() } as unknown as StructuredLoggerService;
+}
 
 function fakeRequest(headers: Record<string, string> = {}): Request {
   return { headers, method: 'GET', path: '/api/v1/promo-code-configs' } as unknown as Request;
@@ -22,7 +27,7 @@ describe('CorrelationContextMiddleware', () => {
 
   beforeEach(() => {
     correlationContext = new CorrelationContextService();
-    middleware = new CorrelationContextMiddleware(correlationContext);
+    middleware = new CorrelationContextMiddleware(correlationContext, fakeLogger());
   });
 
   it('mints a fresh correlationId when the request has none, and makes it visible to next()', () => {

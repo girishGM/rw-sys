@@ -69,25 +69,30 @@ describe('T-PC-040 — cross-transport parity (gate G3) (e2e)', () => {
     client.close();
 
     const kafkaCorrelationId = randomUUID();
-    const kafkaResultMessage = await withOutboxPump(harness.outboxWorker, async () => {
-      await harness.publishGenerateRequested(
-        GENERATE_REQUESTED_TOPIC,
-        kafkaCorrelationId,
-        kafkaFixture.tenantId,
-        {
-          bindLevel: 'CAMPAIGN',
-          bindRefId: kafkaFixture.bindRefId,
-          customerId: 'cust-parity-kafka',
-          merchantId: null,
-          activityContext: null,
-        },
-      );
-      return waitForKafkaMessage(
-        GENERATE_RESULT_TOPIC,
-        60_000,
-        (key) => key === kafkaCorrelationId,
-      );
-    });
+    const kafkaResultMessage = await withOutboxPump(
+      harness,
+      kafkaFixture.tenantId,
+      kafkaCorrelationId,
+      async () => {
+        await harness.publishGenerateRequested(
+          GENERATE_REQUESTED_TOPIC,
+          kafkaCorrelationId,
+          kafkaFixture.tenantId,
+          {
+            bindLevel: 'CAMPAIGN',
+            bindRefId: kafkaFixture.bindRefId,
+            customerId: 'cust-parity-kafka',
+            merchantId: null,
+            activityContext: null,
+          },
+        );
+        return waitForKafkaMessage(
+          GENERATE_RESULT_TOPIC,
+          60_000,
+          (key) => key === kafkaCorrelationId,
+        );
+      },
+    );
     const kafkaData = kafkaResultMessage.data as Record<string, unknown>;
 
     // Both requests were structurally identical (same recipe, different tenant/binding) — the

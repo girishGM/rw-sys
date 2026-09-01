@@ -29,7 +29,9 @@ import type { GenerationResult } from '@/modules/generation/generation-result.ty
 import {
   GENERATE_REQUESTED_CONSUMER_GROUP,
   GENERATE_REQUESTED_DLQ_TOPIC,
+  GENERATE_REQUESTED_TOPIC,
 } from '@/messaging/kafka-consumer.config';
+import { CorrelationContextService } from '@/observability/logging/correlation-context.service';
 
 const CONSUMER_SOURCE_PATH = join(
   __dirname,
@@ -38,6 +40,14 @@ const CONSUMER_SOURCE_PATH = join(
   'src',
   'messaging',
   'generate-requested.consumer.ts',
+);
+const KAFKA_CONSUMER_MODULE_SOURCE_PATH = join(
+  __dirname,
+  '..',
+  '..',
+  'src',
+  'messaging',
+  'kafka-consumer.module.ts',
 );
 
 const successResult: GenerationResult = {
@@ -109,6 +119,7 @@ describe('T-PC-030 — GenerateRequestedConsumer (unit, mocked generation servic
     generateCode: jest.Mock,
     publish: jest.Mock = jest.fn().mockResolvedValue(undefined),
     backoff: { baseMs?: number; maxMs?: number } = {},
+    correlationContext: CorrelationContextService = new CorrelationContextService(),
   ): { consumer: GenerateRequestedConsumer; publish: jest.Mock } {
     const generationService = { generateCode } as unknown as PromoCodeGenerationService;
     const dlqProducer = { publish } as unknown as DlqProducerService;
@@ -119,6 +130,7 @@ describe('T-PC-030 — GenerateRequestedConsumer (unit, mocked generation servic
       configService,
       backoff.baseMs ?? 1,
       backoff.maxMs ?? 5,
+      correlationContext,
     );
     return { consumer, publish };
   }
@@ -354,6 +366,100 @@ describe('T-PC-030 — GenerateRequestedConsumer (unit, mocked generation servic
     expect(publish).toHaveBeenCalledTimes(1);
     const [, , dlqMessage] = publish.mock.calls[0];
     expect(dlqMessage.error).toContain('persistent DB outage');
+  });
+
+  // T-PC-047 (this task's own numbering) — TC-2: the domain service call sees the envelope's own
+  // correlationId/tenantId inside a real AsyncLocalStorage context — proving the wrap actually
+  // reaches code called from deep inside `processMessage`'s async body, not just its own
+  // synchronous entry.
+  it('TC-2: correlationId/tenantId/transport are visible to code called from generateCode()', async () => {
+    const correlationContext = new CorrelationContextService();
+    let observedDuringCall: unknown;
+    const generateCode = jest.fn().mockImplementation(async () => {
+      observedDuringCall = correlationContext.getCurrent();
+      return successResult;
+    });
+    const { consumer } = buildConsumer(generateCode, undefined, {}, correlationContext);
+    const correlationId = randomUUID();
+    const tenantId = randomUUID();
+    const envelope = validEnvelope({ correlationId, tenantId });
+
+    const outcome = await consumer.processMessage(toRawMessage(envelope, correlationId));
+
+    expect(outcome).toBe('ACK');
+    expect(observedDuringCall).toEqual({
+      correlationId,
+      tenantId,
+      transport: 'KAFKA',
+      rpc: GENERATE_REQUESTED_TOPIC,
+    });
+    // No leakage after processMessage returns.
+    expect(correlationContext.getCurrent()).toBeUndefined();
+  });
+
+  // TC-3: a message that never parses as JSON at all still gets a best-effort correlationId from
+  // the Kafka partition key, not an empty/undefined context, and the guard above (TC-2) proves the
+  // authoritative envelope value wins whenever parsing does succeed.
+  it("TC-3: malformed JSON still carries the Kafka key as a best-effort correlationId on the DLQ path's own log context", async () => {
+    const correlationContext = new CorrelationContextService();
+    let observedDuringDlqPublish: unknown;
+    const publish = jest.fn().mockImplementation(async () => {
+      observedDuringDlqPublish = correlationContext.getCurrent();
+    });
+    const { consumer } = buildConsumer(
+      jest.fn(),
+      publish,
+      { baseMs: 1, maxMs: 1 },
+      correlationContext,
+    );
+
+    const outcome = await consumer.processMessage(toRawMessage('{not-json', 'raw-key-tc047'));
+
+    expect(outcome).toBe('DLQ');
+    expect(observedDuringDlqPublish).toEqual({
+      correlationId: 'raw-key-tc047',
+      transport: 'KAFKA',
+      rpc: GENERATE_REQUESTED_TOPIC,
+    });
+  });
+
+  // TC-4: two concurrent messages never observe each other's context (AsyncLocalStorage isolation).
+  it("TC-4: two concurrent messages never observe each other's correlation context", async () => {
+    const correlationContext = new CorrelationContextService();
+    const observed: Record<string, unknown> = {};
+    const generateCode = jest.fn().mockImplementation(async () => {
+      const current = correlationContext.getCurrent();
+      await new Promise((resolve) => setImmediate(resolve));
+      observed[current?.correlationId as string] = correlationContext.getCurrent()?.correlationId;
+      return successResult;
+    });
+    const { consumer } = buildConsumer(generateCode, undefined, {}, correlationContext);
+    const correlationIdA = randomUUID();
+    const correlationIdB = randomUUID();
+    const envelopeA = validEnvelope({ correlationId: correlationIdA });
+    const envelopeB = validEnvelope({ correlationId: correlationIdB });
+
+    await Promise.all([
+      consumer.processMessage(toRawMessage(envelopeA, correlationIdA)),
+      consumer.processMessage(toRawMessage(envelopeB, correlationIdB)),
+    ]);
+
+    expect(observed).toEqual({
+      [correlationIdA]: correlationIdA,
+      [correlationIdB]: correlationIdB,
+    });
+  });
+
+  // TC-1 (T-PC-047's own numbering): a fast, no-broker/no-Postgres-required regression guard for
+  // the defect's root cause — `KafkaConsumerModule` (this task's own fix target) must import
+  // `LoggingModule`, or `Logger.overrideLogger`/`CorrelationContextService` never reach this
+  // process's DI graph at all, no matter what the consumer itself does. Proven to fail on the
+  // pre-fix source (reverting `kafka-consumer.module.ts`'s `imports` array back to
+  // `[PromoCodeGenerationModule]` makes this assertion false) — see this task's completion report.
+  it('TC-1: KafkaConsumerModule imports LoggingModule (the T-PC-047 fix target)', () => {
+    const moduleSource = readFileSync(KAFKA_CONSUMER_MODULE_SOURCE_PATH, 'utf8');
+    expect(moduleSource).toMatch(/LoggingModule/);
+    expect(moduleSource).toMatch(/imports:\s*\[[^\]]*LoggingModule[^\]]*\]/);
   });
 });
 

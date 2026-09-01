@@ -15,14 +15,28 @@
  *
  * Guarded by `MtlsGuard` at the class level — every RPC on this controller requires an
  * allowlisted client certificate (implementation note 5); there is no per-method opt-out.
+ *
+ * **T-PC-047.** `GenerateCode` runs its entire body inside `CorrelationContextService.run(...)`,
+ * keyed by this request's own `correlation_id`/`tenant_id` — the same gap-closing fix
+ * `generate-requested.consumer.ts` applies on the Kafka side, and the reason `GrpcServerModule` now
+ * also imports `LoggingModule` (see that module's own header). `ListActivePromoCodeConfigs` is
+ * deliberately left unwrapped: its proto request has no `correlation_id` field at all (§1) — there
+ * is nothing this RPC could key a correlation context on that wouldn't be invented, not read from
+ * "the envelope/request's own correlationId" as the defect's evidence specifically asks for.
+ * `GenerateCode` also emits one entry-point log line of its own, same discipline
+ * `correlation-context.middleware.ts` documents for the HTTP transport ("a request that touches no
+ * other logger call site still has at least one structured line to grep by correlationId") — the
+ * Kafka/gRPC "once wired" follow-up that middleware's own header explicitly flags this task as
+ * closing.
  */
-import { Controller, UseGuards } from '@nestjs/common';
+import { Controller, Logger, UseGuards } from '@nestjs/common';
 import { GrpcMethod, RpcException } from '@nestjs/microservices';
 import { status as GrpcStatus } from '@grpc/grpc-js';
 import { PromoCodeGenerationService } from '../modules/generation/promo-code-generation.service';
 import type { GenerationResult } from '../modules/generation/generation-result.types';
 import { PromoCodeConfigRepository } from '../modules/promo-code-config/promo-code-config.repository';
 import { toPromoCodeConfigSummary } from '../modules/promo-code-config/dto/promo-code-config-summary.response.dto';
+import { CorrelationContextService } from '../observability/logging/correlation-context.service';
 import { MtlsGuard } from './mtls.guard';
 import { GRPC_SERVICE_NAME } from './grpc-server.config';
 import type {
@@ -46,13 +60,31 @@ function nullToEmpty(value: string | null | undefined): string {
 @Controller()
 @UseGuards(MtlsGuard)
 export class PromoCodeController {
+  private readonly logger = new Logger(PromoCodeController.name);
+
   constructor(
     private readonly generationService: PromoCodeGenerationService,
     private readonly promoCodeConfigRepository: PromoCodeConfigRepository,
+    private readonly correlationContext: CorrelationContextService,
   ) {}
 
   @GrpcMethod(GRPC_SERVICE_NAME, 'GenerateCode')
   async generateCode(data: GenerateCodeRequestProto): Promise<GenerateCodeResponseProto> {
+    return this.correlationContext.run(
+      {
+        correlationId: data.correlationId ?? '',
+        tenantId: data.tenantId ?? '',
+        transport: 'GRPC',
+        rpc: 'GenerateCode',
+      },
+      () => {
+        this.logger.log('GenerateCode');
+        return this.doGenerateCode(data);
+      },
+    );
+  }
+
+  private async doGenerateCode(data: GenerateCodeRequestProto): Promise<GenerateCodeResponseProto> {
     const activityContextInput = data.activityContext;
     let metadata: Record<string, unknown> | undefined;
     const metadataJson = emptyToUndefined(activityContextInput?.metadataJson);

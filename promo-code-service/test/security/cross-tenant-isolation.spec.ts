@@ -209,7 +209,7 @@ describe('T-PC-041 — cross-tenant isolation, identical probe across REST/gRPC/
     const { tenantId, bindRefId } = await harness.createBoundConfig({ codePrefix: 'XTK2-' });
     const correlationId = randomUUID();
 
-    const resultMessage = await withOutboxPump(harness.outboxWorker, async () => {
+    const resultMessage = await withOutboxPump(harness, tenantId, correlationId, async () => {
       await harness.publishGenerateRequested(GENERATE_REQUESTED_TOPIC, correlationId, tenantId, {
         bindLevel: 'CAMPAIGN',
         bindRefId,

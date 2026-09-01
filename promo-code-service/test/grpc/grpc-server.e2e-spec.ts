@@ -561,4 +561,58 @@ describe('T-PC-031 — gRPC server (real mTLS, real Postgres) (e2e)', () => {
     expect(response.errorCode).toBe('INVALID_REQUEST');
     client.close();
   });
+
+  // T-PC-047 TC-2 (this task's own numbering): before this task's fix, this same call emitted
+  // `GrpcServerBootstrap`/`PromoCodeController` log lines as the default `ConsoleLogger`'s
+  // human-readable text — `Logger.overrideLogger` was never called anywhere in this process, since
+  // `GrpcMicroserviceRootModule`/`GrpcServerModule` never imported `LoggingModule` (see
+  // `grpc-server.module.ts`'s own T-PC-047 note). Reproducing that would mean reverting this file's
+  // `imports` array back to just `[PromoCodeGenerationModule, PromoCodeConfigModule]`; this test
+  // proves the fixed state against this same real, listening `GrpcMicroserviceRootModule` process —
+  // one JSON line, correlationId matching this call's own `correlation_id`, transport `'GRPC'`.
+  it("T-PC-047 TC-2: GenerateCode's own structured log line carries this request's correlationId (real process)", async () => {
+    const { tenantId, bindRefId } = await seedBoundConfig();
+    const correlationId = randomUUID();
+    const written: string[] = [];
+    const spy = jest.spyOn(process.stdout, 'write').mockImplementation(((chunk: string) => {
+      written.push(chunk);
+      return true;
+    }) as typeof process.stdout.write);
+
+    try {
+      const client = allowedClient();
+      const response = await callGenerateCode(client, {
+        correlationId,
+        tenantId,
+        bindLevel: 'CAMPAIGN',
+        bindRefId,
+        customerId: 'cust-t-pc-047',
+        merchantId: '',
+      });
+      expect(response.status).toBe('SUCCESS');
+      client.close();
+    } finally {
+      spy.mockRestore();
+    }
+
+    const entries = written
+      .map((line) => {
+        try {
+          return JSON.parse(line) as Record<string, unknown>;
+        } catch {
+          return null;
+        }
+      })
+      .filter((entry): entry is Record<string, unknown> => entry !== null)
+      .filter((entry) => entry.correlationId === correlationId);
+
+    expect(entries.length).toBeGreaterThan(0);
+    for (const entry of entries) {
+      expect(entry.transport).toBe('GRPC');
+      expect(entry.rpc).toBe('GenerateCode');
+      expect(typeof entry.level).toBe('string');
+      expect(typeof entry.timestamp).toBe('string');
+      expect(typeof entry.message).toBe('string');
+    }
+  });
 });

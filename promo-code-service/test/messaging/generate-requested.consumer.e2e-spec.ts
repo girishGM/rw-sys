@@ -299,4 +299,74 @@ describe('T-PC-030 — GenerateRequestedConsumer (real Redpanda, real Postgres) 
     expect(typeof dlqMessage.error).toBe('string');
     expect(typeof dlqMessage.failedAt).toBe('string');
   });
+
+  // T-PC-047 TC-2 (this task's own numbering): before this task's fix, this same real
+  // `GenerateRequestedConsumer.start()` process (backed by `KafkaConsumerModule`, booted here via
+  // `Test.createTestingModule` exactly like `KafkaConsumerRootModule` boots it in production) emitted
+  // `GenerateRequestedConsumer`'s own log lines as the default `ConsoleLogger`'s human-readable
+  // text — `Logger.overrideLogger` was never called anywhere in this module graph, since
+  // `KafkaConsumerModule` never imported `LoggingModule` (see that module's own T-PC-047 note).
+  // Reproducing that would mean reverting this suite's own `imports` array back to just
+  // `[ConfigModule, KafkaConsumerModule]` *without* `kafka-consumer.module.ts`'s `LoggingModule`
+  // addition; this test proves the fixed state — one JSON line, correlationId matching this
+  // message's own envelope `correlationId`, transport `'KAFKA'`.
+  it("T-PC-047 TC-2: a real generate.requested message's structured log line carries its own correlationId (real broker)", async () => {
+    const { tenantId, bindRefId } = await seedBoundConfig();
+    const correlationId = randomUUID();
+    const message = envelope(correlationId, tenantId, {
+      bindLevel: 'CAMPAIGN',
+      bindRefId,
+      customerId: 'cust-t-pc-047',
+      merchantId: null,
+      activityContext: null,
+    });
+
+    const written: string[] = [];
+    const spy = jest.spyOn(process.stdout, 'write').mockImplementation(((chunk: string) => {
+      written.push(chunk);
+      return true;
+    }) as typeof process.stdout.write);
+
+    function matchingEntries(): Record<string, unknown>[] {
+      return written
+        .map((line) => {
+          try {
+            return JSON.parse(line) as Record<string, unknown>;
+          } catch {
+            return null;
+          }
+        })
+        .filter((entry): entry is Record<string, unknown> => entry !== null)
+        .filter((entry) => entry.correlationId === correlationId);
+    }
+
+    let entries: Record<string, unknown>[] = [];
+    try {
+      await producer.send({
+        topic: GENERATE_REQUESTED_TOPIC,
+        messages: [{ key: correlationId, value: JSON.stringify(message) }],
+      });
+
+      // Poll for the log line itself, not just the DB row it's expected to precede — this
+      // consumer is a long-running, shared instance (started once in `beforeAll`, already used by
+      // every preceding test in this file), so waiting on the log line directly, rather than
+      // assuming it is always captured by the time some other side effect (the DB row) is
+      // observed, is the more direct and robust proof of TC-2's own claim.
+      entries = await pollUntil(async () => {
+        const found = matchingEntries();
+        return found.length > 0 ? found : null;
+      }, 20_000);
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(entries.length).toBeGreaterThan(0);
+    for (const entry of entries) {
+      expect(entry.transport).toBe('KAFKA');
+      expect(entry.rpc).toBe(GENERATE_REQUESTED_TOPIC);
+      expect(typeof entry.level).toBe('string');
+      expect(typeof entry.timestamp).toBe('string');
+      expect(typeof entry.message).toBe('string');
+    }
+  });
 });

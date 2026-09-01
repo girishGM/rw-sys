@@ -45,3 +45,41 @@ export const DEFAULT_RETRY_BACKOFF_MAX_MS = 5_000;
  * established for this agent's own standalone entry points.
  */
 export const KAFKA_CONSUMER_ENABLED_ENV_VAR = 'KAFKA_CONSUMER_ENABLED';
+
+/**
+ * T-PC-048. `codes_generated_total`/`promo_code_generation_duration_seconds` only reflect real
+ * generation once `KafkaConsumerModule` imports `MetricsModule` (see that module's own T-PC-048
+ * note) — but that instrumentation is useless to an operator unless *this* process's own
+ * `GET /metrics` is reachable: `KafkaConsumerRootModule` bootstrapped via
+ * `NestFactory.createApplicationContext` before this task, which has no HTTP listener (or any
+ * listener) at all, so a scraper aimed only at the HTTP `AppModule` process never saw a
+ * Kafka-originated generation (the defect this task fixes — see `kafka-consumer.main.ts`'s own
+ * header). `KAFKA_METRICS_PORT` (default 9102, distinct from the HTTP `AppModule`'s own default
+ * `PORT` 3010 and the gRPC process's own `GRPC_METRICS_PORT` default 9101, so all three can run on
+ * one dev machine at once without colliding) is this process's own metrics HTTP port.
+ */
+export const DEFAULT_KAFKA_METRICS_PORT = 9102;
+
+export function parseKafkaMetricsPort(): number {
+  const raw = process.env.KAFKA_METRICS_PORT;
+  if (raw === undefined || raw.trim().length === 0) {
+    return DEFAULT_KAFKA_METRICS_PORT;
+  }
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(
+      `Invalid Kafka consumer configuration: KAFKA_METRICS_PORT must be a positive integer, got "${raw}"`,
+    );
+  }
+  return parsed;
+}
+
+/**
+ * `KAFKA_METRICS_ENABLED` (default enabled) — this task's own Rollback lever, same
+ * `KAFKA_CONSUMER_ENABLED` convention above: set to `"false"` to keep the Kafka consumer itself
+ * running while turning off just its `GET /metrics` HTTP listener, with nothing left to tear down
+ * separately (no socket is ever opened).
+ */
+export function isKafkaMetricsListenerEnabled(): boolean {
+  return process.env.KAFKA_METRICS_ENABLED !== 'false';
+}
