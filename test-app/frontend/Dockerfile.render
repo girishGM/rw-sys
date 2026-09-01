@@ -1,0 +1,51 @@
+# syntax=docker/dockerfile:1
+#
+# test-app/frontend's image, for Render. Builds the Vite SPA, serves it with nginx, and proxies
+# /api/* to tracking-service at a hostname filled in from ${TRACKING_SERVICE_UPSTREAM_HOST} at
+# container start (see nginx.conf.template — uses the base nginx image's built-in envsubst
+# templating, unlike portal/front-end/Dockerfile.render's hand-rolled sed entrypoint).
+#
+# Built from the WORKSPACE ROOT (`test-app/`), not from `frontend/` alone — same npm-workspaces
+# reasoning as tracking-service/Dockerfile (the lockfile lives once at the workspace root).
+
+ARG NODE_IMAGE=node:20-bookworm-slim
+
+# ---------------------------------------------------------------------------------------------
+# Stage 1: install frontend's own dependencies.
+# ---------------------------------------------------------------------------------------------
+FROM ${NODE_IMAGE} AS deps
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+COPY frontend/package.json frontend/package.json
+COPY tracking-service/package.json tracking-service/package.json
+
+RUN npm ci --ignore-scripts --workspace=frontend --include-workspace-root=false
+
+# ---------------------------------------------------------------------------------------------
+# Stage 2: build the SPA.
+# ---------------------------------------------------------------------------------------------
+FROM deps AS build
+WORKDIR /app
+
+COPY frontend frontend
+
+RUN npm run build -w frontend
+
+# ---------------------------------------------------------------------------------------------
+# Stage 3: nginx, serving the built static output.
+# ---------------------------------------------------------------------------------------------
+FROM nginx:1.27-alpine AS runtime
+
+COPY frontend/nginx.main.conf /etc/nginx/nginx.conf
+COPY frontend/nginx.conf.template /etc/nginx/templates/default.conf.template
+COPY --from=build /app/frontend/dist /usr/share/nginx/html
+
+RUN chown -R nginx:nginx /var/cache/nginx /usr/share/nginx/html /etc/nginx/conf.d
+
+USER nginx
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
+  CMD wget -q -O /dev/null http://127.0.0.1:8080/nginx-health || exit 1

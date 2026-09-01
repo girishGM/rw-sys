@@ -1,0 +1,59 @@
+# Render Blueprint for a DEMO deployment of test-app — not a production topology, same spirit
+# as portal/render.yaml (see that file's own header for the caveats about Render's Blueprint
+# field names shifting between versions; this was written without a live Render account to
+# verify against).
+#
+# test-app has no database of its own — every "migration"-shaped concept lives in
+# tracking-service's memory, seeded at boot from the real portal API — so this Blueprint is
+# simpler than portal's: two web services, no `databases:` section.
+#
+# CRITICAL DEPENDENCY this file cannot express declaratively: tracking-service needs a real,
+# already-deployed `portal/back-end` to log into (PORTAL_BASE_URL below) — deploy portal first
+# (its own render.yaml, or wherever it already runs) and use its public URL here. There is no
+# offline/mocked mode; see test-app/README.md.
+
+services:
+  - type: web
+    name: test-app-tracking-service
+    runtime: docker
+    plan: free
+    dockerfilePath: tracking-service/Dockerfile
+    dockerContext: tracking-service
+    healthCheckPath: /health
+    envVars:
+      - key: PORT
+        value: "4001"
+      # The deployed portal/back-end's public base URL, e.g. https://reward-portal-api.onrender.com
+      # (no trailing slash). Fill in by hand once portal is deployed — there's nothing to
+      # auto-wire here unless portal's own services live in this same Render project (in which
+      # case a `fromService` reference, like test-app-frontend's below, would work instead).
+      - key: PORTAL_BASE_URL
+        sync: false
+      # A seeded portal tenant_admin account this service logs in as — see
+      # tracking-service/.env.example's own comment on why tenant_admin, not merchant. Never a
+      # real value in this file (R1); set both from the Render dashboard.
+      - key: PORTAL_LOGIN_EMAIL
+        sync: false
+      - key: PORTAL_LOGIN_PASSWORD
+        sync: false
+      # Optional — defaults to 300000 (5 minutes) if unset.
+      - key: PORTAL_CACHE_TTL_MS
+        value: "300000"
+
+  - type: web
+    name: test-app-frontend
+    runtime: docker
+    plan: free
+    dockerfilePath: frontend/Dockerfile.render
+    dockerContext: frontend
+    healthCheckPath: /nginx-health
+    envVars:
+      # Bare hostname only — no https://, no trailing slash (nginx.conf.template builds the
+      # proxy_pass URL itself). Render assigns this the moment the service above is first
+      # created; if this cross-service reference doesn't resolve on your Render version, set it
+      # by hand to that hostname instead.
+      - key: TRACKING_SERVICE_UPSTREAM_HOST
+        fromService:
+          type: web
+          name: test-app-tracking-service
+          property: host

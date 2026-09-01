@@ -1,0 +1,28 @@
+/**
+ * T-002 — base Tailwind layers. T-005 adds the import below plus base typography/colour rules
+ * (ARCHITECTURE.md §5) that apply the token set to the whole document.
+ */
+@import './tokens.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* T-005 — apply the token set globally: body text/background always track the active theme,
+   headings use the heading font (UI-UX-DESIGN.md "Typography"). */
+@layer base {
+  body {
+    background-color: var(--bg-base);
+    color: var(--text);
+    font-family: var(--font-body);
+  }
+
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    font-family: var(--font-heading);
+  }
+}

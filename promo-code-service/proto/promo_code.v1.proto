@@ -1,0 +1,70 @@
+// T-PC-031. Copied field-for-field from `03-GRPC-CONTRACT.md` §1 — message names, field names,
+// field numbers and types exactly as specified there. Do not rename a field to something that
+// reads better in proto style: the whole point (per that doc's closing note) is structural
+// identity with the Kafka `promo-code.generate.requested.v1`/`promo-code.generate.result.v1`
+// payloads (`02-KAFKA-CONTRACTS.md` §3/§5), not proto idiom, so both transports can call the
+// identical `PromoCodeGenerationService.generateCode()` without a translation layer that could
+// drift between them.
+//
+// `amount`/`reward_value` are `string`, never a numeric proto type (§2): binary floating point
+// cannot represent monetary decimals exactly.
+
+syntax = "proto3";
+
+package promocode.v1;
+
+service PromoCodeService {
+  // Synchronous code generation — the sync alternative to publishing onto
+  // promo-code.generate.requested.v1. Same idempotency semantics (02-KAFKA-CONTRACTS.md §4):
+  // a retried call with the same correlation_id returns the original result, never a second code.
+  rpc GenerateCode (GenerateCodeRequest) returns (GenerateCodeResponse);
+
+  // Read-only. Same rows GET /api/v1/promo-code-configs serves the portal (04-API-CONTRACT.md
+  // §1); exposed over gRPC too since reward-redemption-service may need it without an HTTP hop.
+  rpc ListActivePromoCodeConfigs (ListActivePromoCodeConfigsRequest) returns (PromoCodeConfigList);
+}
+
+message GenerateCodeRequest {
+  string correlation_id  = 1;
+  string tenant_id       = 2;
+  string bind_level      = 3;   // "CAMPAIGN" | "TRACKER" | "COMPONENT"
+  string bind_ref_id     = 4;
+  string customer_id     = 5;
+  string merchant_id     = 6;   // optional — empty string if absent
+  ActivityContext activity_context = 7;
+}
+
+message ActivityContext {
+  string amount    = 1;   // decimal-as-string — never a float (03-GRPC-CONTRACT.md §3)
+  string currency  = 2;
+  string metadata_json = 3;   // free-form, opaque, passed through only
+}
+
+message GenerateCodeResponse {
+  string status              = 1;   // "SUCCESS" | "FAILED"
+  string promo_code_id       = 2;
+  string code                = 3;
+  string reward_value_type   = 4;
+  string reward_value        = 5;   // decimal-as-string
+  string reward_unit         = 6;
+  string expires_at          = 7;   // ISO 8601, empty if none
+  string error_code          = 8;
+  string error_message       = 9;
+}
+
+message ListActivePromoCodeConfigsRequest {
+  string tenant_id    = 1;
+  string merchant_id  = 2;   // optional
+}
+
+message PromoCodeConfigList {
+  repeated PromoCodeConfigSummary configs = 1;
+}
+
+message PromoCodeConfigSummary {
+  string id                  = 1;
+  string name                = 2;
+  string reward_value_type   = 3;
+  string reward_value        = 4;
+  string reward_unit         = 5;
+}

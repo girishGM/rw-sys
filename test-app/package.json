@@ -1,0 +1,23 @@
+{
+  "name": "test-app",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Customer Reward Dashboard — standalone demo app (frontend + tracking-service).",
+  "engines": {
+    "node": ">=20 <21"
+  },
+  "workspaces": [
+    "frontend",
+    "tracking-service"
+  ],
+  "scripts": {
+    "dev": "concurrently -n frontend,tracking-service -c blue,green \"npm run dev --workspace frontend --if-present\" \"npm run dev --workspace tracking-service --if-present\"",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "build": "npm run build --workspaces --if-present"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}

@@ -27,6 +27,8 @@ credentials.json
 agents/
 
 project-plan/
+test-app-plan/
+promo-code-service-plan/
 
 # T-154 — anchored to the repo root: a bare `database/` (no leading slash) matches a directory of
 # that name at ANY depth, which silently swallowed `portal/back-end/src/database/` (the real
