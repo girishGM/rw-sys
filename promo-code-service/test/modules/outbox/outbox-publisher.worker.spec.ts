@@ -20,16 +20,30 @@
  * however such a row eventually gets created.
  *
  * **Isolation note**: `promo_code_outbox` has no `tenant_id` column (`01-DATABASE.md` §4) and the
- * poll query is deliberately global/un-scoped (that's the whole point of a single drain queue) —
- * so this suite cannot assume it's the only thing touching `PENDING` rows table-wide when other
- * test files' own real, `AppModule`-booted `OutboxPublisherWorker` could in principle also be
+ * poll query is deliberately global/un-scoped by default (that's the whole point of a single drain
+ * queue) — so this suite cannot assume it's the only thing touching `PENDING` rows table-wide when
+ * other test files' own real, `AppModule`-booted `OutboxPublisherWorker` could in principle also be
  * alive (`OUTBOX_PUBLISHER_AUTOSTART` disables that under `NODE_ENV=test`, see
  * `outbox-publisher.config.ts`) and other suites create real rows of their own
- * (`promo-code-generation.service.spec.ts`'s own KAFKA-transport TC-7, for one). Tests that check
- * a *specific* row's own fate (TC-1/2/3/7/8/9/10) therefore filter `publish.mock.calls` down to
- * their own known `correlationId` rather than asserting a total call count; tests that need a
- * closed, exact row set (TC-4/5/11/12) instead exercise `OutboxRepository`/config wiring directly
- * rather than depending on the whole table's global contents being otherwise empty.
+ * (`promo-code-generation.service.spec.ts`'s own KAFKA-transport TC-7, for one).
+ *
+ * **T-PC-045**: filtering `publish.mock.calls` by this test's own known `correlationId` (still
+ * done throughout, and still required — see `callsFor`) is *not* on its own enough to make a test
+ * deterministic: `findPendingBatch`'s `LIMIT batchSize`/`ORDER BY created_at` batch, and the
+ * `attempts`/`status` columns it reads and writes, are shared, mutable DB state — a concurrently
+ * running process's own unscoped poll can still race this suite's own row (fetch it, mutate its
+ * `attempts`/`status`) before this suite's own assertion observes it, corrupting counts/status that
+ * a correlationId filter never protects (that filter only narrows *which Kafka call* belongs to
+ * this test, not who else may have mutated the row in Postgres). Reproduced deterministically pre-
+ * fix by running this exact file under real concurrency (multiple simultaneous `npx jest
+ * test/modules/outbox/outbox-publisher.worker.spec.ts` invocations against the same real DB) — the
+ * same shape of race the review that filed this defect actually hit gathering its own "several
+ * consecutive reruns" evidence in parallel. Every test below that seeds a real row and asserts that
+ * *specific* row's own fate (TC-1/2/3/4/5/7/8/9/10) now calls `worker.runOnce({ rowIds: [...] })`
+ * scoped to only the row(s) it seeded (`OutboxRepository`'s own `OutboxBatchScope`) — immune to
+ * this race by construction, not just mitigated by filtering after the fact. TC-11/12 mock the
+ * repository (never touch the real, shared table) and TC-6/13 call `OutboxRepository` directly
+ * rather than through the worker; none of those needed a scope change.
  */
 import 'reflect-metadata';
 import { randomUUID } from 'node:crypto';
@@ -500,11 +514,12 @@ describe('T-PC-022 — OutboxPublisherWorker', () => {
       code: 'SAVE10-X7K2Q',
       expiresAt: '2026-12-01T00:00:00.000Z',
     });
-    await seedOutboxRow(promoCodeId, payload);
+    const outboxId = await seedOutboxRow(promoCodeId, payload);
 
     const publish: PublishMock = jest.fn().mockResolvedValue(undefined);
     const worker = buildWorker(fakeKafkaProducer(publish));
-    await worker.runOnce();
+    // T-PC-045: scoped (see TC-1's own comment above).
+    await worker.runOnce({ rowIds: [outboxId] });
 
     const myCalls = callsFor(publish, correlationId);
     expect(myCalls).toHaveLength(1);
@@ -527,11 +542,12 @@ describe('T-PC-022 — OutboxPublisherWorker', () => {
       errorCode: 'GENERATION_EXHAUSTED',
       errorMessage: 'Exhausted 5 collision-retry attempts',
     };
-    await seedOutboxRow(promoCodeId, failedPayload);
+    const outboxId = await seedOutboxRow(promoCodeId, failedPayload);
 
     const publish: PublishMock = jest.fn().mockResolvedValue(undefined);
     const worker = buildWorker(fakeKafkaProducer(publish));
-    await worker.runOnce();
+    // T-PC-045: scoped (see TC-1's own comment above).
+    await worker.runOnce({ rowIds: [outboxId] });
 
     const myCalls = callsFor(publish, correlationId);
     expect(myCalls).toHaveLength(1);
@@ -565,14 +581,15 @@ describe('T-PC-022 — OutboxPublisherWorker', () => {
         return originalMarkPublished(id);
       });
 
-    await worker.runOnce(); // "attempt 1": publish succeeds, DB update "crashes"
+    // T-PC-045: scoped (see TC-1's own comment above).
+    await worker.runOnce({ rowIds: [outboxId] }); // "attempt 1": publish succeeds, DB update "crashes"
     markPublishedSpy.mockRestore();
 
     let row = await fetchOutboxRow(outboxId);
     expect(row.status).toBe('PENDING');
 
     await wait(10);
-    await worker.runOnce(); // "restart": row picked back up, republished
+    await worker.runOnce({ rowIds: [outboxId] }); // "restart": row picked back up, republished
 
     const myCalls = callsFor(publish, correlationId);
     expect(myCalls).toHaveLength(2);
