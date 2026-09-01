@@ -15,7 +15,14 @@ export const envelopeSchema = z.object({
   eventVersion: z.string().min(1, 'eventVersion is required'),
   occurredAt: z.string().datetime({ message: 'occurredAt must be an ISO 8601 datetime string' }),
   correlationId: z.string().uuid('correlationId must be a valid UUID'),
-  tenantId: z.string().uuid('tenantId must be a valid UUID'),
+  // Portal-sourced, not this service's own key — a plain external identifier, never required to
+  // be UUID-shaped (T-PC-055, matching T-PC-052's `varchar(64)` column and T-PC-053/054's same
+  // bound on every other portal-sourced id field). `eventId`/`correlationId` above stay UUID:
+  // those are this service's own keys.
+  tenantId: z
+    .string()
+    .min(1, 'tenantId is required')
+    .max(64, 'tenantId must be at most 64 characters'),
   source: z.string().min(1, 'source is required'),
   data: z.record(z.unknown()),
 });

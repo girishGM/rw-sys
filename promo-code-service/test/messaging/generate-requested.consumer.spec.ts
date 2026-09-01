@@ -32,6 +32,7 @@ import {
   GENERATE_REQUESTED_TOPIC,
 } from '@/messaging/kafka-consumer.config';
 import { CorrelationContextService } from '@/observability/logging/correlation-context.service';
+import { parseEnvelope } from '@/messaging/envelope.schema';
 
 const CONSUMER_SOURCE_PATH = join(
   __dirname,
@@ -114,27 +115,30 @@ function toRawMessage(
   };
 }
 
-describe('T-PC-030 — GenerateRequestedConsumer (unit, mocked generation service/DLQ producer)', () => {
-  function buildConsumer(
-    generateCode: jest.Mock,
-    publish: jest.Mock = jest.fn().mockResolvedValue(undefined),
-    backoff: { baseMs?: number; maxMs?: number } = {},
-    correlationContext: CorrelationContextService = new CorrelationContextService(),
-  ): { consumer: GenerateRequestedConsumer; publish: jest.Mock } {
-    const generationService = { generateCode } as unknown as PromoCodeGenerationService;
-    const dlqProducer = { publish } as unknown as DlqProducerService;
-    const configService = { get: () => undefined } as unknown as ConfigService;
-    const consumer = new GenerateRequestedConsumer(
-      generationService,
-      dlqProducer,
-      configService,
-      backoff.baseMs ?? 1,
-      backoff.maxMs ?? 5,
-      correlationContext,
-    );
-    return { consumer, publish };
-  }
+/** Hoisted to module scope (not just the first `describe` block below) so the T-PC-055 describe
+ * block near the end of this file — added later, without needing/wanting its own duplicate
+ * fixture setup — can build a real `GenerateRequestedConsumer` too. */
+function buildConsumer(
+  generateCode: jest.Mock,
+  publish: jest.Mock = jest.fn().mockResolvedValue(undefined),
+  backoff: { baseMs?: number; maxMs?: number } = {},
+  correlationContext: CorrelationContextService = new CorrelationContextService(),
+): { consumer: GenerateRequestedConsumer; publish: jest.Mock } {
+  const generationService = { generateCode } as unknown as PromoCodeGenerationService;
+  const dlqProducer = { publish } as unknown as DlqProducerService;
+  const configService = { get: () => undefined } as unknown as ConfigService;
+  const consumer = new GenerateRequestedConsumer(
+    generationService,
+    dlqProducer,
+    configService,
+    backoff.baseMs ?? 1,
+    backoff.maxMs ?? 5,
+    correlationContext,
+  );
+  return { consumer, publish };
+}
 
+describe('T-PC-030 — GenerateRequestedConsumer (unit, mocked generation service/DLQ producer)', () => {
   // TC-1
   it('TC-1: a valid message calls generateCode() with correctly mapped fields, transport="KAFKA"', async () => {
     const generateCode = jest.fn().mockResolvedValue(successResult);
@@ -490,5 +494,75 @@ describe('T-PC-030 — R10 code-inspection guard (TC-14)', () => {
     const generateCodeCallSites =
       consumerSource.match(/this\.generationService\.generateCode\(/g) ?? [];
     expect(generateCodeCallSites).toHaveLength(1);
+  });
+});
+
+describe('T-PC-055 — tenantId is a plain portal-sourced string, not required to be UUID-shaped', () => {
+  // TC-1: a plain-string (non-UUID) tenantId parses successfully at the schema level.
+  it('TC-1: envelopeSchema accepts a plain-string tenantId ("1")', () => {
+    const envelope = validEnvelope({ tenantId: '1' });
+
+    const result = parseEnvelope(envelope);
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.data.tenantId).toBe('1');
+    }
+  });
+
+  // TC-1 (consumer-level): the same plain-string tenantId reaches generateCode() unchanged and the
+  // message is processed identically to a UUID-shaped tenantId (TC-2 below proves the Redpanda
+  // round-trip; this is the fast, mocked-dependency half of the same guarantee).
+  it('TC-1 (consumer): a message with plain-string tenantId ("1") is parsed and processed identically to a UUID-shaped one', async () => {
+    const generateCode = jest.fn().mockResolvedValue(successResult);
+    const { consumer } = buildConsumer(generateCode);
+    const envelope = validEnvelope({ tenantId: '1' });
+
+    const outcome = await consumer.processMessage(toRawMessage(envelope, randomUUID()));
+
+    expect(outcome).toBe('ACK');
+    expect(generateCode).toHaveBeenCalledWith(expect.objectContaining({ tenantId: '1' }));
+  });
+
+  // TC-3: eventId/correlationId are still enforced as UUIDs — only tenantId was relaxed.
+  it("TC-3: correlationId is still rejected (and DLQ'd) when it is a plain string, not a UUID", async () => {
+    const generateCode = jest.fn();
+    const publish = jest.fn().mockResolvedValue(undefined);
+    const { consumer } = buildConsumer(generateCode, publish);
+    const envelope = validEnvelope({ correlationId: 'not-a-uuid' });
+
+    const outcome = await consumer.processMessage(toRawMessage(envelope, 'some-key'));
+
+    expect(outcome).toBe('DLQ');
+    expect(generateCode).not.toHaveBeenCalled();
+    const [, , dlqMessage] = publish.mock.calls[0];
+    expect(dlqMessage.error).toContain('correlationId');
+  });
+
+  // TC-4: regression guard — an empty tenantId (violating the still-enforced "required" bound, the
+  // one part of the original validator this task does NOT relax) is still rejected. Proves the
+  // relaxation is "no longer UUID-shaped", not "no longer validated at all".
+  it('TC-4: an empty-string tenantId is still rejected — the relaxation drops the UUID format check, not the presence check', () => {
+    const envelope = validEnvelope({ tenantId: '' });
+
+    const result = parseEnvelope(envelope);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.message).toContain('tenantId');
+    }
+  });
+
+  // TC-4 (adjacent): a tenantId over 64 characters is still rejected, matching the
+  // varchar(64) column T-PC-052 already gave this field.
+  it('TC-4 (adjacent): a tenantId over 64 characters is still rejected', () => {
+    const envelope = validEnvelope({ tenantId: 'x'.repeat(65) });
+
+    const result = parseEnvelope(envelope);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.message).toContain('tenantId');
+    }
   });
 });

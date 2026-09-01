@@ -54,11 +54,22 @@ const activityContextSchema = z
 
 const generationRequestSchema = z.object({
   correlationId: z.string().uuid('correlationId must be a valid UUID'),
-  tenantId: z.string().uuid('tenantId must be a valid UUID'),
+  // T-PC-054: widened to a plain, bounded string — matches T-PC-052's `varchar(64)` widening of
+  // `promo_code.promo_code.tenant_id` (`01-DATABASE.md`), since portal-sourced tenant ids are not
+  // UUID-shaped. `correlationId`/`promoCodeConfigId` stay genuine UUIDs — this service's own keys.
+  tenantId: z
+    .string()
+    .min(1, 'tenantId is required')
+    .max(64, 'tenantId must be at most 64 characters'),
   bindLevel: z.enum(BIND_LEVELS, {
     errorMap: () => ({ message: 'bindLevel must be one of CAMPAIGN, TRACKER, COMPONENT' }),
   }),
-  bindRefId: z.string().uuid('bindRefId must be a valid UUID'),
+  // T-PC-054: widened alongside `tenantId` — see comment there. Matches
+  // `promo_code.promo_code.bind_ref_id varchar(64)` (T-PC-052).
+  bindRefId: z
+    .string()
+    .min(1, 'bindRefId is required')
+    .max(64, 'bindRefId must be at most 64 characters'),
   // T-PC-046: bounded to match `promo_code.promo_code.customer_id varchar(120)`
   // (`004_create_promo_code.ts`) — an oversized value must fail structural validation here as
   // `INVALID_REQUEST`, the same "outcome, not exception" discipline every other business failure
@@ -71,7 +82,15 @@ const generationRequestSchema = z.object({
     .string()
     .min(1, 'customerId is required')
     .max(120, 'customerId must be at most 120 characters'),
-  merchantId: z.string().uuid('merchantId must be a valid UUID').nullable().optional(),
+  // T-PC-054: widened alongside `tenantId`/`bindRefId` — see comment there. Matches
+  // `promo_code.promo_code.merchant_id varchar(64)` (T-PC-052). Still nullable/optional —
+  // this task changes format only, not optionality.
+  merchantId: z
+    .string()
+    .min(1, 'merchantId must not be empty')
+    .max(64, 'merchantId must be at most 64 characters')
+    .nullable()
+    .optional(),
   transport: z.enum(TRANSPORTS, {
     errorMap: () => ({ message: 'transport must be one of KAFKA, GRPC' }),
   }),

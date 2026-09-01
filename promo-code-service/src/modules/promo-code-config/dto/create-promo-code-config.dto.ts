@@ -47,7 +47,9 @@ const rewardUnitCrossCheck = (
 
 export const createPromoCodeConfigSchema = z
   .object({
-    merchantId: z.string().uuid().optional(),
+    // T-PC-053: portal-sourced id (T-PC-052 widened `merchant_id` to varchar(64)); no longer
+    // required to be UUID-shaped.
+    merchantId: z.string().min(1).max(64).optional(),
     name: z.string().trim().min(1, 'name is required').max(120),
     codePrefix: z.string().max(10).optional(),
     codePostfix: z.string().max(10).optional(),

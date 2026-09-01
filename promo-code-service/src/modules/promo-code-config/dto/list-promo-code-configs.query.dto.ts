@@ -16,8 +16,14 @@ import { z } from 'zod';
 import { PromoCodeConfigValidationError } from '../promo-code-config.errors';
 
 export const listPromoCodeConfigsQuerySchema = z.object({
-  tenantId: z.string().uuid('tenantId must be a valid UUID'),
-  merchantId: z.string().uuid('merchantId must be a valid UUID').optional(),
+  // T-PC-053: portal-sourced ids (T-PC-052 widened both columns to varchar(64)); no longer
+  // required to be UUID-shaped — validate at the same boundary the DB will actually accept.
+  tenantId: z.string().min(1, 'tenantId is required').max(64, 'tenantId must be <= 64 characters'),
+  merchantId: z
+    .string()
+    .min(1, 'merchantId is required')
+    .max(64, 'merchantId must be <= 64 characters')
+    .optional(),
   status: z.enum(['ACTIVE', 'INACTIVE', 'ARCHIVED']).default('ACTIVE'),
 });
 

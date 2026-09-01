@@ -126,8 +126,18 @@ describe('T-PC-030 — GenerateRequestedConsumer (real Redpanda, real Postgres) 
     return id;
   }
 
-  async function seedBoundConfig(): Promise<{ tenantId: string; bindRefId: string }> {
-    const tenantId = freshTenant();
+  /** T-PC-055 TC-2: a deliberately non-UUID-shaped tenantId — the portal's own numeric-string
+   * convention (`02-KAFKA-CONTRACTS.md` §2) — still fits the `varchar(64)` column (T-PC-052). */
+  function freshPlainTenant(): string {
+    const id = `t-pc-055-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    tenantIds.push(id);
+    return id;
+  }
+
+  async function seedBoundConfig(
+    tenantIdFactory: () => string = freshTenant,
+  ): Promise<{ tenantId: string; bindRefId: string }> {
+    const tenantId = tenantIdFactory();
     const actorId = randomUUID();
     const config = await promoCodeConfigRepository.create(tenantId, {
       merchantId: null,
@@ -281,6 +291,44 @@ describe('T-PC-030 — GenerateRequestedConsumer (real Redpanda, real Postgres) 
 
     expect(row.tenant_id).toBe(tenantId);
     expect(row.customer_id).toBe('cust-t-pc-030-tc15');
+    expect(row.code.startsWith('KAFKA-')).toBe(true);
+  });
+
+  // T-PC-055 TC-2: a real Redpanda round trip with a plain-string (non-UUID) tenantId is consumed
+  // and processed identically to TC-15's UUID-shaped one — only a real broker round trip proves
+  // the schema relaxation doesn't just pass at the unit level but actually reaches a committed row.
+  it('T-PC-055 TC-2: a plain-string tenantId envelope is consumed and produces a real promo_code row, same as a UUID-shaped one', async () => {
+    const { tenantId, bindRefId } = await seedBoundConfig(freshPlainTenant);
+    const correlationId = randomUUID();
+    const message = envelope(correlationId, tenantId, {
+      bindLevel: 'CAMPAIGN',
+      bindRefId,
+      customerId: 'cust-t-pc-055-tc2',
+      merchantId: null,
+      activityContext: { amount: '10.00', currency: 'USD', metadata: {} },
+    });
+
+    await producer.send({
+      topic: GENERATE_REQUESTED_TOPIC,
+      messages: [{ key: correlationId, value: JSON.stringify(message) }],
+    });
+
+    const row = await pollUntil(async () => {
+      const rows = await sequelize.query<{
+        id: string;
+        code: string;
+        customer_id: string;
+        tenant_id: string;
+      }>(
+        `SELECT id, code, customer_id, tenant_id FROM promo_code.promo_code
+             WHERE tenant_id = :tenantId AND correlation_id = :correlationId`,
+        { type: QueryTypes.SELECT, replacements: { tenantId, correlationId } },
+      );
+      return rows[0] ?? null;
+    }, 20_000);
+
+    expect(row.tenant_id).toBe(tenantId);
+    expect(row.customer_id).toBe('cust-t-pc-055-tc2');
     expect(row.code.startsWith('KAFKA-')).toBe(true);
   });
 

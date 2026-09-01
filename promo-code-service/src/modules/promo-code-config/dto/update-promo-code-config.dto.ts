@@ -17,7 +17,9 @@ import { PromoCodeConfigValidationError } from '../promo-code-config.errors';
 
 export const updatePromoCodeConfigSchema = z
   .object({
-    merchantId: z.string().uuid().nullable(),
+    // T-PC-053: portal-sourced id (T-PC-052 widened `merchant_id` to varchar(64)); no longer
+    // required to be UUID-shaped.
+    merchantId: z.string().min(1).max(64).nullable(),
     name: z.string().trim().min(1, 'name is required').max(120),
     codePrefix: z.string().max(10).nullable(),
     codePostfix: z.string().max(10).nullable(),
