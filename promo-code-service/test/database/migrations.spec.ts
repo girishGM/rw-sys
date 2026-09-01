@@ -44,15 +44,15 @@ async function insertConfig(
   const f = baseConfigFields(overrides);
   const [row] = await sequelize.query<{ id: string }>(
     `INSERT INTO promo_code.promo_code_config
-       (tenant_id, name, code_length, character_set, reward_value_type, reward_value,
+       (tenant_id, merchant_id, name, code_length, character_set, reward_value_type, reward_value,
         reward_unit, created_by, updated_by, deleted_at)
      VALUES
-       (:tenant_id, :name, :code_length, :character_set, :reward_value_type, :reward_value,
-        :reward_unit, :created_by, :updated_by, :deleted_at)
+       (:tenant_id, :merchant_id, :name, :code_length, :character_set, :reward_value_type,
+        :reward_value, :reward_unit, :created_by, :updated_by, :deleted_at)
      RETURNING id`,
     {
       type: QueryTypes.SELECT,
-      replacements: { deleted_at: null, ...f },
+      replacements: { deleted_at: null, merchant_id: null, ...f },
     },
   );
   return row.id;
@@ -291,18 +291,18 @@ describe('T-PC-052 — portal-sourced id columns widened to varchar(64)', () => 
   afterAll(async () => {
     if (createdConfigIds.length > 0) {
       await sequelize.query(
-        'DELETE FROM promo_code.promo_code_config_audit WHERE promo_code_config_id = ANY(:ids)',
+        'DELETE FROM promo_code.promo_code_config_audit WHERE promo_code_config_id IN (:ids)',
         { type: QueryTypes.RAW, replacements: { ids: createdConfigIds } },
       );
       await sequelize.query(
-        'DELETE FROM promo_code.promo_code WHERE promo_code_config_id = ANY(:ids)',
+        'DELETE FROM promo_code.promo_code WHERE promo_code_config_id IN (:ids)',
         { type: QueryTypes.RAW, replacements: { ids: createdConfigIds } },
       );
       await sequelize.query(
-        'DELETE FROM promo_code.campaign_promo_config WHERE promo_code_config_id = ANY(:ids)',
+        'DELETE FROM promo_code.campaign_promo_config WHERE promo_code_config_id IN (:ids)',
         { type: QueryTypes.RAW, replacements: { ids: createdConfigIds } },
       );
-      await sequelize.query('DELETE FROM promo_code.promo_code_config WHERE id = ANY(:ids)', {
+      await sequelize.query('DELETE FROM promo_code.promo_code_config WHERE id IN (:ids)', {
         type: QueryTypes.RAW,
         replacements: { ids: createdConfigIds },
       });
@@ -321,8 +321,8 @@ describe('T-PC-052 — portal-sourced id columns widened to varchar(64)', () => 
       `SELECT table_name, column_name, data_type, character_maximum_length
          FROM information_schema.columns
         WHERE table_schema = 'promo_code'
-          AND table_name = ANY(:tables)
-          AND column_name = ANY(:columns)`,
+          AND table_name IN (:tables)
+          AND column_name IN (:columns)`,
       {
         type: QueryTypes.SELECT,
         replacements: {
@@ -342,6 +342,9 @@ describe('T-PC-052 — portal-sourced id columns widened to varchar(64)', () => 
   // the 10 widened columns — the actual, real-Postgres-enforced property (AGENT-PROTOCOL.md §3),
   // not a mocked one.
   it('TC-2: a plain numeric-string value inserts cleanly into every widened column', async () => {
+    // A fresh bind_ref_id per run (rather than a fixed literal) keeps this test re-runnable
+    // without colliding with `uc_campaign_promo_config_active` against a prior, interrupted run.
+    const bindRefId = `bind-${randomUUID()}`;
     const configId = await insertConfig(sequelize, {
       tenant_id: '42',
       merchant_id: '43',
@@ -358,15 +361,15 @@ describe('T-PC-052 — portal-sourced id columns widened to varchar(64)', () => 
     await sequelize.query(
       `INSERT INTO promo_code.campaign_promo_config
          (promo_code_config_id, tenant_id, bind_level, bind_ref_id, bound_by)
-       VALUES (:configId, '42', 'CAMPAIGN', '45', '46')`,
-      { type: QueryTypes.RAW, replacements: { configId } },
+       VALUES (:configId, '42', 'CAMPAIGN', :bindRefId, '46')`,
+      { type: QueryTypes.RAW, replacements: { configId, bindRefId } },
     );
     const [binding] = await sequelize.query<{ bind_ref_id: string; bound_by: string }>(
       `SELECT bind_ref_id, bound_by FROM promo_code.campaign_promo_config
          WHERE promo_code_config_id = :configId`,
       { type: QueryTypes.SELECT, replacements: { configId } },
     );
-    expect(binding).toMatchObject({ bind_ref_id: '45', bound_by: '46' });
+    expect(binding).toMatchObject({ bind_ref_id: bindRefId, bound_by: '46' });
 
     await sequelize.query(
       `INSERT INTO promo_code.promo_code
