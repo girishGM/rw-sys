@@ -1,0 +1,48 @@
+import { Module } from '@nestjs/common';
+import { ConfigModule } from '@/config/config.module';
+import { HealthModule } from '@/health/health.module';
+import { PromoCodeConfigModule } from '@/modules/promo-code-config/promo-code-config.module';
+import { CampaignBindingModule } from '@/modules/campaign-binding/campaign-binding.module';
+import { PromoCodeGenerationModule } from '@/modules/generation/promo-code-generation.module';
+import { OutboxPublisherModule } from '@/modules/outbox/outbox-publisher.module';
+
+/**
+ * Append-only registration point, same convention as portal/back-end's own `app.module.ts`:
+ * each task adds its own module import line here and touches nothing else in this file, so
+ * two agents working in parallel (T-PC-010/011/012 in Wave 1 onward) never collide on this
+ * file's content.
+ *
+ * `PromoCodeConfigModule` added by T-PC-010 (AGENT-PROTOCOL.md R8 — this file is an
+ * append-only registration point, not `agent-promo-config`'s own owned file; only this one
+ * import line + list entry were touched).
+ *
+ * `CampaignBindingModule` added by T-PC-012, same append-only convention — only this import
+ * line + list entry touched, nothing else in this file.
+ *
+ * `PromoCodeGenerationModule` added by T-PC-021, same append-only convention — only this import
+ * line + list entry touched. No transport adapter (T-PC-030/T-PC-031) exists yet, so nothing
+ * calls `PromoCodeGenerationService` through the running app yet; registering it here now is
+ * what makes the Rollback section of that task's own task file ("remove the import — zero live
+ * callers before Wave 3") meaningful.
+ *
+ * `OutboxPublisherModule` added by T-PC-022, same append-only convention — only this import line
+ * + list entry touched. `OutboxPublisherWorker.onModuleInit` only actually starts its own
+ * `setInterval` poller when `OUTBOX_PUBLISHER_AUTOSTART` resolves `true`
+ * (`outbox-publisher.config.ts`), which defaults to "on" everywhere except `NODE_ENV=test` — so
+ * every `*.e2e-spec.ts` in this project (most of which boot the full `AppModule` for reasons
+ * having nothing to do with the outbox) never races a live poller against a real, global,
+ * un-scoped `promo_code_outbox` query while another suite's own rows exist. `KafkaProducerService`
+ * itself also only ever connects lazily on an actual publish attempt (see that file's own header),
+ * so booting this module never depends on a broker being reachable either way.
+ */
+@Module({
+  imports: [
+    ConfigModule,
+    HealthModule,
+    PromoCodeConfigModule,
+    CampaignBindingModule,
+    PromoCodeGenerationModule,
+    OutboxPublisherModule,
+  ],
+})
+export class AppModule {}

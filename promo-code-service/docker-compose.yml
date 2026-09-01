@@ -1,0 +1,66 @@
+# Local dev broker only (Redpanda, Kafka-API-compatible — ARCHITECTURE.md §4). This
+# service's own `promo_code` Postgres schema lives on the ALREADY-RUNNING Postgres 16
+# server documented in root CLAUDE.md (/Library/PostgreSQL/16) — this file deliberately
+# does NOT start a second Postgres container (T-PC-001 implementation note 4; root
+# CLAUDE.md warns this exact mistake already happened once, accidentally, via Homebrew).
+# `postgres-connectivity-check` below is a one-shot `pg_isready` probe against that real
+# server, not a database of its own.
+version: '3.8'
+
+services:
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.2.18
+    container_name: promo-code-service-redpanda
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp
+      - '1'
+      - --memory
+      - 1G
+      - --reserve-memory
+      - 0M
+      - --node-id
+      - '0'
+      - --check=false
+      - --kafka-addr
+      - PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr
+      - PLAINTEXT://localhost:9092
+      - --pandaproxy-addr
+      - 0.0.0.0:8082
+      - --advertise-pandaproxy-addr
+      - localhost:8082
+      - --rpc-addr
+      - 0.0.0.0:33145
+      - --advertise-rpc-addr
+      - localhost:33145
+    ports:
+      - '9092:9092' # Kafka API — KAFKA_BROKERS=localhost:9092 in .env.development
+      - '9644:9644' # Admin API — also this healthcheck's own target
+      - '8082:8082' # Pandaproxy (REST proxy) — unused by this service today, exposed only
+      # for local debugging with Redpanda's own CLI/UI tooling
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -sf http://localhost:9644/v1/status/ready || exit 1']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # One-shot connectivity probe against the EXISTING Postgres 16 server (root CLAUDE.md) —
+  # never a second Postgres instance. `host.docker.internal` is how Docker Desktop resolves
+  # the host machine from inside a container; override DB_HOST/DB_PORT for a non-default
+  # local setup. Exits 0/1 and stops — `docker compose ps` shows it as "Exited (0)" on
+  # success, not "Up", because it is a probe, not a long-running service.
+  postgres-connectivity-check:
+    image: postgres:16-alpine
+    container_name: promo-code-service-postgres-check
+    entrypoint:
+      - sh
+      - -c
+      - >
+        pg_isready -h "${DB_HOST:-host.docker.internal}" -p "${DB_PORT:-5432}" &&
+        echo "Postgres reachable at ${DB_HOST:-host.docker.internal}:${DB_PORT:-5432}" ||
+        (echo "Postgres NOT reachable at ${DB_HOST:-host.docker.internal}:${DB_PORT:-5432}" && exit 1)
+    restart: 'no'
