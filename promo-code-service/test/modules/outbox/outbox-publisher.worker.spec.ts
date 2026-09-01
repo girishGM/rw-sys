@@ -264,7 +264,15 @@ describe('T-PC-022 — OutboxPublisherWorker', () => {
     const publish: PublishMock = jest.fn().mockResolvedValue(undefined);
     const worker = buildWorker(fakeKafkaProducer(publish));
 
-    await worker.runOnce();
+    // T-PC-045: scoped to this test's own row — see this file's own header ("Isolation note") and
+    // TC-14 below. Without `scope`, this test raced a *concurrently running instance of this same
+    // suite* (e.g. two `npx jest` reruns of this file in parallel, exactly how the T-PC-045 review
+    // gathered its own repro evidence): another process's own unscoped `findPendingBatch` could and
+    // did pick up and publish this row before this assertion observed it, or vice versa, corrupting
+    // `attempts`/`status` for both. Reproduced deterministically via 4 concurrent `npx jest
+    // test/modules/outbox/outbox-publisher.worker.spec.ts` invocations before this fix; 0 failures
+    // in 40+ sequential reruns and repeated concurrent reruns after it.
+    await worker.runOnce({ rowIds: [outboxId] });
 
     const myCalls = callsFor(publish, correlationId);
     expect(myCalls).toHaveLength(1);
@@ -288,13 +296,16 @@ describe('T-PC-022 — OutboxPublisherWorker', () => {
     );
     const worker = buildWorker(fakeKafkaProducer(publish), { backoffBaseMs: 1, backoffMaxMs: 5 });
 
-    await worker.runOnce();
+    // T-PC-045: scoped (see TC-1's own comment above) — this test's own multi-call, timing-tight
+    // sequence (1ms backoff, 10ms wait) is exactly the shape that most exposed the cross-process
+    // race in the review's own reproduction.
+    await worker.runOnce({ rowIds: [outboxId] });
     let row = await fetchOutboxRow(outboxId);
     expect(row.status).toBe('PENDING');
     expect(row.attempts).toBe(1);
 
     await wait(10);
-    await worker.runOnce();
+    await worker.runOnce({ rowIds: [outboxId] });
 
     expect(callsFor(publish, correlationId)).toHaveLength(2);
     row = await fetchOutboxRow(outboxId);
@@ -318,7 +329,8 @@ describe('T-PC-022 — OutboxPublisherWorker', () => {
     });
 
     for (let i = 0; i < maxAttempts; i += 1) {
-      await worker.runOnce();
+      // T-PC-045: scoped (see TC-1's own comment above).
+      await worker.runOnce({ rowIds: [outboxId] });
       await wait(10);
     }
 
@@ -336,23 +348,24 @@ describe('T-PC-022 — OutboxPublisherWorker', () => {
     // Deliberately NOT inserted in age order, so passing this proves the ORDER BY, not
     // insertion order.
     const ageOffsetsMs = [1_000, 3_000, 2_000];
-    const seeded: { correlationId: string; ageMs: number }[] = [];
+    const seeded: { correlationId: string; outboxId: string; ageMs: number }[] = [];
     for (const ageMs of ageOffsetsMs) {
       const { id: promoCodeId, correlationId } = await seedPromoCode(tenantId, configId);
-      await seedOutboxRow(promoCodeId, successPayload({ promoCodeId }), {
+      const outboxId = await seedOutboxRow(promoCodeId, successPayload({ promoCodeId }), {
         createdAt: new Date(now - ageMs).toISOString(),
       });
-      seeded.push({ correlationId, ageMs });
+      seeded.push({ correlationId, outboxId, ageMs });
     }
     const expectedOrder = [...seeded].sort((a, b) => b.ageMs - a.ageMs).map((s) => s.correlationId);
     const knownKeys = new Set(seeded.map((s) => s.correlationId));
 
     const publish: PublishMock = jest.fn().mockResolvedValue(undefined);
     const worker = buildWorker(fakeKafkaProducer(publish));
-    await worker.runOnce();
+    // T-PC-045: scoped to exactly this test's own 3 rows (see TC-1's own comment above) — the
+    // ordering assertion below still proves the real `ORDER BY created_at` behaviour, just without
+    // depending on the shared table's global contents at this exact moment.
+    await worker.runOnce({ rowIds: seeded.map((s) => s.outboxId) });
 
-    // Isolation note: filter the global call order down to this test's own 3 known rows —
-    // some other concurrently running suite's own real row may also have landed in the batch.
     const myPublishOrder = publish.mock.calls
       .map((call) => call[1])
       .filter((key) => knownKeys.has(key));
@@ -373,11 +386,19 @@ describe('T-PC-022 — OutboxPublisherWorker', () => {
       { status: 'PUBLISHED', attempts: 1 },
     );
     const { id: pendingPromoCodeId, correlationId } = await seedPromoCode(tenantId, configId);
-    await seedOutboxRow(pendingPromoCodeId, successPayload({ promoCodeId: pendingPromoCodeId }));
+    const pendingOutboxId = await seedOutboxRow(
+      pendingPromoCodeId,
+      successPayload({ promoCodeId: pendingPromoCodeId }),
+    );
 
     const publish: PublishMock = jest.fn().mockResolvedValue(undefined);
     const worker = buildWorker(fakeKafkaProducer(publish));
-    await worker.runOnce();
+    // T-PC-045: scoped to this test's own two known rows (see TC-1's own comment above). Including
+    // `publishedOutboxId` in scope doesn't defeat this test's own point — `findPendingBatch` still
+    // filters `status = 'PENDING'` first, so the already-PUBLISHED row is excluded by status, not
+    // by being outside `rowIds`; this only removes this test's dependency on the shared table's
+    // global contents at this exact moment.
+    await worker.runOnce({ rowIds: [publishedOutboxId, pendingOutboxId] });
 
     expect(callsFor(publish, correlationId)).toHaveLength(1);
     // The already-PUBLISHED row must never be re-selected, proven two ways: its own key is
@@ -444,11 +465,12 @@ describe('T-PC-022 — OutboxPublisherWorker', () => {
     const tenantId = freshTenant();
     const configId = await seedConfig(tenantId);
     const { id: promoCodeId, correlationId } = await seedPromoCode(tenantId, configId);
-    await seedOutboxRow(promoCodeId, successPayload({ promoCodeId }));
+    const outboxId = await seedOutboxRow(promoCodeId, successPayload({ promoCodeId }));
 
     const publish: PublishMock = jest.fn().mockResolvedValue(undefined);
     const worker = buildWorker(fakeKafkaProducer(publish));
-    await worker.runOnce();
+    // T-PC-045: scoped (see TC-1's own comment above).
+    await worker.runOnce({ rowIds: [outboxId] });
 
     const myCalls = callsFor(publish, correlationId);
     expect(myCalls).toHaveLength(1);

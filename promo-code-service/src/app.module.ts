@@ -5,6 +5,7 @@ import { PromoCodeConfigModule } from '@/modules/promo-code-config/promo-code-co
 import { CampaignBindingModule } from '@/modules/campaign-binding/campaign-binding.module';
 import { PromoCodeGenerationModule } from '@/modules/generation/promo-code-generation.module';
 import { OutboxPublisherModule } from '@/modules/outbox/outbox-publisher.module';
+import { ObservabilityModule } from '@/observability/observability.module';
 
 /**
  * Append-only registration point, same convention as portal/back-end's own `app.module.ts`:
@@ -34,6 +35,14 @@ import { OutboxPublisherModule } from '@/modules/outbox/outbox-publisher.module'
  * un-scoped `promo_code_outbox` query while another suite's own rows exist. `KafkaProducerService`
  * itself also only ever connects lazily on an actual publish attempt (see that file's own header),
  * so booting this module never depends on a broker being reachable either way.
+ *
+ * `ObservabilityModule` added by T-PC-042, same append-only convention — only this import line +
+ * list entry touched. Installs the process-wide structured (JSON) logger, an `x-correlation-id`
+ * HTTP middleware applied to every route, and `GET /metrics` (Prometheus text exposition format).
+ * Only takes effect in *this* process (the HTTP transport) — the standalone gRPC/Kafka processes
+ * (`grpc-server.main.ts`/`kafka-consumer.main.ts`, `agent-promo-messaging`'s own files, R8) are not
+ * reachable from this task's own file scope; see that task's completion report and the defect
+ * filed against that gap.
  */
 @Module({
   imports: [
@@ -43,6 +52,7 @@ import { OutboxPublisherModule } from '@/modules/outbox/outbox-publisher.module'
     CampaignBindingModule,
     PromoCodeGenerationModule,
     OutboxPublisherModule,
+    ObservabilityModule,
   ],
 })
 export class AppModule {}
