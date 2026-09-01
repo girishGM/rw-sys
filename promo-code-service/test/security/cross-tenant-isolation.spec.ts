@@ -58,7 +58,7 @@ describe('T-PC-041 — cross-tenant isolation, identical probe across REST/gRPC/
       .set(...authHeader());
 
     expect(response.status).toBe(200);
-    const ids = (response.body.configs as Array<{ id: string }>).map((c) => c.id);
+    const ids = (response.body as Array<{ id: string }>).map((c) => c.id);
     expect(ids).not.toContain(configId);
     expect(tenantA).not.toBe(tenantB);
   });
@@ -82,7 +82,7 @@ describe('T-PC-041 — cross-tenant isolation, identical probe across REST/gRPC/
       .get('/api/v1/promo-code-configs')
       .query({ tenantId: tenantA })
       .set(...authHeader());
-    const configA = (stillOwnedByA.body.configs as Array<{ id: string; rewardValue: string }>).find(
+    const configA = (stillOwnedByA.body as Array<{ id: string; rewardValue: string }>).find(
       (c) => c.id === configId,
     );
     expect(configA).toBeDefined();
@@ -129,7 +129,7 @@ describe('T-PC-041 — cross-tenant isolation, identical probe across REST/gRPC/
       .get('/api/v1/promo-code-configs')
       .query({ tenantId: tenantA })
       .set(...authHeader());
-    const ids = (stillActive.body.configs as Array<{ id: string }>).map((c) => c.id);
+    const ids = (stillActive.body as Array<{ id: string }>).map((c) => c.id);
     expect(ids).toContain(configId);
     expect(tenantA).not.toBe(tenantB);
   });

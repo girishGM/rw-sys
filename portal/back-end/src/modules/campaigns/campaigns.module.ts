@@ -29,6 +29,7 @@ import { RbacModule } from '@/common/rbac/rbac.module';
 import { DatabaseModule } from '@/database/database.module';
 import { NotificationsModule } from '@/modules/notifications/notifications.module';
 import { ChangeEventsModule } from '@/grpc/change-events.module';
+import { PromoCodeServiceModule } from '@/modules/promo-code-integration/promo-code-service.module';
 import { CampaignsController } from './campaigns.controller';
 import { CampaignsService } from './campaigns.service';
 import { CampaignAuditService } from './campaign-audit.service';
@@ -41,8 +42,21 @@ import { CapsService } from './caps.service';
 // deliberately *not* `GrpcModule`: see `change-events.module.ts`'s header for the cycle that would
 // create and why the dependency is on "a place to announce a transition" rather than on the gRPC
 // server. It registers no guard, interceptor or filter, so its position here carries no meaning.
+// T-166 appended `PromoCodeServiceModule` — the one-provider module holding
+// `PromoCodeServiceClient`, which `BindingsService.attachReward` registers a maker's chosen Promo
+// Code Config through before it writes any local row (04-API-CONTRACT.md §2 in
+// `promo-code-service-plan/`). Same shape and same reasoning as `ChangeEventsModule` above: a
+// dependency on "somewhere to register a binding", not on an integration subsystem. It registers
+// no guard, interceptor or filter, so its position here carries no meaning either.
 @Module({
-  imports: [RbacModule, AuditModule, DatabaseModule, NotificationsModule, ChangeEventsModule],
+  imports: [
+    RbacModule,
+    AuditModule,
+    DatabaseModule,
+    NotificationsModule,
+    ChangeEventsModule,
+    PromoCodeServiceModule,
+  ],
   controllers: [CampaignsController],
   providers: [CampaignsService, CampaignAuditService, JourneyService, BindingsService, CapsService],
   exports: [CampaignsService, CampaignAuditService, JourneyService, BindingsService, CapsService],

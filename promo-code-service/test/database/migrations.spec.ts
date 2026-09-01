@@ -260,6 +260,164 @@ describe('T-PC-002 — promo_code schema migrations', () => {
   });
 });
 
+describe('T-PC-052 — portal-sourced id columns widened to varchar(64)', () => {
+  let sequelize: Sequelize;
+
+  // The 10 physical (table, column) pairs migration 009 widens — see that migration's own
+  // header for why 7 distinct column *names* land on 10 physical columns.
+  const WIDENED_COLUMNS: ReadonlyArray<{ table: string; column: string }> = [
+    { table: 'promo_code_config', column: 'tenant_id' },
+    { table: 'promo_code_config', column: 'merchant_id' },
+    { table: 'promo_code_config', column: 'created_by' },
+    { table: 'promo_code_config', column: 'updated_by' },
+    { table: 'campaign_promo_config', column: 'tenant_id' },
+    { table: 'campaign_promo_config', column: 'bind_ref_id' },
+    { table: 'campaign_promo_config', column: 'bound_by' },
+    { table: 'promo_code', column: 'tenant_id' },
+    { table: 'promo_code', column: 'merchant_id' },
+    { table: 'promo_code_config_audit', column: 'changed_by' },
+  ];
+
+  // TC-2/TC-6 insert rows with tenant ids that don't match the shared `TENANT_ID` the outer
+  // describe block's own `afterAll` cleans up — tracked here and cleaned up independently,
+  // FK-safe order (audit/campaign_promo_config/promo_code leaves before promo_code_config root).
+  const createdConfigIds: string[] = [];
+
+  beforeAll(async () => {
+    sequelize = createMigrationConnection();
+    await sequelize.authenticate();
+  });
+
+  afterAll(async () => {
+    if (createdConfigIds.length > 0) {
+      await sequelize.query(
+        'DELETE FROM promo_code.promo_code_config_audit WHERE promo_code_config_id = ANY(:ids)',
+        { type: QueryTypes.RAW, replacements: { ids: createdConfigIds } },
+      );
+      await sequelize.query(
+        'DELETE FROM promo_code.promo_code WHERE promo_code_config_id = ANY(:ids)',
+        { type: QueryTypes.RAW, replacements: { ids: createdConfigIds } },
+      );
+      await sequelize.query(
+        'DELETE FROM promo_code.campaign_promo_config WHERE promo_code_config_id = ANY(:ids)',
+        { type: QueryTypes.RAW, replacements: { ids: createdConfigIds } },
+      );
+      await sequelize.query('DELETE FROM promo_code.promo_code_config WHERE id = ANY(:ids)', {
+        type: QueryTypes.RAW,
+        replacements: { ids: createdConfigIds },
+      });
+    }
+    await sequelize.close();
+  });
+
+  // TC-1
+  it('TC-1: every widened column reports character varying(64) in information_schema', async () => {
+    const rows = await sequelize.query<{
+      table_name: string;
+      column_name: string;
+      data_type: string;
+      character_maximum_length: number;
+    }>(
+      `SELECT table_name, column_name, data_type, character_maximum_length
+         FROM information_schema.columns
+        WHERE table_schema = 'promo_code'
+          AND table_name = ANY(:tables)
+          AND column_name = ANY(:columns)`,
+      {
+        type: QueryTypes.SELECT,
+        replacements: {
+          tables: WIDENED_COLUMNS.map((c) => c.table),
+          columns: WIDENED_COLUMNS.map((c) => c.column),
+        },
+      },
+    );
+
+    for (const { table, column } of WIDENED_COLUMNS) {
+      const row = rows.find((r) => r.table_name === table && r.column_name === column);
+      expect(row).toMatchObject({ data_type: 'character varying', character_maximum_length: 64 });
+    }
+  });
+
+  // TC-2. Proves the DB layer alone no longer rejects a plain, non-UUID-shaped string in any of
+  // the 10 widened columns — the actual, real-Postgres-enforced property (AGENT-PROTOCOL.md §3),
+  // not a mocked one.
+  it('TC-2: a plain numeric-string value inserts cleanly into every widened column', async () => {
+    const configId = await insertConfig(sequelize, {
+      tenant_id: '42',
+      merchant_id: '43',
+      created_by: '44',
+      updated_by: '44',
+    });
+    createdConfigIds.push(configId);
+    const [config] = await sequelize.query<{ tenant_id: string; merchant_id: string }>(
+      'SELECT tenant_id, merchant_id FROM promo_code.promo_code_config WHERE id = :id',
+      { type: QueryTypes.SELECT, replacements: { id: configId } },
+    );
+    expect(config).toMatchObject({ tenant_id: '42', merchant_id: '43' });
+
+    await sequelize.query(
+      `INSERT INTO promo_code.campaign_promo_config
+         (promo_code_config_id, tenant_id, bind_level, bind_ref_id, bound_by)
+       VALUES (:configId, '42', 'CAMPAIGN', '45', '46')`,
+      { type: QueryTypes.RAW, replacements: { configId } },
+    );
+    const [binding] = await sequelize.query<{ bind_ref_id: string; bound_by: string }>(
+      `SELECT bind_ref_id, bound_by FROM promo_code.campaign_promo_config
+         WHERE promo_code_config_id = :configId`,
+      { type: QueryTypes.SELECT, replacements: { configId } },
+    );
+    expect(binding).toMatchObject({ bind_ref_id: '45', bound_by: '46' });
+
+    await sequelize.query(
+      `INSERT INTO promo_code.promo_code
+         (promo_code_config_id, code, customer_id, tenant_id, merchant_id, reward_value_type,
+          reward_value, reward_unit, correlation_id, transport)
+       VALUES
+         (:configId, :code, 'cust-t-pc-052', '42', '43', 'FIXED_AMOUNT', 10, 'USD',
+          :correlationId, 'KAFKA')`,
+      {
+        type: QueryTypes.RAW,
+        replacements: {
+          configId,
+          code: `T-PC-052-${randomUUID()}`,
+          correlationId: randomUUID(),
+        },
+      },
+    );
+    const [code] = await sequelize.query<{ tenant_id: string; merchant_id: string }>(
+      `SELECT tenant_id, merchant_id FROM promo_code.promo_code WHERE promo_code_config_id = :configId`,
+      { type: QueryTypes.SELECT, replacements: { configId } },
+    );
+    expect(code).toMatchObject({ tenant_id: '42', merchant_id: '43' });
+
+    await sequelize.query(
+      `INSERT INTO promo_code.promo_code_config_audit
+         (promo_code_config_id, action, changed_fields, changed_by)
+       VALUES (:configId, 'CREATE', '{}'::jsonb, '47')`,
+      { type: QueryTypes.RAW, replacements: { configId } },
+    );
+    const [audit] = await sequelize.query<{ changed_by: string }>(
+      `SELECT changed_by FROM promo_code.promo_code_config_audit WHERE promo_code_config_id = :configId`,
+      { type: QueryTypes.SELECT, replacements: { configId } },
+    );
+    expect(audit).toMatchObject({ changed_by: '47' });
+  });
+
+  // TC-6. Existing pre-migration UUID-shaped rows (already present from before this migration
+  // ran, or inserted here to stand in for one) are still readable/queryable as plain strings
+  // post-migration — no data loss from the widen.
+  it('TC-6: a UUID-shaped value inserted into a widened column is still readable as a plain string', async () => {
+    const uuidLikeTenant = randomUUID();
+    const configId = await insertConfig(sequelize, { tenant_id: uuidLikeTenant });
+    createdConfigIds.push(configId);
+    const [row] = await sequelize.query<{ tenant_id: string }>(
+      'SELECT tenant_id FROM promo_code.promo_code_config WHERE id = :id',
+      { type: QueryTypes.SELECT, replacements: { id: configId } },
+    );
+    expect(row.tenant_id).toBe(uuidLikeTenant);
+  });
+});
+
 describe('T-PC-002 — promo_code_app least-privilege grants (TC-11, TC-12)', () => {
   let appSequelize: Sequelize;
 

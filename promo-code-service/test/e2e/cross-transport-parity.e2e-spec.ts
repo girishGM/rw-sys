@@ -146,8 +146,11 @@ describe('T-PC-040 — cross-transport parity (gate G3) (e2e)', () => {
     const grpcResponse = await callListActivePromoCodeConfigs(client, { tenantId, merchantId: '' });
     client.close();
 
+    // T-PC-049 / 04-API-CONTRACT.md §1: the REST list response is a bare array, not
+    // `{ configs: [...] }` — the portal's own generic API-lookup proxy
+    // (`FieldValueSourceLookupService.apiLookup()`) requires a top-level JSON array.
     const restConfigs = (
-      restResponse.body.configs as Array<{
+      restResponse.body as Array<{
         id: string;
         name: string;
         rewardValueType: string;
@@ -160,5 +163,45 @@ describe('T-PC-040 — cross-transport parity (gate G3) (e2e)', () => {
     const grpcConfigs = grpcResponse.configs.slice().sort((a, b) => a.id.localeCompare(b.id));
 
     expect(grpcConfigs).toEqual(restConfigs);
+  });
+
+  // TC-3 (regression): the REST list response body itself must stay a bare array — a prior
+  // defect (T-PC-049 fixed the endpoint, but the earlier version of this very spec file kept
+  // reading `restResponse.body.configs`, which silently passed as `undefined.slice()` throwing
+  // rather than a real assertion). Assert the response shape directly so a regression to a
+  // wrapped `{ configs: [...] }` body — or back to a bare array being un-wrapped again — fails
+  // loudly here, not just as a downstream TypeError.
+  it('TC-9 regression: GET /api/v1/promo-code-configs response body is a bare array, not wrapped in { configs }', async () => {
+    const tenantId = harness.freshTenant();
+    const actorId = randomUUID();
+    const authHeader: [string, string] = [
+      'Authorization',
+      `Bearer ${process.env.INTERNAL_SERVICE_TOKEN}`,
+    ];
+
+    const createResponse = await request(harness.app.getHttpServer())
+      .post('/api/v1/promo-code-configs')
+      .set(...authHeader)
+      .send({
+        tenantId,
+        actorId,
+        name: `t-pc-051 regression ${randomUUID()}`,
+        codeLength: 8,
+        characterSet: 'NUMERIC',
+        rewardValueType: 'POINTS',
+        rewardValue: 250,
+        rewardUnit: 'pts',
+      });
+    expect(createResponse.status).toBe(201);
+
+    const restResponse = await request(harness.app.getHttpServer())
+      .get('/api/v1/promo-code-configs')
+      .query({ tenantId })
+      .set(...authHeader);
+
+    expect(restResponse.status).toBe(200);
+    expect(Array.isArray(restResponse.body)).toBe(true);
+    expect(restResponse.body).not.toHaveProperty('configs');
+    expect(restResponse.body.length).toBeGreaterThan(0);
   });
 });

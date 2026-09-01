@@ -1,0 +1,30 @@
+# T-PC-050. Kept in lock-step with the multi-stage Dockerfile in this directory: everything a
+# build stage actually needs (package.json/package-lock.json, src/, proto/, tsconfig*.json) is
+# COPYed explicitly there, so nothing here needs to *allow* those paths back in — this file only
+# needs to keep host-machine cruft that would otherwise bloat the build context (and, worse, get
+# silently baked into an image layer if a later stage ever did a careless `COPY . .`) out.
+
+node_modules
+dist
+coverage
+
+# Local env files — never baked into an image (AGENT-PROTOCOL.md R4). Real values are injected
+# at deploy time via Render's own env var mechanism (render.yaml), never a COPYed file.
+.env
+.env.*
+!.env.example
+
+# Git/editor/CI noise irrelevant to any build stage.
+.git
+.gitignore
+.husky
+.vscode
+.idea
+*.log
+npm-debug.log*
+
+# This service's own docker-compose.yml starts local-dev-only infra (Redpanda) that has nothing
+# to do with the image being built from this file.
+docker-compose.yml
+
+README.md

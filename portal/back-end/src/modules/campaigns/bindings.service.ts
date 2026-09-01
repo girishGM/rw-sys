@@ -33,6 +33,15 @@
  * value schema with the **shared** `buildRuleValueSchema` — literally the same function
  * `DynamicParameterForm` builds its resolver from — and parses. A `curl` that skips the SPA
  * meets exactly the same schema (TC-17, TC-18, TC-19, Verification step 6).
+ *
+ * ### T-166 — the one method here that leaves this process
+ *
+ * {@link attachReward} is, as of T-166, the only code path in this file that makes a network call:
+ * an attach carrying a `promoCodeConfig` registers that binding with promo-code-service before it
+ * writes anything locally (`promo-code-service-plan/04-API-CONTRACT.md` §2). Everything else —
+ * every rule binding, every cashback/points attach, every detach — is exactly as it was and talks
+ * only to Postgres. See {@link registerPromoCodeBinding} for the ordering and why it is not inside
+ * the transaction.
  */
 import { Inject, Injectable } from '@nestjs/common';
 import { Op, UniqueConstraintError, type Transaction } from 'sequelize';
@@ -84,6 +93,10 @@ import {
   RuleNotAssignedToCountryError,
   SiblingComponentNotEarlierError,
 } from './campaigns.errors';
+import {
+  PromoCodeServiceClient,
+  toBindLevel,
+} from '@/modules/promo-code-integration/promo-code-service.client';
 import { CampaignAuditService } from './campaign-audit.service';
 import {
   assertComponentInCampaign,
@@ -112,6 +125,10 @@ export class BindingsService {
     @Inject(SEQUELIZE) private readonly sequelize: Sequelize,
     private readonly scoped: ScopedRepository,
     private readonly audit: CampaignAuditService,
+    // T-166 — the outbound bind to promo-code-service. Only {@link attachReward}'s
+    // `promoCodeConfig` path touches it; every other method in this file is unchanged and makes
+    // no network call.
+    private readonly promoCodeService: PromoCodeServiceClient,
   ) {}
 
   // --- rules ---------------------------------------------------------------------------------
@@ -483,6 +500,12 @@ export class BindingsService {
   ): Promise<number> {
     assertRole(actor, 'maker');
 
+    // T-166 — fail-closed bind ordering. When the maker picked a Promo Code Config, the binding is
+    // registered with promo-code-service **before any local row is written**, and outside every
+    // transaction. If that call fails, this method throws here: no assignment, no `config` write,
+    // no audit row, nothing to reconcile later.
+    await this.registerPromoCodeBinding(actor, campaign, dto);
+
     return this.sequelize.transaction(async (transaction) => {
       const policy = await this.resolveRewardPolicy(dto.rewardPolicyId, transaction);
 
@@ -551,6 +574,73 @@ export class BindingsService {
   }
 
   /**
+   * T-166 — registers the maker's chosen Promo Code Config with promo-code-service, before
+   * {@link attachReward} writes anything locally. A no-op on every attach that carries no
+   * `promoCodeConfig`, which is almost all of them.
+   *
+   * ### Why this runs outside the writing transaction, and not inside it
+   *
+   * The confirmed requirement is that **no local row exists for an attach whose remote bind did
+   * not succeed**. Two orderings can deliver that; the one rejected outright is calling
+   * promo-code-service from *inside* `attachReward`'s `sequelize.transaction(...)`, which would
+   * hold a database transaction open across a network round trip (up to
+   * `PROMO_CODE_SERVICE_TIMEOUT_MS`, under a lock, per concurrent attach) and would still leave
+   * the "local write committed, remote bind never happened" window open in the other direction —
+   * the commit can fail after the bind either way.
+   *
+   * Of the two acceptable shapes, this is the "run the checks once outside any transaction" one:
+   * the three private helpers below all already accept an **optional** `transaction` (two of them
+   * always did — `activeRewardVersionsByReward` and both membership helpers), so re-using them
+   * here costs one optional parameter rather than a second read-only transaction wrapping the
+   * real one. `attachReward` therefore reads as four lines of preflight and then the transaction
+   * body T-037/T-127 already wrote, entirely unchanged.
+   *
+   * ### Why all three checks are repeated, not just the promo one
+   *
+   * The gates must run in the *same order* here as in the transaction, or this preflight would
+   * register a binding for something the transaction then refuses. Membership especially: without
+   * `assertTrackerInCampaign`/`assertComponentInCampaign` below, a maker could bind a config to a
+   * component belonging to another of their campaigns, have promo-code-service record it, and
+   * only then get a local `NotPartOfCampaignError` — a real binding for an attach that never
+   * happened. The transaction repeats all of them (it must: this is not a lock, and rows can
+   * change in between), so the cost is one extra read per promo attach and the benefit is that
+   * nothing is registered remotely that the local write would have rejected.
+   */
+  private async registerPromoCodeBinding(
+    actor: AuthenticatedUser,
+    campaign: TenantCampaign,
+    dto: AttachRewardDto,
+  ): Promise<void> {
+    if (dto.promoCodeConfig === undefined) return;
+
+    const policy = await this.resolveRewardPolicy(dto.rewardPolicyId);
+
+    if (dto.level === 'tracker') {
+      await assertTrackerInCampaign(this.scoped, campaign.id, dto.refId ?? 0);
+    } else if (dto.level === 'component') {
+      await assertComponentInCampaign(this.scoped, campaign.id, dto.refId ?? 0);
+    }
+
+    // TC-6: a `promoCodeConfig` on a reward that is not `PROMO_CODE` is refused **here**, by the
+    // gate T-127 already wrote, before the client is ever constructed with a request — so a
+    // misdirected config never reaches promo-code-service at all.
+    await this.assertPromoCodeAttachable(policy, dto);
+
+    await this.promoCodeService.bind({
+      promoCodeConfigId: dto.promoCodeConfig,
+      // R3: both of these come from the verified JWT / the campaign already loaded under the
+      // tenancy scope, never from the request body.
+      tenantId: campaign.tenantId,
+      bindLevel: toBindLevel(dto.level),
+      // `refId` is absent at campaign level (`ck_cc_ref`'s shape, enforced by the shared
+      // contract), where the campaign itself is what the binding refers to.
+      bindRefId: dto.refId ?? campaign.id,
+      // `userId`, not `id` — `AuthenticatedUser` carries no `id` (the task file's shorthand).
+      boundBy: actor.userId,
+    });
+  }
+
+  /**
    * T-127 — the two Kind-dependent gates on `POST /campaigns/:id/rewards`.
    *
    * Both read the reward's **live** version, never the request: the client tells us which policy
@@ -564,7 +654,7 @@ export class BindingsService {
   private async assertPromoCodeAttachable(
     policy: RewardPolicy,
     dto: AttachRewardDto,
-    transaction: Transaction,
+    transaction?: Transaction,
   ): Promise<void> {
     const version =
       (await this.activeRewardVersionsByReward([policy.rewardSystemId], transaction)).get(
@@ -939,10 +1029,12 @@ export class BindingsService {
     return { rule, version, parameters: parametersOf(version?.parameters ?? rule.parameters) };
   }
 
-  /** The reward mirror of {@link resolveRule} (TC-21). */
+  /** The reward mirror of {@link resolveRule} (TC-21). `transaction` is optional so T-166's
+   * preflight can resolve the same policy outside every transaction — see
+   * {@link registerPromoCodeBinding}. */
   private async resolveRewardPolicy(
     rewardPolicyId: number,
-    transaction: Transaction,
+    transaction?: Transaction,
   ): Promise<RewardPolicy> {
     const policy = await byIdOrNull(this.scoped, RewardPolicy, rewardPolicyId, { transaction });
     if (policy === null || policy.status !== ROW_ACTIVE) {

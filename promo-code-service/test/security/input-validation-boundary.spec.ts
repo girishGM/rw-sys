@@ -78,7 +78,7 @@ describe('T-PC-041 — input-validation boundary audit (real Postgres/broker) (e
       .get('/api/v1/promo-code-configs')
       .query({ tenantId })
       .set(...authHeader());
-    const stored = (listResponse.body.configs as Array<{ name: string }>).find(
+    const stored = (listResponse.body as Array<{ name: string }>).find(
       (c) => c.name === SQL_INJECTION_SHAPE,
     );
     expect(stored).toBeDefined();

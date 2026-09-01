@@ -31,8 +31,10 @@
  * once (T-145): every teardown step that queries the app's own Sequelize must run **before**
  * `app.close()`. The reasoning is written out there, next to the code it governs.
  */
+import { createServer, type Server } from 'node:http';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
+import type { ConfigService } from '@nestjs/config';
 import { QueryTypes } from 'sequelize';
 import type { Sequelize } from 'sequelize-typescript';
 import * as argon2 from 'argon2';
@@ -40,6 +42,8 @@ import request from 'supertest';
 import { AppModule } from '@/app.module';
 import { ARGON2_OPTIONS } from '@/modules/auth/auth.constants';
 import { SEQUELIZE } from '@/database/sequelize.provider';
+import type { Env } from '@/config/env.schema';
+import { PromoCodeServiceClient } from '@/modules/promo-code-integration/promo-code-service.client';
 import { validationExceptionFactory } from '@/common/errors/validation.exception-factory';
 import type { PortalRole } from '@/database/portal-models';
 import { CSRF_COOKIE_NAME } from '@/modules/auth/session.constants';
@@ -472,6 +476,20 @@ async function policyConfig(policyId: number): Promise<Record<string, unknown> |
   return typeof raw === 'string' ? (JSON.parse(raw) as Record<string, unknown>) : raw;
 }
 
+/**
+ * T-166 — how many `reward_assignment` audit rows this campaign has. Scoped to that entity type on
+ * purpose: creating the draft writes its own `campaign` rows, so a bare count would never be zero
+ * and the "nothing was written" assertions would prove nothing.
+ */
+async function auditRowCount(campaignId: number): Promise<number> {
+  const [row] = await sql<{ count: string }>(
+    `SELECT COUNT(*)::text AS count FROM reward_portal.portal_campaign_audit_trail
+      WHERE campaign_id = :campaignId AND entity_type = 'reward_assignment'`,
+    { campaignId },
+  );
+  return Number(row?.count ?? '0');
+}
+
 function inDays(days: number): string {
   const date = new Date(Date.now() + days * 86_400_000);
   return date.toISOString().slice(0, 10);
@@ -510,10 +528,97 @@ async function createDraftWithTracker(): Promise<{ id: number; trackerId: number
   return { id, trackerId: tracker.body.data.trackers[0].id as number };
 }
 
+// --- the promo-code-service stub (T-166) ---------------------------------------------------------
+
+/**
+ * A stand-in for promo-code-service, so this suite can attach a `PROMO_CODE` reward *with* a config
+ * again — which since T-166 requires a successful `POST /api/v1/campaign-promo-configs` before any
+ * local row is written.
+ *
+ * ### What is real here, and what is not
+ *
+ * A real HTTP server on a real port, called by a **real `PromoCodeServiceClient`** — real `fetch`,
+ * real socket, real status codes, real error normalisation. The only substitution is the two
+ * configuration values, injected through a stand-in `ConfigService` when the DI token is
+ * overridden in `beforeAll`. That still exercises the wiring this file exists to check
+ * (`BindingsService` really resolves and calls this token), and everything downstream of it.
+ *
+ * ### Why the values are overridden at the DI token and not through `process.env`
+ *
+ * They were, at first, and it silently did not work: `ConfigModule` passes `envFilePath` to
+ * `@nestjs/config`, which loads `.env.development` **itself** (this process has no `.env.test`, and
+ * `config.module.ts` resolves `.env.${NODE_ENV || 'development'}`), and `ConfigService.get` returns
+ * a validated-env value in preference to `process.env`. So an assignment to `process.env` before
+ * boot was overridden by the file's own `PROMO_CODE_SERVICE_BASE_URL=http://localhost:3010`, the
+ * bind went to a port with nothing on it, and every promo attach 502'd. Recorded here because the
+ * symptom — a correct-looking test failing with a real 502 — reads like a code defect and is not.
+ *
+ * `promoCodeStatus` lets a case make the stub refuse, which is how the two T-166 failure cases
+ * below get a real 409/503 over a real socket.
+ */
+let promoCodeStub: Server;
+let promoCodeBinds: Record<string, unknown>[] = [];
+let promoCodeStatus = 201;
+let promoCodeStubUrl: string;
+
+const STUB_TOKEN = 'T127E2E-stub-service-token';
+
+/** The real client, configured for the stub — what the DI token is overridden with. */
+function stubPromoCodeServiceClient(): PromoCodeServiceClient {
+  const config = {
+    get: (key: string): unknown =>
+      key === 'PROMO_CODE_SERVICE_BASE_URL' ? promoCodeStubUrl : STUB_TOKEN,
+  };
+  return new PromoCodeServiceClient(config as unknown as ConfigService<Env, true>);
+}
+
+async function startPromoCodeServiceStub(): Promise<void> {
+  promoCodeStub = createServer((req, res) => {
+    let body = '';
+    req.on('data', (chunk: Buffer) => (body += chunk.toString()));
+    req.on('end', () => {
+      // The guard promo-code-service's own `InternalServiceTokenGuard` applies. Modelled here so
+      // that a portal that stopped sending the header would fail this suite rather than pass it.
+      if (req.headers.authorization !== `Bearer ${STUB_TOKEN}`) {
+        res.writeHead(401);
+        res.end();
+        return;
+      }
+      promoCodeBinds.push(JSON.parse(body === '' ? '{}' : body) as Record<string, unknown>);
+      res.writeHead(promoCodeStatus, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ id: 'stub-binding-uuid', status: 'ACTIVE' }));
+    });
+  });
+  await new Promise<void>((resolve) => promoCodeStub.listen(0, '127.0.0.1', resolve));
+  const address = promoCodeStub.address();
+  const port = typeof address === 'object' && address !== null ? address.port : 0;
+  promoCodeStubUrl = `http://127.0.0.1:${String(port)}`;
+}
+
+async function stopPromoCodeServiceStub(): Promise<void> {
+  await new Promise<void>((resolve, reject) =>
+    promoCodeStub.close((error) => (error ? reject(error) : resolve())),
+  );
+}
+
+beforeEach(() => {
+  promoCodeBinds = [];
+  promoCodeStatus = 201;
+});
+
 // --- lifecycle -----------------------------------------------------------------------------------
 
 beforeAll(async () => {
-  const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
+  // T-166 — the stub must be listening before the client that points at it is constructed.
+  await startPromoCodeServiceStub();
+
+  const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
+    // The real client, aimed at the stub instead of at `.env.development`'s localhost:3010 — see
+    // `stubPromoCodeServiceClient` for why the two config values cannot be substituted through
+    // `process.env` here.
+    .overrideProvider(PromoCodeServiceClient)
+    .useValue(stubPromoCodeServiceClient())
+    .compile();
   await ensureEncryptionKeys(moduleRef.get<Sequelize>(SEQUELIZE), SUITE);
   borrowedKeyVars = await provideMissingKeyMaterial(moduleRef.get<Sequelize>(SEQUELIZE));
 
@@ -622,6 +727,9 @@ afterAll(async () => {
   if (db !== undefined) await removeEncryptionKeys(db, SUITE);
   if (app !== undefined) await app.close();
   clearProvidedKeyMaterial(borrowedKeyVars);
+  // T-166 — below `app.close()` deliberately: nothing here touches `db`, and the port must stay
+  // open until the app that might still be talking to it is gone.
+  if (promoCodeStub !== undefined) await stopPromoCodeServiceStub();
 
   await assertNoEncryptionKeyResidue();
 });
@@ -733,6 +841,19 @@ describe('T-127 · attaching a PROMO_CODE reward to a real campaign', () => {
       notes: 'author supplied',
       promoCodeConfig: 'RAYA_2026',
     });
+
+    // T-166 — and the binding really left this process, over a real socket, with §2's body built
+    // from the campaign and the verified maker. `tenantId`/`boundBy` are the portal's own integer
+    // ids; see the T-166 completion report on the uuid-shaped contract in 04-API-CONTRACT.md §2.
+    expect(promoCodeBinds).toEqual([
+      {
+        promoCodeConfigId: 'RAYA_2026',
+        tenantId,
+        bindLevel: 'CAMPAIGN',
+        bindRefId: id,
+        boundBy: expect.any(Number) as unknown as number,
+      },
+    ]);
   });
 
   it('TC-4: attaches at component level too — the same reward, no level-specific special-casing', async () => {
@@ -753,6 +874,77 @@ describe('T-127 · attaching a PROMO_CODE reward to a real campaign', () => {
       refId: componentId,
       rewardPolicyId: promoPolicyId,
     }).expect(201);
+  });
+});
+
+// --- T-166: verification step 3, against a real (stub) service ------------------------------------
+
+/**
+ * T-166's verification steps 2 and 3 ask for a live promo-code-service and a stopped one. That
+ * service cannot currently be started in this environment (its own T-PC-049 is unlanded — see the
+ * T-165 and T-166 completion reports), so these two cases stand in for those steps at the level
+ * that actually matters: a **real** HTTP round trip whose failure must leave the portal's own
+ * database untouched. Everything below `POST /campaigns/:id/rewards` here is production code —
+ * only the far end of the socket is a stub.
+ */
+describe('T-166 · a refused bind leaves nothing behind, end to end', () => {
+  it('a 409 from promo-code-service fails the attach and writes no assignment', async () => {
+    await resetPolicyConfig(promoPolicyId, {});
+    const id = await createDraft();
+    promoCodeStatus = 409;
+
+    const response = await post('maker', `/campaigns/${String(id)}/rewards`, {
+      level: 'campaign',
+      rewardPolicyId: promoPolicyId,
+      promoCodeConfig: 'ARCHIVED_CONFIG',
+    }).expect(409);
+
+    expect(response.body.error.code).toBe('PROMO_CODE_CONFIG_NOT_BINDABLE');
+
+    // The three things a successful attach would have written, all absent.
+    const rows = await sql<{ id: number }>(
+      `SELECT id FROM reward_config.reward_campaign_assignments
+        WHERE campaign_id = :id AND reward_policy_id = :policyId`,
+      { id, policyId: promoPolicyId },
+    );
+    expect(rows).toHaveLength(0);
+    expect(await policyConfig(promoPolicyId)).toEqual({});
+    expect(await auditRowCount(id)).toBe(0);
+  });
+
+  it('verification step 3: an upstream failure is a 502, and still writes nothing', async () => {
+    await resetPolicyConfig(promoPolicyId, {});
+    const id = await createDraft();
+    promoCodeStatus = 503;
+
+    const response = await post('maker', `/campaigns/${String(id)}/rewards`, {
+      level: 'campaign',
+      rewardPolicyId: promoPolicyId,
+      promoCodeConfig: 'RAYA_2026',
+    }).expect(502);
+
+    expect(response.body.error.code).toBe('PROMO_CODE_SERVICE_BIND_FAILED');
+
+    const rows = await sql<{ id: number }>(
+      `SELECT id FROM reward_config.reward_campaign_assignments
+        WHERE campaign_id = :id AND reward_policy_id = :policyId`,
+      { id, policyId: promoPolicyId },
+    );
+    expect(rows).toHaveLength(0);
+    expect(await policyConfig(promoPolicyId)).toEqual({});
+    expect(await auditRowCount(id)).toBe(0);
+  });
+
+  it('an attach with no config picked never reaches promo-code-service at all', async () => {
+    await resetPolicyConfig(promoPolicyId, {});
+    const id = await createDraft();
+
+    await post('maker', `/campaigns/${String(id)}/rewards`, {
+      level: 'campaign',
+      rewardPolicyId: promoPolicyId,
+    }).expect(201);
+
+    expect(promoCodeBinds).toEqual([]);
   });
 });
 

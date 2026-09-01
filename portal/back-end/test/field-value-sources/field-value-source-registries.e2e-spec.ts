@@ -44,6 +44,97 @@ const NEW_CTX_CODE = `T121_CONTEXT_${STAMP}`;
 /** The value that must never appear in a response body or in the raw column. */
 const SECRET = `sk_live_t121_${STAMP}`;
 
+/**
+ * T-168 — the seeded `field_api_lookup_providers` rows, split by whether anything is expected to
+ * activate them.
+ *
+ * These tests used to assert that *all four* seeded rows stay `planned` with a `PLACEHOLDER`
+ * endpoint forever. That was never the real invariant, only the state that happened to be true
+ * when T-121 wrote them: `T165_001` legitimately flips `PROMO_CODE_CONFIG_SERVICE` to `active`
+ * with a real `endpoint_url`, which broke both assertions even though nothing was wrong.
+ *
+ * The property actually worth protecting is the one T-121's own comment describes — *a row must
+ * never look silently "ready"* — which is a pairing between two columns, not a fixed status:
+ *
+ *   `planned` ⟺ endpoint is still the placeholder   ·   `active` ⟺ endpoint is a real URL
+ *
+ * That holds both before and after `T165_001` runs, so these tests no longer depend on whether
+ * that migration has been applied to the database they are pointed at.
+ */
+const STILL_PLANNED_API_PROVIDERS = ['ACTIVITY_LIST', 'MERCHANT_LIST', 'PRODUCT_CATALOG'] as const;
+
+/** Seeded `planned` by `T121_002`; `T165_001` activates it with a real endpoint. */
+const ACTIVATABLE_API_PROVIDER = 'PROMO_CODE_CONFIG_SERVICE';
+
+const SEEDED_API_PROVIDERS = [...STILL_PLANNED_API_PROVIDERS, ACTIVATABLE_API_PROVIDER]
+  .slice()
+  .sort();
+
+/** The marker `T121_002` writes into `endpoint_url` for a provider whose endpoint is unconfirmed. */
+const PLACEHOLDER_MARKER = 'PLACEHOLDER';
+
+/**
+ * The cross-column invariant above, asserted for a single row. Used by the seeded-state tests and
+ * by the T-168 regression test, so both check the same rule rather than two similar-looking ones.
+ */
+function expectStatusMatchesEndpoint(providerCode: string, status: string, endpointUrl: string) {
+  const placeholder = endpointUrl.includes(PLACEHOLDER_MARKER);
+  if (status === 'planned') {
+    // A planned row must still be carrying the placeholder — if someone gave it a real endpoint
+    // but left it planned, the endpoint is unreachable-by-policy and the row is misleading.
+    expect({ providerCode, status, placeholder }).toEqual({
+      providerCode,
+      status: 'planned',
+      placeholder: true,
+    });
+    return;
+  }
+  // The case that matters: nothing may be `active` while still pointing at the placeholder.
+  expect({ providerCode, status, placeholder }).toEqual({
+    providerCode,
+    status: 'active',
+    placeholder: false,
+  });
+  expect(endpointUrl).toMatch(/^https?:\/\/\S+$/);
+}
+
+/**
+ * The whole seeded-state expectation as read back over HTTP.
+ *
+ * Deliberately a shared function rather than assertions inlined into the test that reads the live
+ * database: the T-168 regression test drives the row into the post-`T165_001` state and calls
+ * *this exact code*. If these assertions ever go back to hardcoding `planned`/`PLACEHOLDER` for
+ * all four rows, that regression test goes red — which is the only reason it can be trusted to
+ * catch the defect coming back.
+ */
+function assertSeededProvidersFromApi(
+  rows: Array<{ providerCode: string; status: string; endpointUrl: string }>,
+) {
+  const seeded = rows.filter((r) => SEEDED_API_PROVIDERS.includes(r.providerCode));
+  expect(seeded.map((r) => r.providerCode).sort()).toEqual(SEEDED_API_PROVIDERS);
+
+  for (const row of seeded) {
+    expectStatusMatchesEndpoint(row.providerCode, row.status, row.endpointUrl);
+  }
+  // The three nothing has claimed yet must still be untouched, whatever happened to the fourth.
+  for (const code of STILL_PLANNED_API_PROVIDERS) {
+    expect(seeded.find((r) => r.providerCode === code)?.status).toBe('planned');
+  }
+}
+
+/** The same expectation, against the raw columns. Shared for the same reason as above. */
+function assertSeededProviderRowsFromDb(
+  rows: Array<{ provider_code: string; status: string; endpoint_url: string }>,
+) {
+  expect(rows.map((r) => r.provider_code).sort()).toEqual(SEEDED_API_PROVIDERS);
+  for (const row of rows) {
+    expectStatusMatchesEndpoint(row.provider_code, row.status, row.endpoint_url);
+  }
+  for (const code of STILL_PLANNED_API_PROVIDERS) {
+    expect(rows.find((r) => r.provider_code === code)?.status).toBe('planned');
+  }
+}
+
 let app: INestApplication;
 let db: Sequelize;
 let emailCrypto: PortalUserEmailCrypto;
@@ -187,26 +278,20 @@ describe('T-121 — seeded registry reads', () => {
     expect(seeded.every((r) => r.status === 'active')).toBe(true);
   });
 
-  it('TC-2: GET /field-api-lookup-providers returns all 4 seeded rows, every one status=planned', async () => {
+  it('TC-2: GET /field-api-lookup-providers returns all 4 seeded rows, each one status-consistent with its endpoint', async () => {
     const res = await get('maker', '/field-api-lookup-providers');
     expect(res.status).toBe(200);
 
-    const rows = res.body.data as Array<{ providerCode: string; status: string }>;
-    const seededCodes = [
-      'ACTIVITY_LIST',
-      'MERCHANT_LIST',
-      'PRODUCT_CATALOG',
-      'PROMO_CODE_CONFIG_SERVICE',
-    ];
-    const seeded = rows.filter((r) => seededCodes.includes(r.providerCode));
-    expect(seeded.map((r) => r.providerCode).sort()).toEqual(seededCodes);
-
+    const rows = res.body.data as Array<{
+      providerCode: string;
+      status: string;
+      endpointUrl: string;
+    }>;
     // The point of the whole `planned` decision: a query against this table must never look
-    // silently "ready". If a future seed flips one to `active` without confirming the endpoint,
-    // this fails.
-    for (const row of seeded) {
-      expect(row.status).toBe('planned');
-    }
+    // silently "ready". Asserted as the status↔endpoint pairing (see the helpers above) so that
+    // activating a provider through a migration is allowed, but activating one while it still
+    // points at the unconfirmed placeholder endpoint is not.
+    assertSeededProvidersFromApi(rows);
   });
 
   it('verification step 2: no seeded row exposes a credential field of any kind', async () => {
@@ -313,19 +398,135 @@ describe('T-121 — writes are super_admin only', () => {
     // endpoint_url instead. This asserts that decision held.
     const rows = await db.query<{
       provider_code: string;
+      status: string;
       auth_config_enc: string | null;
       endpoint_url: string;
     }>(
-      `SELECT provider_code, auth_config_enc, endpoint_url
+      `SELECT provider_code, status, auth_config_enc, endpoint_url
          FROM reward_config.field_api_lookup_providers
-        WHERE provider_code IN ('ACTIVITY_LIST','MERCHANT_LIST','PRODUCT_CATALOG','PROMO_CODE_CONFIG_SERVICE')`,
-      { type: QueryTypes.SELECT },
+        WHERE provider_code IN (:providerCodes)`,
+      { type: QueryTypes.SELECT, replacements: { providerCodes: SEEDED_API_PROVIDERS } },
     );
     expect(rows).toHaveLength(4);
     for (const row of rows) {
+      // Unchanged by T-168: `T165_001` explicitly leaves `auth_config_enc` alone, because a
+      // migration cannot produce valid ciphertext (no key registry in the Umzug context).
       expect(row.auth_config_enc).toBeNull();
-      expect(row.endpoint_url).toContain('PLACEHOLDER');
     }
+    // T-168: the endpoint check was `toContain('PLACEHOLDER')` for all four, which an activated
+    // provider must legitimately fail. Checked against each row's own status instead.
+    assertSeededProviderRowsFromDb(rows);
+  });
+
+  /**
+   * T-168 regression. The original defect was that two tests hardcoded `T121_002`'s seeded state
+   * as permanent, so `T165_001` activating `PROMO_CODE_CONFIG_SERVICE` turned them red even though
+   * the activation was correct and intended.
+   *
+   * This drives the row through the exact state `T165_001` writes — without depending on whether
+   * that migration has actually been applied here, which is the coupling that caused the defect —
+   * and checks the invariant survives it. It also proves the invariant still has teeth, by
+   * confirming the genuinely bad combination (`active` while still pointing at the placeholder) is
+   * rejected. The row is restored afterwards either way.
+   */
+  it('T-168: the seeded-state assertions survive T165_001 activating a provider, and still reject an active placeholder', async () => {
+    const [original] = await db.query<{
+      status: string;
+      endpoint_url: string;
+      response_value_key: string;
+      response_label_key: string;
+      auth_type: string;
+    }>(
+      `SELECT status, endpoint_url, response_value_key, response_label_key, auth_type
+         FROM reward_config.field_api_lookup_providers
+        WHERE provider_code = :providerCode`,
+      { type: QueryTypes.SELECT, replacements: { providerCode: ACTIVATABLE_API_PROVIDER } },
+    );
+    expect(original).toBeDefined();
+
+    const restore = () =>
+      db.query(
+        `UPDATE reward_config.field_api_lookup_providers
+            SET status = :status, endpoint_url = :endpointUrl,
+                response_value_key = :valueKey, response_label_key = :labelKey,
+                auth_type = :authType
+          WHERE provider_code = :providerCode`,
+        {
+          type: QueryTypes.UPDATE,
+          replacements: {
+            providerCode: ACTIVATABLE_API_PROVIDER,
+            status: original.status,
+            endpointUrl: original.endpoint_url,
+            valueKey: original.response_value_key,
+            labelKey: original.response_label_key,
+            authType: original.auth_type,
+          },
+        },
+      );
+
+    try {
+      // Exactly what T165_001's `up()` writes.
+      await db.query(
+        `UPDATE reward_config.field_api_lookup_providers
+            SET status = 'active', endpoint_url = :endpointUrl,
+                response_value_key = 'id', response_label_key = 'name', auth_type = 'bearer'
+          WHERE provider_code = :providerCode`,
+        {
+          type: QueryTypes.UPDATE,
+          replacements: {
+            providerCode: ACTIVATABLE_API_PROVIDER,
+            endpointUrl: 'http://localhost:3010/api/v1/promo-code-configs',
+          },
+        },
+      );
+
+      const res = await get('maker', '/field-api-lookup-providers');
+      expect(res.status).toBe(200);
+      const rows = res.body.data as Array<{
+        providerCode: string;
+        status: string;
+        endpointUrl: string;
+      }>;
+
+      const activated = rows.find((r) => r.providerCode === ACTIVATABLE_API_PROVIDER);
+      expect(activated?.status).toBe('active');
+
+      // The whole point of this test: run the *same* assertions the two seeded-state tests above
+      // run, but against the activated row. These are the calls that go red if those assertions
+      // ever revert to hardcoding `planned`/`PLACEHOLDER` for all four providers.
+      assertSeededProvidersFromApi(rows);
+
+      const dbRows = await db.query<{
+        provider_code: string;
+        status: string;
+        endpoint_url: string;
+      }>(
+        `SELECT provider_code, status, endpoint_url
+           FROM reward_config.field_api_lookup_providers
+          WHERE provider_code IN (:providerCodes)`,
+        { type: QueryTypes.SELECT, replacements: { providerCodes: SEEDED_API_PROVIDERS } },
+      );
+      assertSeededProviderRowsFromDb(dbRows);
+
+      // The guard must still fail on the combination it exists to catch.
+      expect(() =>
+        expectStatusMatchesEndpoint(
+          ACTIVATABLE_API_PROVIDER,
+          'active',
+          'PLACEHOLDER — confirm with data owner before flipping to active',
+        ),
+      ).toThrow();
+    } finally {
+      await restore();
+    }
+
+    const [after] = await db.query<{ status: string; endpoint_url: string }>(
+      `SELECT status, endpoint_url FROM reward_config.field_api_lookup_providers
+        WHERE provider_code = :providerCode`,
+      { type: QueryTypes.SELECT, replacements: { providerCode: ACTIVATABLE_API_PROVIDER } },
+    );
+    expect(after.status).toBe(original.status);
+    expect(after.endpoint_url).toBe(original.endpoint_url);
   });
 
   it('TC-5: a maker creating either kind of provider gets 403', async () => {

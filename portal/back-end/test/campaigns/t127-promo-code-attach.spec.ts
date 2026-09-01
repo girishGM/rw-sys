@@ -32,6 +32,7 @@ import type { Sequelize } from 'sequelize-typescript';
 import type { ScopedRepository } from '@/common/scope/scoped.repository';
 import type { AuthenticatedUser } from '@/modules/auth/decorators/current-user.decorator';
 import type { CampaignAuditService } from '@/modules/campaigns/campaign-audit.service';
+import type { PromoCodeServiceClient } from '@/modules/promo-code-integration/promo-code-service.client';
 import type { TenantCampaign } from '@/database/models';
 import {
   RewardCampaignAssignment,
@@ -112,6 +113,22 @@ class FakeAudit {
   readonly events: Record<string, unknown>[] = [];
   async record(_actor: unknown, event: Record<string, unknown>): Promise<void> {
     this.events.push(event);
+  }
+}
+
+/**
+ * T-166 — since that task, an attach carrying a `promoCodeConfig` registers the binding with
+ * promo-code-service before it writes anything locally, so `BindingsService` takes a client as its
+ * fourth dependency. This double always succeeds: every case in *this* file is about T-127's own
+ * gates and its `config` write, and each one keeps asserting exactly what it asserted before.
+ *
+ * The ordering that success now precedes — and what happens when the bind fails — is T-166's to
+ * prove, and is proved in `bindings.service.spec.ts` rather than duplicated here.
+ */
+class FakePromoCodeServiceClient {
+  readonly binds: unknown[] = [];
+  async bind(request: unknown): Promise<void> {
+    this.binds.push(request);
   }
 }
 
@@ -214,12 +231,15 @@ function build({ policy = policyRow(), version: live = promoVersion(['campaign']
     { id: 40, trackerId: 7, componentId: 71, sequenceOrder: 1 },
   ]);
 
+  const promoCodeService = new FakePromoCodeServiceClient();
+
   const service = new BindingsService(
     new FakeSequelize() as unknown as Sequelize,
     scoped as unknown as ScopedRepository,
     audit as unknown as CampaignAuditService,
+    promoCodeService as unknown as PromoCodeServiceClient,
   );
-  return { service, scoped, audit, policy };
+  return { service, scoped, audit, policy, promoCodeService };
 }
 
 function attach(overrides: Partial<AttachRewardDto> = {}): AttachRewardDto {
