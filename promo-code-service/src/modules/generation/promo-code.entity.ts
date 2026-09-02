@@ -30,7 +30,9 @@ export interface PromoCodeRow {
   reward_unit: string;
   status: PromoCodeStatus;
   correlation_id: string;
-  transport: 'KAFKA' | 'GRPC';
+  // T-PC-056: widened to add 'REST' — append-only (R8), matching
+  // `generation-request.types.ts`'s own `TRANSPORTS` widen for the same task.
+  transport: 'KAFKA' | 'GRPC' | 'REST';
   issued_at: Date;
   expires_at: Date | null;
   redeemed_at: Date | null;
@@ -52,7 +54,9 @@ export interface PromoCode {
   rewardUnit: string;
   status: PromoCodeStatus;
   correlationId: string;
-  transport: 'KAFKA' | 'GRPC';
+  // T-PC-056: widened to add 'REST' — append-only (R8), matching
+  // `generation-request.types.ts`'s own `TRANSPORTS` widen for the same task.
+  transport: 'KAFKA' | 'GRPC' | 'REST';
   issuedAt: Date;
   expiresAt: Date | null;
   redeemedAt: Date | null;

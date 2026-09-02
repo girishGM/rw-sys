@@ -421,6 +421,74 @@ describe('T-PC-052 — portal-sourced id columns widened to varchar(64)', () => 
   });
 });
 
+describe('T-PC-057 — promo_code.transport CHECK widened to allow REST', () => {
+  let sequelize: Sequelize;
+  let configId: string;
+  const TENANT_ID = randomUUID();
+  const insertedCodes: string[] = [];
+
+  beforeAll(async () => {
+    sequelize = createMigrationConnection();
+    await sequelize.authenticate();
+    configId = await insertConfig(sequelize, { tenant_id: TENANT_ID });
+  });
+
+  afterAll(async () => {
+    if (insertedCodes.length > 0) {
+      await sequelize.query('DELETE FROM promo_code.promo_code WHERE code IN (:codes)', {
+        type: QueryTypes.RAW,
+        replacements: { codes: insertedCodes },
+      });
+    }
+    await sequelize.query('DELETE FROM promo_code.promo_code_config WHERE id = :id', {
+      type: QueryTypes.RAW,
+      replacements: { id: configId },
+    });
+    await sequelize.close();
+  });
+
+  async function insertWithTransport(transport: string): Promise<void> {
+    const code = `T-PC-057-${randomUUID()}`;
+    insertedCodes.push(code);
+    await sequelize.query(
+      `INSERT INTO promo_code.promo_code
+         (promo_code_config_id, code, customer_id, tenant_id, reward_value_type,
+          reward_value, reward_unit, correlation_id, transport)
+       VALUES
+         (:configId, :code, :customerId, :tenant_id, 'FIXED_AMOUNT', 10, 'USD',
+          :correlationId, :transport)`,
+      {
+        type: QueryTypes.RAW,
+        replacements: {
+          configId,
+          code,
+          customerId: `cust-${randomUUID()}`,
+          tenant_id: TENANT_ID,
+          correlationId: randomUUID(),
+          transport,
+        },
+      },
+    );
+  }
+
+  // TC-2 / TC-3 (this is also the regression test: proven red against the pre-fix schema by
+  // reverting migration 010 — see this task's completion report — then proven green again here).
+  it("TC-2/TC-3: a 'REST' transport value inserts cleanly", async () => {
+    await expect(insertWithTransport('REST')).resolves.toBeUndefined();
+  });
+
+  // TC-4: adjacent behaviour — the pre-existing values must still work, and an arbitrary
+  // out-of-set value must still be rejected. Proves the widen only adds 'REST', nothing else.
+  it('TC-4: KAFKA and GRPC still insert cleanly, and an unrelated value is still rejected', async () => {
+    await expect(insertWithTransport('KAFKA')).resolves.toBeUndefined();
+    await expect(insertWithTransport('GRPC')).resolves.toBeUndefined();
+    await expect(insertWithTransport('BOGUS')).rejects.toMatchObject({
+      name: 'SequelizeDatabaseError',
+      parent: expect.objectContaining({ constraint: 'promo_code_transport_check' }),
+    });
+  });
+});
+
 describe('T-PC-002 — promo_code_app least-privilege grants (TC-11, TC-12)', () => {
   let appSequelize: Sequelize;
 

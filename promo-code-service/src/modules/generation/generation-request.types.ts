@@ -18,7 +18,13 @@ import { z } from 'zod';
 export const BIND_LEVELS = ['CAMPAIGN', 'TRACKER', 'COMPONENT'] as const;
 export type BindLevel = (typeof BIND_LEVELS)[number];
 
-export const TRANSPORTS = ['KAFKA', 'GRPC'] as const;
+// T-PC-056: widened to add 'REST' — a third transport adapter (the REST generate endpoint,
+// `promo-code-generate.controller.ts`) alongside the original Kafka/gRPC pair. Append-only edit
+// to this shared type/schema file (`AGENT-PROTOCOL.md` R8: "registration points... are
+// append-only") — KAFKA/GRPC's existing validation/behaviour is untouched; only a new accepted
+// value is added, exactly mirroring the `promo_code.promo_code.transport` CHECK constraint's own
+// widen (`04-API-CONTRACT.md` §5, T-PC-057).
+export const TRANSPORTS = ['KAFKA', 'GRPC', 'REST'] as const;
 export type Transport = (typeof TRANSPORTS)[number];
 
 /**

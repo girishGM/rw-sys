@@ -50,7 +50,9 @@ export interface CreatePromoCodeData {
   rewardValue: string;
   rewardUnit: string;
   correlationId: string;
-  transport: 'KAFKA' | 'GRPC';
+  // T-PC-056: widened to add 'REST' — append-only (R8), matching `promo-code.entity.ts`'s own
+  // widen for the same task.
+  transport: 'KAFKA' | 'GRPC' | 'REST';
   /**
    * `null` when the resolved config's `codeExpiryDays` is `null` (never expires, TC-17).
    * Computed in SQL as `now() + (:codeExpiryDays || ' days')::interval` rather than in
