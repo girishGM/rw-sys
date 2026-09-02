@@ -36,3 +36,10 @@ setDefault('KAFKA_BROKERS', 'localhost:9092');
 // `setDefault` convention as every other key above); exercised directly by
 // `promo-code-config.e2e-spec.ts`'s valid-token requests.
 setDefault('INTERNAL_SERVICE_TOKEN', 'test-internal-service-token');
+// T-PC-056: a deliberately *different* throwaway value from `INTERNAL_SERVICE_TOKEN` above (R11 —
+// the two secrets must never be interchangeable, exercised directly by
+// `promo-code-generate.controller.spec.ts`'s TC-4). Same "real env always wins" `setDefault`
+// convention. This append (like `GenerationModule`'s own registration in `app.module.ts`) follows
+// the precedent `INTERNAL_SERVICE_TOKEN` above already set for a file outside the literal
+// `project.config.json` grant of the task that needs it — see that task's completion report.
+setDefault('GENERATION_SERVICE_TOKEN', 'test-generation-service-token');

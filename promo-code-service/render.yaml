@@ -42,6 +42,15 @@
 # generating the actual value and setting it identically on both this service and the portal's
 # own API service (`portal/render.yaml`) is a manual step for whoever runs both Blueprints, not
 # something either file can express on its own.
+#
+# `GENERATION_SERVICE_TOKEN` (src/modules/generation/generation-service-token-startup-check
+# .provider.ts, T-PC-056) is a SECOND, DELIBERATELY DISTINCT bearer secret for
+# `POST /api/v1/promo-codes/generate` only — never the same value as `INTERNAL_SERVICE_TOKEN`
+# above, and never given to the portal's own Render service (R11: config/list/bind calls are
+# lower trust and held by the portal; code generation mints real, payable value and is held only
+# by a real generation caller, e.g. reward-redemption-service). Generating and setting this value
+# is a manual step for whoever operates this Blueprint, same as `INTERNAL_SERVICE_TOKEN`'s own
+# note above — just never shared with the same party that holds that other token.
 
 services:
   - type: web
@@ -91,4 +100,8 @@ services:
       # --- Shared internal-service bearer secret with the portal's own API service — generate
       # once, set identically on both sides via each service's own Render dashboard.
       - key: INTERNAL_SERVICE_TOKEN
+        sync: false
+
+      # --- Second, distinct bearer secret for code generation only (REST) — see header note.
+      - key: GENERATION_SERVICE_TOKEN
         sync: false

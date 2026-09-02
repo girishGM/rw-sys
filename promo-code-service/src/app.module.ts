@@ -4,6 +4,7 @@ import { HealthModule } from '@/health/health.module';
 import { PromoCodeConfigModule } from '@/modules/promo-code-config/promo-code-config.module';
 import { CampaignBindingModule } from '@/modules/campaign-binding/campaign-binding.module';
 import { PromoCodeGenerationModule } from '@/modules/generation/promo-code-generation.module';
+import { GenerationModule } from '@/modules/generation/generation.module';
 import { OutboxPublisherModule } from '@/modules/outbox/outbox-publisher.module';
 import { ObservabilityModule } from '@/observability/observability.module';
 
@@ -25,6 +26,17 @@ import { ObservabilityModule } from '@/observability/observability.module';
  * calls `PromoCodeGenerationService` through the running app yet; registering it here now is
  * what makes the Rollback section of that task's own task file ("remove the import — zero live
  * callers before Wave 3") meaningful.
+ *
+ * `GenerationModule` added by T-PC-056, same append-only convention — only this import line +
+ * list entry touched. This registers the REST transport adapter (`POST
+ * /api/v1/promo-codes/generate`, `GenerationServiceTokenGuard`/`...StartupCheck`) alongside
+ * `PromoCodeGenerationModule` (the transport-neutral domain module, unchanged by this task).
+ * `promo-code-service/src/app.module.ts` and `promo-code-service/test/jest-e2e.setup.ts` are not
+ * literally inside `agent-promo-generation`'s own `project.config.json` grant (which predates this
+ * Wave-4 follow-up task) — this append follows the exact precedent `PromoCodeGenerationModule`'s
+ * own entry below already set for the same agent/file pair (T-PC-021), consistent with R8's
+ * "registration points... are append-only" carve-out: only one import line + one list entry
+ * touched in each file, nothing else. See this task's completion report, "Deviations from spec".
  *
  * `OutboxPublisherModule` added by T-PC-022, same append-only convention — only this import line
  * + list entry touched. `OutboxPublisherWorker.onModuleInit` only actually starts its own
@@ -51,6 +63,7 @@ import { ObservabilityModule } from '@/observability/observability.module';
     PromoCodeConfigModule,
     CampaignBindingModule,
     PromoCodeGenerationModule,
+    GenerationModule,
     OutboxPublisherModule,
     ObservabilityModule,
   ],
