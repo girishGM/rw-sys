@@ -73,6 +73,9 @@ npm-debug.log*
 .vscode/*
 !.vscode/extensions.json
 
+# scripts/run-services.js logs + pidfiles (per-machine local dev state)
+.dev-run/
+
 # Test artefacts
 playwright-report/
 test-results/

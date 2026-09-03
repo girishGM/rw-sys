@@ -12,6 +12,7 @@ const CAMPAIGNS: PortalCampaign[] = [
     startDate: '2026-07-01',
     endDate: '2026-09-30',
     status: 'active',
+    tenantId: 1,
   },
   {
     id: 2,
@@ -21,6 +22,7 @@ const CAMPAIGNS: PortalCampaign[] = [
     startDate: '2026-06-01',
     endDate: '2026-12-31',
     status: 'active',
+    tenantId: 1,
   },
   {
     id: 3,
@@ -30,6 +32,7 @@ const CAMPAIGNS: PortalCampaign[] = [
     startDate: '2026-08-15',
     endDate: '2026-09-15',
     status: 'active',
+    tenantId: 1,
   },
 ];
 
@@ -112,6 +115,7 @@ const JOURNEYS: Record<number, PortalCampaignJourney> = {
             unitType: 'voucher',
             unitCode: null,
             amount: null,
+            promoCodeConfigId: null,
             status: 'active',
           },
         ],

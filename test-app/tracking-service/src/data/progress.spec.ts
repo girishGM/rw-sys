@@ -125,4 +125,42 @@ describe('ProgressStore', () => {
     expect(store.setComponentCompletion('priya-shah', 999, 7, 4, true)).toBeNull();
     expect(store.setComponentCompletion('priya-shah', 42, 999, 4, true)).toBeNull();
   });
+
+  describe('addCampaigns', () => {
+    const other: CampaignProgress = {
+      campaignId: 43,
+      campaignCode: 'REFER_AND_EARN',
+      campaignName: 'Refer & Earn',
+      trackers: [tracker({ trackerId: 8 })],
+    };
+
+    it('appends to an unknown customer exactly like setForCustomer would', () => {
+      const store = new ProgressStore();
+      store.addCampaigns('priya-shah', [campaign]);
+      expect(store.getForCustomer('priya-shah')).toEqual([campaign]);
+    });
+
+    it('appends without touching an existing campaign entry', () => {
+      const store = new ProgressStore();
+      store.setForCustomer('priya-shah', [campaign]);
+      store.setComponentCompletion('priya-shah', 42, 7, 1, true);
+
+      store.addCampaigns('priya-shah', [other]);
+
+      const current = store.getForCustomer('priya-shah');
+      expect(current).toHaveLength(2);
+      expect(current.map((c) => c.campaignId)).toEqual([42, 43]);
+      // the pre-existing campaign's own progress (set above) survived the addCampaigns call
+      expect(
+        current[0].trackers[0].components.find((c) => c.componentId === 1)?.completed,
+      ).toBe(true);
+    });
+
+    it('is a no-op given an empty list', () => {
+      const store = new ProgressStore();
+      store.setForCustomer('priya-shah', [campaign]);
+      store.addCampaigns('priya-shah', []);
+      expect(store.getForCustomer('priya-shah')).toEqual([campaign]);
+    });
+  });
 });

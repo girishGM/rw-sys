@@ -4,10 +4,18 @@
  * progress from `ProgressStore` when `?customerId=` is present. `customerId` is optional here
  * (unlike `dashboard`/`rewards`/`activities`) — a campaign/tracker's real structure is meaningful
  * on its own, with or without a specific customer's completion state layered on top.
+ *
+ * Both routes list from `activeCampaigns` (`data/campaign-sync.ts`), never
+ * `state.portal.getCampaigns()` directly — a campaign the portal has paused/completed/archived
+ * must stop appearing here the moment that's true in the portal, not just at this process's next
+ * restart. When a customer id is given, `ensureEnrolled` runs first so a campaign this customer
+ * has never been enrolled in (typically: activated after this process last saw them) still shows
+ * real, zeroed progress instead of `progress: null`.
  */
 import { Router, type Response } from 'express';
 import type { AppState } from './app-state';
 import { requireCustomerId } from './validation';
+import { activeCampaigns, ensureEnrolled } from '../data/campaign-sync';
 import { completedComponentCount, isTrackerComplete, trackerThreshold } from '../data/progress';
 import type { CampaignProgress } from '../data/progress';
 
@@ -25,8 +33,9 @@ export function createCampaignsRouter(state: AppState): Router {
     try {
       const customerId = optionalCustomerId(req.query.customerId, res);
       if (customerId === false) return;
+      if (customerId !== null) await ensureEnrolled(state.portal, state.progress, customerId);
 
-      const realCampaigns = await state.portal.getCampaigns();
+      const realCampaigns = await activeCampaigns(state.portal);
       const progressByCode = new Map<string, CampaignProgress>(
         customerId !== null
           ? state.progress
@@ -72,8 +81,9 @@ export function createCampaignsRouter(state: AppState): Router {
     try {
       const customerId = optionalCustomerId(req.query.customerId, res);
       if (customerId === false) return;
+      if (customerId !== null) await ensureEnrolled(state.portal, state.progress, customerId);
 
-      const realCampaigns = await state.portal.getCampaigns();
+      const realCampaigns = await activeCampaigns(state.portal);
       const campaign = realCampaigns.find((entry) => entry.campaignCode === req.params.code);
       if (!campaign) {
         res.status(404).json({ error: `unknown campaign code "${req.params.code}"` });

@@ -9,6 +9,7 @@
 import { Router } from 'express';
 import type { AppState } from './app-state';
 import { requireCustomerId } from './validation';
+import { ensureEnrolled } from '../data/campaign-sync';
 import { completedComponentCount, isTrackerComplete, trackerThreshold } from '../data/progress';
 
 /** Invented — no design doc names an exact "expiring soon" window; 7 days is the common
@@ -24,6 +25,7 @@ export function createDashboardRouter(state: AppState): Router {
     try {
       if (!requireCustomerId(req.query.customerId, res)) return;
       const customerId = req.query.customerId as string;
+      await ensureEnrolled(state.portal, state.progress, customerId);
 
       const realCampaigns = await state.portal.getCampaigns();
       const statusByCode = new Map(

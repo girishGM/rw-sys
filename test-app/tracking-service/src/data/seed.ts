@@ -3,11 +3,19 @@
  * state so the app has something to show before any activity is simulated"). Not wired into
  * `server.ts` by this task (out of scope — T-004 owns the REST/SSE surface and app startup); this
  * is the function T-004 calls once, at startup, with a real, logged-in {@link PortalClient}.
+ *
+ * This is no longer the only mechanism deciding which campaigns exist — `data/campaign-sync.ts`'s
+ * `ensureEnrolled` runs on every request and enrolls a customer, at zero progress, in any
+ * currently-active campaign this function didn't already seed (a maker activating a new campaign
+ * after boot, in particular). What stays special-cased here is only Priya Shah's fabricated demo
+ * head start on the 3 original campaigns — every other customer, and every other campaign, starts
+ * at zero either way, so `ensureEnrolled` would produce the same rows for them.
  */
 import type { PortalClient } from '../portal-client/client';
 import type { PortalCampaign, PortalCampaignJourney } from '../portal-client/types';
+import { buildCampaignProgress } from './campaign-sync';
 import { CUSTOMERS } from './customers';
-import { ProgressStore, type CampaignProgress, type TrackerProgress } from './progress';
+import { ProgressStore } from './progress';
 import { RewardsStore, rewardTypeFromUnitType, type RewardLedgerEntry } from './rewards';
 
 /** The 3 real campaigns this service was seeded with for the demo (see the T-003 completion
@@ -49,38 +57,6 @@ function findRequiredCampaign(
     );
   }
   return found;
-}
-
-function buildCampaignProgress(
-  campaign: PortalCampaign,
-  journey: PortalCampaignJourney,
-  completedCount: number,
-): CampaignProgress {
-  const trackers: TrackerProgress[] = journey.trackers.map((tracker) => {
-    const componentsInOrder = [...tracker.components].sort(
-      (a, b) => a.sequenceOrder - b.sequenceOrder,
-    );
-    return {
-      trackerId: tracker.id,
-      trackerCode: tracker.trackerCode,
-      trackerName: tracker.name,
-      completionLogic: tracker.completionLogic,
-      completionThreshold: tracker.completionThreshold,
-      components: componentsInOrder.map((component, index) => ({
-        componentId: component.id,
-        componentCode: component.componentCode,
-        componentName: component.name,
-        completed: index < completedCount,
-      })),
-    };
-  });
-
-  return {
-    campaignId: campaign.id,
-    campaignCode: campaign.campaignCode,
-    campaignName: campaign.name,
-    trackers,
-  };
 }
 
 export async function seedDemoData(portalClient: PortalClient): Promise<DemoDataStores> {
