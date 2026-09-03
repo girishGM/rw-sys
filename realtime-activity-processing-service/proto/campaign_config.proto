@@ -1,0 +1,328 @@
+// T-RAP-010 — this service's own CLIENT-SIDE copy of the portal's already-built, read-only
+// `CampaignConfigService` contract (`03-GRPC-CONTRACT.md` §2, `ARCHITECTURE.md` §10).
+//
+// This service does not own this contract — the portal does
+// (`portal/back-end/proto/campaign_config.v1.proto`, built by `T-047`, extended by `T-171`). R0
+// forbids creating or editing anything under `portal/`, so this file is a byte-for-byte,
+// field-number-for-field-number copy of the messages/RPCs this service actually calls, kept here
+// so `@grpc/proto-loader` has something to load without a cross-repo file reference at runtime.
+//
+// ## Keeping this file in sync
+//
+// If the portal's own `campaign_config.v1.proto` ever changes, this copy must be updated to
+// match — field numbers especially (a renumbering is a silent wire break, same rule the portal's
+// own file states at its own header). This is a client-side mirror, not an independent contract:
+// this service never adds a field here that the portal doesn't already serve, and never removes
+// one the portal still sends (proto3's "unknown field" tolerance means an extra field on the
+// portal's side is harmless to skip here, but a field this file expects and the portal doesn't
+// send just deserializes to its zero value — silently, not as an error).
+//
+// Messages/RPCs not reproduced here (this service has no use for them yet): none — every RPC the
+// real service exposes is mirrored below, even though T-RAP-010 itself only calls
+// `ListActiveCampaigns`/`GetCampaignConfig` and T-RAP-011 only adds `WatchCampaignConfig` — the
+// remaining three (`ResolveRuleVersion`, `ResolveRewardVersion`, `GetBudgetStatus`) are included
+// so a later Wave 3 task doesn't need to touch this file (owned exclusively by
+// `agent-rap-cache`, R10) just to add a method this contract already documents.
+
+syntax = "proto3";
+
+package rewardportal.config.v1;
+
+// -------------------------------------------------------------------------------------------
+// Service — read-only. There is no mutating RPC on this contract (03-GRPC-CONTRACT.md §2).
+// -------------------------------------------------------------------------------------------
+
+service CampaignConfigService {
+  // Full configuration for one campaign, with every version pinned. Complete or an error, never
+  // partial — this service's own correct behaviour on a miss is to fail closed.
+  rpc GetCampaignConfig (GetCampaignConfigRequest) returns (CampaignConfig);
+
+  // Every active (or paused-but-flagged) campaign for a tenant — this service's own bulk-fetch
+  // call, used both at cold start and by the reconciliation poller (T-RAP-011).
+  rpc ListActiveCampaigns (ListActiveCampaignsRequest) returns (CampaignConfigList);
+
+  // Server-streaming invalidation (T-RAP-011). An optimisation, never a guarantee
+  // (`04-CACHE-INVALIDATION.md` §3) — the 5-minute reconciliation poll is the backstop.
+  rpc WatchCampaignConfig (WatchRequest) returns (stream ConfigChangeEvent);
+
+  // Resolve (rule_id, version_no) -> human-readable explanation. Not used by T-RAP-010 itself —
+  // mirrored here for a later Wave 3 task (see file header).
+  rpc ResolveRuleVersion (ResolveRuleVersionRequest) returns (RuleVersionDetail);
+
+  // The reward-side mirror of ResolveRuleVersion. Not used by T-RAP-010 itself.
+  rpc ResolveRewardVersion (ResolveRewardVersionRequest) returns (RewardVersionDetail);
+
+  // The runtime OWNS the budget counters; the portal only displays consumption. Not used by
+  // T-RAP-010 itself.
+  rpc GetBudgetStatus (BudgetStatusRequest) returns (BudgetStatusResponse);
+}
+
+// -------------------------------------------------------------------------------------------
+// Sections — 03-GRPC-CONTRACT.md §2 / the portal's own 09-INTEGRATION.md §4c
+// -------------------------------------------------------------------------------------------
+
+enum ConfigSection {
+  CONFIG_SECTION_UNSPECIFIED = 0;
+  BASIC     = 1;   // campaign header, dates, status, budget summary — ALWAYS included
+  MERCHANTS = 2;   // participating merchants and their activities
+  TRACKERS  = 3;   // tracker + component structure, sequence, completion logic
+  RULES     = 4;   // bound rules with pinned versions and dynamic values
+  REWARDS   = 5;   // bound rewards with pinned versions and units
+  CAPS      = 6;   // budgets and customer limits
+}
+
+// -------------------------------------------------------------------------------------------
+// GetCampaignConfig
+// -------------------------------------------------------------------------------------------
+
+message GetCampaignConfigRequest {
+  int32  tenant_id     = 1;
+  string campaign_code = 2;
+  string etag          = 3;
+  repeated ConfigSection sections = 4;
+}
+
+message CampaignConfig {
+  int32  campaign_id      = 1;
+  string campaign_code    = 2;
+  int32  tenant_id        = 3;
+  int32  country_id       = 4;
+  string status           = 5;   // only 'active' or 'paused' is ever served
+
+  string start_date       = 6;   // RFC3339, UTC midnight of the first active date (inclusive)
+  string end_date         = 7;   // RFC3339, UTC midnight of the last active date (inclusive)
+  Money  budget           = 8;
+  int32  max_participants = 9;
+
+  repeated Merchant    merchants = 10;  // section MERCHANTS
+  repeated Tracker     trackers  = 11;  // section TRACKERS
+  repeated BoundRule   rules     = 12;  // section RULES
+  repeated BoundReward rewards   = 13;  // section REWARDS
+
+  string etag         = 14;  // hash(config_hash + sorted(sections_returned)) — opaque, compare with != only
+  string config_hash  = 15;  // opaque — compare with != only, never parsed
+  bool   not_modified = 16;
+  string served_at    = 17;  // RFC3339
+
+  repeated CampaignCap caps = 18;  // section CAPS
+
+  repeated ConfigSection sections_returned = 19;
+  repeated ConfigSection sections_omitted  = 20;
+}
+
+// -------------------------------------------------------------------------------------------
+// The central message
+// -------------------------------------------------------------------------------------------
+
+message BoundRule {
+  int32  rule_id             = 1;
+  int32  rule_version_id     = 2;
+  int32  version_no          = 3;
+  string rule_code           = 4;
+  string expression          = 5;
+  string parameters_json     = 6;
+  string bound_values_json   = 7;
+  int32  tracker_component_id = 8;
+  string status              = 9;
+}
+
+message BoundReward {
+  int32  reward_id         = 1;
+  int32  reward_version_id = 2;
+  int32  version_no        = 3;
+  string system_code       = 4;
+  string reward_type       = 5;
+  string delivery_mode     = 6;
+  string policies_json     = 7;
+  string unit_type         = 8;
+  string unit_code         = 9;
+
+  string level   = 10;  // 'campaign' | 'tracker' | 'component'
+  int32  ref_id  = 11;  // tracker id or component id; 0 at campaign level
+  string status  = 12;
+}
+
+message CampaignCap {
+  string cap_class         = 1;   // 'budget' (pooled) | 'limit' (per customer)
+  string scope_level       = 2;   // campaign | tracker | component
+  int32  scope_ref_id      = 3;
+  string period_type       = 4;   // lifetime|daily|monthly|rolling_hours|time_of_day
+  int32  period_value      = 5;
+  string window_start_time = 6;
+  string window_end_time   = 7;
+  string period_timezone   = 8;
+  string unit_type         = 9;
+  string unit_code         = 10;
+  string reward_type       = 11;  // optional narrowing; empty = all types in this unit
+  string max_total_amount  = 12;  // decimal as STRING — never a float for money
+  int32  max_occurrences   = 13;
+  int32  max_customers     = 14;
+  string on_breach         = 15;  // reject | pause_campaign | alert_only
+  int32  warn_at_percent   = 16;
+}
+
+// -------------------------------------------------------------------------------------------
+// Supporting structure
+// -------------------------------------------------------------------------------------------
+
+message Money {
+  string amount   = 1;  // decimal as STRING
+  string currency = 2;
+}
+
+message Merchant {
+  int32  merchant_id   = 1;
+  string merchant_code = 2;
+  string name          = 3;
+  string status        = 4;
+  repeated Activity activities = 5;
+}
+
+message Activity {
+  int32  activity_id   = 1;
+  string activity_code = 2;
+  string name          = 3;
+
+  // T-171 — the external/transaction-type codes this activity is ALSO known by outside the
+  // portal (`reward_portal.activity_external_codes`). Empty = no external code configured, the
+  // normal case. Uniqueness of a code is per TENANT, not global — this service keys its own
+  // local mirror (`activity_external_code_map`, `01-DATABASE.md` §2) on
+  // (tenant_id, external_code), never on external_code alone.
+  repeated string external_codes = 4;
+}
+
+message Tracker {
+  int32  tracker_id           = 1;
+  string tracker_code         = 2;
+  string name                 = 3;
+  string completion_logic     = 4;  // all | any | n_of | sequence
+  int32  completion_threshold = 5;
+  string status               = 6;
+  repeated TrackerComponent components = 7;
+}
+
+message TrackerComponent {
+  int32  component_id   = 1;
+  string component_code = 2;
+  string name           = 3;
+  int32  activity_id    = 4;
+  int32  sequence_order = 5;
+  bool   is_mandatory   = 6;
+  string status         = 7;
+}
+
+// -------------------------------------------------------------------------------------------
+// ListActiveCampaigns
+// -------------------------------------------------------------------------------------------
+
+message ListActiveCampaignsRequest {
+  int32 tenant_id = 1;
+  repeated ConfigSection sections = 2;
+}
+
+message CampaignConfigList {
+  repeated CampaignConfig campaigns = 1;
+  string served_at = 2;  // RFC3339
+  repeated ConfigSection sections_returned = 3;
+  repeated ConfigSection sections_omitted  = 4;
+}
+
+// -------------------------------------------------------------------------------------------
+// WatchCampaignConfig
+// -------------------------------------------------------------------------------------------
+
+message WatchRequest {
+  int32 tenant_id = 1;
+}
+
+message ConfigChangeEvent {
+  enum ChangeType {
+    CHANGE_TYPE_UNSPECIFIED = 0;
+    UPDATED = 1;  // checker approved -> active
+    PAUSED  = 2;  // tenant_admin paused, or a budget breach paused it
+    ENDED   = 3;  // completed or archived
+  }
+
+  int32      campaign_id   = 1;
+  string     campaign_code = 2;
+  int32      tenant_id     = 3;
+  ChangeType change_type   = 4;
+  string     etag          = 5;  // the BASIC-section etag of the new state, as a cheap probe
+  string     occurred_at   = 6;  // RFC3339
+}
+
+// -------------------------------------------------------------------------------------------
+// Version resolution
+// -------------------------------------------------------------------------------------------
+
+message ResolveRuleVersionRequest {
+  int32 tenant_id  = 1;
+  int32 rule_id    = 2;
+  int32 version_no = 3;
+}
+
+message RuleVersionDetail {
+  int32  rule_id         = 1;
+  string rule_code       = 2;
+  string name            = 3;
+  int32  version_no      = 4;
+  string expression      = 5;
+  string parameters_json = 6;
+  string status          = 7;  // published | deprecated | retired
+  string published_at    = 8;  // RFC3339
+  string change_summary  = 9;
+  bool   exists          = 10; // false rather than an error
+  int32  rule_version_id = 11;
+}
+
+message ResolveRewardVersionRequest {
+  int32 tenant_id  = 1;
+  int32 reward_id  = 2;
+  int32 version_no = 3;
+}
+
+message RewardVersionDetail {
+  int32  reward_id         = 1;
+  string system_code       = 2;
+  string name              = 3;
+  int32  version_no        = 4;
+  string reward_type       = 5;
+  string delivery_mode     = 6;
+  string policies_json     = 7;
+  string unit_type         = 8;
+  string unit_code         = 9;
+  string status            = 10;
+  string published_at      = 11;
+  string change_summary    = 12;
+  bool   exists            = 13;
+  int32  reward_version_id = 14;
+}
+
+// -------------------------------------------------------------------------------------------
+// Budget status — the portal displays, the runtime owns
+// -------------------------------------------------------------------------------------------
+
+message BudgetStatusRequest {
+  int32  tenant_id     = 1;
+  string campaign_code = 2;
+}
+
+message BudgetStatusResponse {
+  int32  campaign_id = 1;
+  string served_at   = 2;
+  repeated BudgetStatusEntry entries = 3;
+}
+
+message BudgetStatusEntry {
+  int32  cap_id            = 1;
+  string cap_class         = 2;
+  string scope_level       = 3;
+  int32  scope_ref_id      = 4;
+  string period_type       = 5;
+  string unit_type         = 6;
+  string unit_code         = 7;
+  string max_total_amount  = 8;
+  int32  max_occurrences   = 9;
+  string on_breach         = 10;
+  int32  warn_at_percent   = 11;
+}

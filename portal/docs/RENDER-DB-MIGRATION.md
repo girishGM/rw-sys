@@ -232,6 +232,172 @@ laptop.
 
 ---
 
+## promo-code-service — the `promo_code` schema on this same Render Postgres instance
+
+*(Added by T-167.)* `promo-code-service` is a **separate standalone service**
+(`promo-code-service/`, own repo directory, own npm workspace — not part of `portal/`) that
+issues promo codes for reward-redemption-service. It deliberately reuses the **same**
+`reward-portal-db` Render Postgres instance the five steps above already provisioned — a new
+schema (`promo_code`) and a new least-privilege role (`promo_code_app`), never a second database
+(`promo-code-service-plan/ARCHITECTURE.md` §4/§5). Do this *after* the five steps above have
+already succeeded once against this Render instance — it depends on nothing here, but there is no
+reason to run it against a database that isn't itself already live.
+
+Companion reading: `promo-code-service/render.yaml` (this service's own Blueprint — the env var
+names below are copied verbatim from its `envVars` list, not invented) and
+`promo-code-service-plan/04-API-CONTRACT.md` §3 (the admin API the manual smoke test below calls).
+
+**One thing this section does differently from the five steps above, on purpose:** unlike the
+portal's own `reward_app` (a role a human creates by hand, Step 1), `promo_code_app` is created
+by promo-code-service's **own migration** (`007_create_promo_code_app_role.ts`), which both
+creates the role (if missing) and sets its login password to whatever `DB_APP_PASSWORD` holds at
+migrate time — not a placeholder the running app merely reads. There is no separate manual
+`CREATE ROLE` `psql` command to run here; setting the env var and running `db:migrate` *is* the
+step. (This was confirmed by reading that migration file directly before writing this section —
+worth calling out because it is easy to assume, by analogy with Step 1 above, that a manual
+`CREATE ROLE` command belongs here too. It doesn't.)
+
+### Step A — choose `DB_APP_PASSWORD` and run promo-code-service's own migrations
+
+```bash
+# From the git repo root, into promo-code-service's own directory:
+cd promo-code-service
+
+cat > .env <<EOF
+NODE_ENV=production
+DB_HOST=<host from reward-portal-db's own External Database URL — same value the portal used>
+DB_PORT=<port, usually 5432>
+DB_NAME=<database name — same one the portal used>
+DB_SSL=true
+DB_MIGRATION_USERNAME=<Render's own database username — same value the portal used>
+DB_MIGRATION_PASSWORD=<Render's own database password — same value the portal used>
+DB_APP_USERNAME=promo_code_app
+DB_APP_PASSWORD=<choose a strong password — this is what 007_create_promo_code_app_role.ts uses
+                  to create/alter the role, not just a value the app reads later>
+KAFKA_BROKERS=<a reachable broker list — this Blueprint provisions no Kafka cluster of its own,
+                see promo-code-service/render.yaml's own header>
+EOF
+
+export NODE_ENV=production   # the identical chicken-and-egg gotcha the portal's own Step 3
+                              # documents — promo-code-service/src/database/cli/migrate.ts reads
+                              # process.env.NODE_ENV *before* this .env file is loaded, the same
+                              # way the portal's migration CLI does. Skip this export and it
+                              # silently migrates your own laptop's local Postgres instead,
+                              # printing a success message for the wrong database.
+npm run db:migrate
+```
+
+**Verify:**
+```bash
+psql "<reward-portal-db's own External Database URL>" -c \
+  "SELECT rolname FROM pg_roles WHERE rolname = 'promo_code_app';"
+psql "<reward-portal-db's own External Database URL>" -c \
+  "SELECT count(*) FROM information_schema.tables WHERE table_schema='promo_code';"
+# Expect the role to exist and every table promo-code-service's migrations create (check
+# ls promo-code-service/src/database/migrations/*.ts for the current count — treat it as a
+# floor, not a fact, the same caveat Step 3 above gives for the portal's own migration count).
+```
+
+### Step B — wire the two Render services to each other
+
+**Corrected (T-167 retry) — neither of these exists as a `sync: false` placeholder in
+`portal/render.yaml` today.** `promo-code-service/render.yaml` (`promo-code-service-plan`
+T-PC-050) does declare `INTERNAL_SERVICE_TOKEN` as `sync: false` on its own side, but
+`portal/render.yaml`'s API service `envVars` list only has `DB_*`, `JWT_*`, `TRUST_PROXY` and
+(on the web service) `API_UPSTREAM_HOST` — grep it yourself before trusting this sentence:
+`grep -n "PROMO_CODE_SERVICE" portal/render.yaml` currently returns nothing. Until a human adds
+the two entries below to `portal/render.yaml`'s API service `envVars` block (the same shape as
+the existing `DB_APP_PASSWORD`/`JWT_PRIVATE_KEY` `sync: false` lines already there), Render's
+dashboard has no field for them at all — you cannot "just set" a value that isn't declared.
+Add these two blocks to `portal/render.yaml` first, `git commit` them (they are placeholders,
+not secrets — R4 is about committed *values*, not committed *keys*), redeploy/re-sync the
+Blueprint so Render picks up the new declared vars, **then** set the actual values by hand in
+each service's own Render dashboard, exactly like `DB_APP_PASSWORD`/`JWT_PRIVATE_KEY` already are
+for the portal (Step 3 above):
+
+```yaml
+      # promo-code-service integration (T-166) — see portal/docs/RENDER-DB-MIGRATION.md's
+      # "promo-code-service" section, Step B, for what these must be set to.
+      - key: PROMO_CODE_SERVICE_BASE_URL
+        sync: false
+      - key: PROMO_CODE_SERVICE_INTERNAL_TOKEN
+        sync: false
+```
+
+- **`PROMO_CODE_SERVICE_BASE_URL`** (portal API service's env) → promo-code-service's real Render
+  service hostname, once that service has been deployed from its own `render.yaml`
+  (`promo-code-service-plan` T-PC-050). Bare `https://<hostname>`, no trailing slash — the same
+  shape `.env.development`'s local value (`http://localhost:3010`) already takes.
+- **`PROMO_CODE_SERVICE_INTERNAL_TOKEN`** (portal API service's env) and **`INTERNAL_SERVICE_TOKEN`**
+  (promo-code-service's own env) → generate one strong random secret, set it identically on
+  **both** services' Render dashboards. Every route on promo-code-service's admin/config API is
+  guarded by `InternalServiceTokenGuard`, which checks this exact value — a mismatch here fails
+  every call from the portal with a `401` that the portal itself then reports as a `502`
+  (`FIELD_API_LOOKUP_UPSTREAM_ERROR`/`PROMO_CODE_SERVICE_BIND_FAILED`), not as an auth error, so a
+  copy/paste mistake here is easy to misdiagnose as "the service is down" when it is not.
+
+### Step C — activate the portal's own promo-code integration
+
+Both of these are the portal's own migration/manual-step pair (T-165), run here against the
+**Render** database now that it exists, exactly as Step 3/Step 4 above ran the portal's core
+migrations and encryption-key provisioning:
+
+```bash
+# From portal/back-end/, the same throwaway .env this file's Step 3 already describes,
+# NODE_ENV=production still exported:
+npm run db:migrate
+```
+
+This applies `T165_001_activate_promo_code_config_service_provider.ts` along with every other
+pending portal migration — safe to run repeatedly (idempotent), and correct whether this is a
+brand-new Render deploy or one that already has the portal's core schema from the five steps
+above.
+
+Then, as a real `super_admin` (real MFA, T-055) against the **live Render-hosted portal API**:
+
+```bash
+# id = the field_api_lookup_providers row for PROMO_CODE_CONFIG_SERVICE — find it first:
+curl -s https://<portal Render hostname>/api/v1/field-api-lookup-providers \
+  -H "Cookie: <a real super_admin session cookie jar>" | python3 -m json.tool
+
+curl -s -X PATCH https://<portal Render hostname>/api/v1/field-api-lookup-providers/<id> \
+  -H "Cookie: <the same session cookie jar>" \
+  -H "X-CSRF-Token: <the matching rs_csrf cookie value>" \
+  -H "Content-Type: application/json" \
+  -d '{"authConfig": {"token": "<the exact same value as INTERNAL_SERVICE_TOKEN/
+                                 PROMO_CODE_SERVICE_INTERNAL_TOKEN from Step B above>"}}'
+```
+
+T-165's own implementation note 3 explains why this cannot be part of any migration:
+`FieldCryptoService` needs the running application's key registry, which a migration-CLI context
+structurally does not have. T-162's "Value Sources" screen (Super Admin, Wave 8) calls this exact
+endpoint and can be used instead of the raw `curl` above.
+
+### Step D — smoke test
+
+```bash
+curl -s https://<portal Render hostname>/api/v1/field-value-sources/api/PROMO_CODE_CONFIG_SERVICE \
+  -H "Cookie: <any authenticated role's session cookie jar>"
+```
+
+**Resolved (T-172, `done`) — kept here for history, not a current gap.** Between this section
+first being written and T-167 completing, this exact call briefly returned `502
+FIELD_API_LOOKUP_UPSTREAM_ERROR` even with Steps A–C done correctly, because
+`FieldValueSourceLookupService.apiLookup()`
+(`portal/back-end/src/modules/field-value-sources/field-value-source-lookup.service.ts`) called
+the provider's stored `endpoint_url` with no query parameters at all, while promo-code-service's
+own `GET /api/v1/promo-code-configs` requires a `tenantId` query parameter by design (its list is
+tenant-scoped, not global). T-172 fixed this: the caller's own verified `tenantId` (from the JWT,
+never client-supplied — R3) is now appended as `?tenantId=` on every generic field-api-lookup-
+provider call. Re-verified live, T-167, against a real running promo-code-service and a real
+Maker session, after T-172 landed: this smoke test now returns a bare JSON array of
+`{value, label}` options — real promo-code-service data, not an error. **The bind path was never
+affected either way** — a Maker attaching a `PROMO_CODE` reward once they already have a config id
+has worked end to end since T-166 (re-verified live again here too, including the fail-closed
+`502`-then-retry sequence with promo-code-service stopped and restarted). If this smoke test still
+`502`s against a real Render deploy, treat it as a genuine regression or a Steps A–C
+misconfiguration, not this historical gap resurfacing.
+
 ## What "the database structure is up to date" actually means going forward
 
 `reward_config_postgres.sql` will not change again unless the upstream, real corporate schema

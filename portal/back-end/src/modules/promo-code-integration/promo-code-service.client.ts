@@ -57,16 +57,38 @@ const BIND_PATH = '/api/v1/campaign-promo-configs';
  */
 export type PromoCodeBindLevel = 'CAMPAIGN' | 'TRACKER' | 'COMPONENT';
 
-/** The request body of §2, exactly. */
+/**
+ * The request body of §2, exactly.
+ *
+ * ### Why `tenantId`/`bindRefId`/`boundBy` are `string` and not `number` (T-170)
+ *
+ * They are **opaque external references** as far as promo-code-service is concerned: it stores
+ * them verbatim in `varchar` columns and only ever compares them for equality, never parses or
+ * interprets them (`promo-code-service-plan` T-PC-052…T-PC-055, which widened those columns and
+ * relaxed their validators from `uuid` to plain strings for exactly this caller). Typing them as
+ * `string` here keeps that fact visible at the boundary: the portal's own ids cross the wire
+ * unmodified, as decimal strings, and nothing on either side encodes, hashes or reformats them.
+ *
+ * The rejected alternative was to keep promo-code-service untouched and pack the portal's integer
+ * ids into syntactically valid UUIDs on this side. It fails one level below format validation —
+ * promo-code-service matches the request's `tenantId` against the `tenant_id` already stored on
+ * the target `promo_code_config` row, so a unilaterally invented UUID would pass validation and
+ * then `409` forever. Full diagnosis:
+ * `project-plan/reports/T-170-promo-code-service-bind-contract-uuid-mismatch.md`.
+ */
 export interface PromoCodeBindRequest {
   /** The Maker's chosen config — the `promoCodeConfig` value carried on the attach request. */
   readonly promoCodeConfigId: string;
-  readonly tenantId: number;
+  /** The portal's own tenant id, as a decimal string. Not a UUID, not encoded — see above. */
+  readonly tenantId: string;
   readonly bindLevel: PromoCodeBindLevel;
-  /** The campaign, tracker or component id the reward is being attached to. */
-  readonly bindRefId: number;
+  /**
+   * The campaign, tracker or component id the reward is being attached to, as a decimal string.
+   * At `CAMPAIGN` level this is the campaign's own id — the portal sends no `refId` there.
+   */
+  readonly bindRefId: string;
   /** The Maker performing the attach. From the verified JWT, never from the request body (R3). */
-  readonly boundBy: number;
+  readonly boundBy: string;
 }
 
 /**

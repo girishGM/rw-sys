@@ -1,0 +1,33 @@
+{
+  "postgres": {
+    "id": "dpg-da65ibrncjis73aovfh0-a",
+    "name": "reward-portal-db"
+  },
+  "services": [
+    {
+      "id": "portal-api",
+      "renderServiceId": "srv-da6l42u7bikc738v12gg",
+      "name": "Portal Back-end API (rw-sys-api)"
+    },
+    {
+      "id": "portal-web",
+      "renderServiceId": "srv-da6ldsgn74is73fhgf60",
+      "name": "Portal Front-end (rw-sys-web)"
+    },
+    {
+      "id": "promo-code-service",
+      "renderServiceId": "srv-dabmgt2jobas738ajnh0",
+      "name": "Promo Code Service"
+    },
+    {
+      "id": "test-app-frontend",
+      "renderServiceId": "srv-dab3273tqb8s73el2mhg",
+      "name": "Test App Frontend"
+    },
+    {
+      "id": "test-app-tracking-service",
+      "renderServiceId": "srv-dab2so740ujc739lhon0",
+      "name": "Test App Tracking Service"
+    }
+  ]
+}

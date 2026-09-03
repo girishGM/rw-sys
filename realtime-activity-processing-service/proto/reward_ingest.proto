@@ -1,0 +1,60 @@
+// T-RAP-034 — this service's own CLIENT-SIDE contract for the gRPC-fallback dispatch tier
+// (`05-PROCESSING-PIPELINE.md` §7 tier 2, `03-GRPC-CONTRACT.md` §3). Unlike `campaign_config.proto`
+// (a client-side mirror of a contract the PORTAL owns and serves) or `activity_ingest.proto` (a
+// contract THIS service owns and serves), `reward-redemption-service` does not exist anywhere in
+// this repo (`03-GRPC-CONTRACT.md` §3's own "same non-existence status as promo-code-service-plan's
+// treatment of this service"). This file is this task's own concrete shape to code a client
+// against, copied field-for-field from `03-GRPC-CONTRACT.md` §3's `RewardEntry`/`SubmitRewardEntryAck`
+// sketch, expanded to the full `01-DATABASE.md` §7 `reward_entry` row shape that section says this
+// message "mirrors ... 1:1" — until the real service exists, this is this service's own best-effort
+// definition of what it will call, not an authoritative external contract.
+//
+// `customer_id` (plaintext) is the one field NOT copied straight off the `reward_entry` table
+// (which stores `customer_id_encrypted`/`customer_id_hash`, never plaintext, R4) — this RPC crosses
+// the same trust boundary into `reward-redemption-service`'s own domain that `reward.entry.created.v1`
+// does (`02-KAFKA-CONTRACTS.md` §3), so it carries the same decrypted-at-point-of-publish value,
+// never `customer_id_encrypted`/`customer_id_hash`.
+//
+// Money/decimal fields (`activity_value`, `reward_value`) are `string`, never a numeric proto type —
+// same float-precision-loss-avoidance convention `activity_ingest.proto`'s own header documents.
+
+syntax = "proto3";
+
+package rewardrap.reward.v1;
+
+service RewardIngestService {
+  rpc SubmitRewardEntry (RewardEntry) returns (SubmitRewardEntryAck);
+}
+
+message RewardEntry {
+  string id                        = 1;   // reward_entry.id — this IS reward_entry_unique_id
+  string correlation_id            = 2;
+  int32  tenant_id                 = 3;
+  string customer_id               = 4;   // decrypted — see this file's own header
+  string customer_id_type          = 5;
+  string activity_performed_date   = 6;   // full ISO-8601 with zone offset
+  string transaction_type          = 7;   // OPTIONAL — empty when activity_code was used instead
+  string activity_code             = 8;   // OPTIONAL — empty when transaction_type was used instead
+  string activity_type             = 9;
+  string activity_category         = 10;
+  string activity_value             = 11;  // decimal-as-string
+  string activity_value_unit       = 12;
+  string channel                   = 13;
+  string activity_performed_env    = 14;
+  string activity_name             = 15;
+  string campaign_code             = 16;
+  string tracker_code              = 17;
+  string tracker_component_code    = 18;
+  string merchant_code             = 19;  // OPTIONAL
+  string reward_code               = 20;
+  string reward_category           = 21;
+  string reward_value              = 22;  // decimal-as-string
+  string reward_value_unit         = 23;
+  string reward_entry_date         = 24;  // full ISO-8601 with zone offset
+  int32  completion_cycle          = 25;
+}
+
+message SubmitRewardEntryAck {
+  string reward_entry_id = 1;
+  string status           = 2;
+}

@@ -120,6 +120,7 @@ import {
   VersionBlastTarget,
 } from '@/database/models';
 import {
+  ActivityExternalCode,
   PortalApprovalRequest,
   PortalAuditLog,
   PortalCampaignAuditTrail,
@@ -505,6 +506,15 @@ const STRATEGIES = new Map<ModelStatic<Model>, ScopeStrategy>([
     Activity,
     {
       note: 'Tenant-owned activity catalogue.',
+      country: subquery('tenantId', 'country', TENANTS_IN_COUNTRY),
+      tenant: column('tenantId', 'tenant'),
+      merchant: column('tenantId', 'tenant'),
+    },
+  ],
+  [
+    ActivityExternalCode,
+    {
+      note: 'T-171 — the external/transaction-type codes an activity is also known by (reward_portal, because R1 forbids new reward_config DDL). It hangs off the tenant-owned activity catalogue above and carries its own tenant_id column, so it takes exactly the same rule as Activity: a unique index cannot span a cross-schema subquery and this predicate needs a real column to bind to, which is why the tenant is stored on the row rather than joined through activities.',
       country: subquery('tenantId', 'country', TENANTS_IN_COUNTRY),
       tenant: column('tenantId', 'tenant'),
       merchant: column('tenantId', 'tenant'),

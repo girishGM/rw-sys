@@ -308,13 +308,14 @@ describe('T-166 · a PROMO_CODE attach registers the binding before it writes an
 
     // The bind carried exactly §2's body, built from the campaign and the verified actor — never
     // from anything the client could have supplied for tenant or actor (R3).
+    // T-170: the three id fields travel as plain decimal strings of the portal's real ids.
     expect(built.promoCodeService.binds).toEqual([
       {
         promoCodeConfigId: 'CONFIG_UUID_1',
-        tenantId: 10,
+        tenantId: String(CAMPAIGN.tenantId),
         bindLevel: 'CAMPAIGN',
-        bindRefId: CAMPAIGN.id,
-        boundBy: MAKER.userId,
+        bindRefId: String(CAMPAIGN.id),
+        boundBy: String(MAKER.userId),
       },
     ]);
 
@@ -491,8 +492,8 @@ describe('T-166 · bindLevel mapping', () => {
 
     expect(built.promoCodeService.binds[0]?.bindLevel).toBe(expected);
     // Campaign level carries no `refId`, so the campaign itself is what the binding refers to —
-    // `bind_ref_id` is NOT NULL on the far side (01-DATABASE.md §2).
-    expect(built.promoCodeService.binds[0]?.bindRefId).toBe(expectedRefId);
+    // `bind_ref_id` is NOT NULL on the far side (01-DATABASE.md §2). T-170: as a string.
+    expect(built.promoCodeService.binds[0]?.bindRefId).toBe(String(expectedRefId));
   });
 
   it('maps every portal level, and the mapping is total', () => {
@@ -501,6 +502,58 @@ describe('T-166 · bindLevel mapping', () => {
     expect(toBindLevel('campaign')).toBe('CAMPAIGN');
     expect(toBindLevel('tracker')).toBe('TRACKER');
     expect(toBindLevel('component')).toBe('COMPONENT');
+  });
+});
+
+// --- T-170: the id fields promo-code-service stores verbatim --------------------------------------
+
+/**
+ * T-170. promo-code-service settled on `varchar` for `tenantId`/`bindRefId`/`boundBy`
+ * (T-PC-052…T-PC-055), so the portal sends its own real ids as plain decimal strings — nothing is
+ * encoded, and nothing over there needs decoding to be read by a human.
+ */
+describe('T-170 · the bind request carries the portal’s real ids as plain strings', () => {
+  it('TC-1: at campaign level, bindRefId is the campaign’s own id (there is no refId to send)', async () => {
+    const built = build();
+
+    await built.service.attachReward(MAKER, CAMPAIGN, attach({ promoCodeConfig: 'CONFIG_UUID_1' }));
+
+    const [sent] = built.promoCodeService.binds;
+    expect(sent?.bindRefId).toBe(String(CAMPAIGN.id));
+    // Not `String(undefined)` — the bug this task also closes. `dto.refId` is forbidden at
+    // campaign level, so a naive `String(dto.refId)` would put the literal 'undefined' on the wire
+    // and promo-code-service would store it as a real, permanently meaningless reference.
+    expect(sent?.bindRefId).not.toBe('undefined');
+  });
+
+  it.each([
+    ['tracker', 7],
+    ['component', 71],
+  ] as const)('TC-2: at %s level, bindRefId is String(dto.refId)', async (level, refId) => {
+    const built = build();
+
+    await built.service.attachReward(
+      MAKER,
+      CAMPAIGN,
+      attach({ level, refId, promoCodeConfig: 'CONFIG_UUID_1' }),
+    );
+
+    expect(built.promoCodeService.binds[0]?.bindRefId).toBe(String(refId));
+  });
+
+  it('TC-3: tenantId and boundBy are decimal strings of the JWT/campaign values, not UUIDs', async () => {
+    const built = build();
+
+    await built.service.attachReward(MAKER, CAMPAIGN, attach({ promoCodeConfig: 'CONFIG_UUID_1' }));
+
+    const [sent] = built.promoCodeService.binds;
+    // The literal decimal id, readable as-is on the far side. A UUID-shaped value here — however
+    // derived — would pass promo-code-service's format validation and then fail its equality
+    // check against `promo_code_config.tenant_id` forever (see the T-170 diagnosis report).
+    expect(sent?.tenantId).toBe('10');
+    expect(sent?.boundBy).toBe('1');
+    expect(sent?.tenantId).toMatch(/^\d+$/);
+    expect(sent?.boundBy).toMatch(/^\d+$/);
   });
 });
 
@@ -557,10 +610,10 @@ describe('PromoCodeServiceClient — against a real local server', () => {
 
   const REQUEST: PromoCodeBindRequest = {
     promoCodeConfigId: 'CONFIG_UUID_1',
-    tenantId: 10,
+    tenantId: '10',
     bindLevel: 'CAMPAIGN',
-    bindRefId: 500,
-    boundBy: 1,
+    bindRefId: '500',
+    boundBy: '1',
   };
 
   it('TC-1: a real 201 resolves, having POSTed §2’s body with the bearer token', async () => {
@@ -579,11 +632,34 @@ describe('PromoCodeServiceClient — against a real local server', () => {
     // The body a real server parsed — not the object we handed in.
     expect(JSON.parse(seen.body)).toEqual({
       promoCodeConfigId: 'CONFIG_UUID_1',
-      tenantId: 10,
+      tenantId: '10',
       bindLevel: 'CAMPAIGN',
-      bindRefId: 500,
-      boundBy: 1,
+      bindRefId: '500',
+      boundBy: '1',
     });
+  });
+
+  it('T-170/TC-3: the three id fields arrive as JSON strings, not JSON numbers', async () => {
+    // The property promo-code-service actually judges, at the only place it can be judged: after
+    // `JSON.stringify` → socket → `JSON.parse` on the far side. `toEqual` above would still pass
+    // if `'10'` became `10` somewhere between here and the wire only if the fixture changed too;
+    // this case pins the *type* independently, because promo-code-service's DTO validator rejects
+    // a number for a `varchar` external reference with a `400` (T-PC-053).
+    handler = (_req, res) => {
+      res.writeHead(201);
+      res.end('{}');
+    };
+
+    await client(`http://127.0.0.1:${String(port)}`, 'shared-token').bind(REQUEST);
+
+    const body = JSON.parse(seen.body) as Record<string, unknown>;
+    expect(typeof body['tenantId']).toBe('string');
+    expect(typeof body['bindRefId']).toBe('string');
+    expect(typeof body['boundBy']).toBe('string');
+    // …and they are the portal's own ids, verbatim and human-readable — no encoding to reverse.
+    expect(body['tenantId']).toBe('10');
+    expect(body['bindRefId']).toBe('500');
+    expect(body['boundBy']).toBe('1');
   });
 
   it('calls §2’s path, and tolerates a base URL with a trailing slash', async () => {

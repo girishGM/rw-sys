@@ -253,6 +253,20 @@ message Activity {
   int32  activity_id   = 1;
   string activity_code = 2;
   string name          = 3;
+
+  // The external/transaction-type codes this activity is ALSO known by outside this portal —
+  // `reward_portal.activity_external_codes` (T-171). A runtime that receives an activity carrying
+  // only a `transactionType` resolves it to `activity_code` through this list.
+  //
+  // Appended at the next free number, per rule 1 at the top of this file: 1-3 above are untouched,
+  // and this field is purely additive — a consumer generated before T-171 ignores it and keeps
+  // deserialising correctly.
+  //
+  // Empty means "no external code is configured for this activity", which is the normal case and
+  // not an error. Uniqueness of a code is per TENANT, not global: two tenants may each map
+  // "PURCHASE" to their own activity, so a consumer must key its own lookup on
+  // (tenant_id, external_code) — never on external_code alone.
+  repeated string external_codes = 4;   // T-171 — added, never renumber
 }
 
 message Tracker {
