@@ -29,6 +29,9 @@ export const ActivityMessage: MessageDescriptor = {
     { name: 'activity_id', no: 1, type: 'int32' },
     { name: 'activity_code', no: 2, type: 'string' },
     { name: 'name', no: 3, type: 'string' },
+    // T-171 — transcribed from the `.proto`, which is the contract. Appended at the next free
+    // number; 1-3 above are untouched.
+    { name: 'external_codes', no: 4, type: 'string', repeated: true },
   ],
 };
 

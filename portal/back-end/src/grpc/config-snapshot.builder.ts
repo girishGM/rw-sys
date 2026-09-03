@@ -72,6 +72,9 @@ import {
   TrackerComponentRule,
   TrackerTrackerComponent,
 } from '@/database/models';
+// T-171 — `reward_portal`, not `reward_config` (R1 forbids new DDL there); hence the second
+// import rather than an addition to the barrel above.
+import { ActivityExternalCode } from '@/database/portal-models';
 import { calendarDateOf } from '@/modules/campaigns/campaign-date';
 import { ROW_ACTIVE } from './grpc.constants';
 import { IncompleteConfigError } from './grpc.errors';
@@ -93,6 +96,8 @@ export interface ActivityPayload {
   readonly activityId: number;
   readonly activityCode: string;
   readonly name: string;
+  /** T-171 — `reward_portal.activity_external_codes`, sorted, `[]` when none are configured. */
+  readonly externalCodes: readonly string[];
 }
 
 export interface MerchantPayload {
@@ -344,14 +349,30 @@ export class ConfigSnapshotBuilder {
     ]);
 
     const activityIds = [...new Set(merchantActivities.map((row) => row.activityId))];
-    const activities =
+    const [activities, externalCodes] =
       activityIds.length === 0
-        ? []
-        : await this.scoped.listAll(Activity, {
-            where: { id: { [Op.in]: activityIds } },
-            transaction,
-          });
+        ? [[], []]
+        : await Promise.all([
+            this.scoped.listAll(Activity, {
+              where: { id: { [Op.in]: activityIds } },
+              transaction,
+            }),
+            // T-171 — the external/transaction-type codes each of those activities is also known
+            // by. Ordered by the code itself so the payload — and therefore `config_hash` (§11:
+            // "stable and comparable") — does not depend on physical row order.
+            this.scoped.listAll(ActivityExternalCode, {
+              where: { activityId: { [Op.in]: activityIds } },
+              order: [['externalCode', 'ASC']],
+              transaction,
+            }),
+          ]);
     const activityById = new Map(activities.map((row) => [row.id, row]));
+    const externalCodesByActivity = new Map<number, string[]>();
+    for (const row of externalCodes) {
+      const existing = externalCodesByActivity.get(row.activityId);
+      if (existing === undefined) externalCodesByActivity.set(row.activityId, [row.externalCode]);
+      else existing.push(row.externalCode);
+    }
 
     const byMerchant = new Map(merchants.map((row) => [row.id, row]));
     return participation
@@ -377,6 +398,10 @@ export class ConfigSnapshotBuilder {
                     activityId: activity.id,
                     activityCode: activity.activityCode,
                     name: activity.name,
+                    // Always an array, never absent: an activity with no external code
+                    // configured is the normal case, and a strict consumer must see an empty
+                    // list rather than a missing key (T-171 TC-3).
+                    externalCodes: externalCodesByActivity.get(activity.id) ?? [],
                   };
             })
             .filter((entry): entry is ActivityPayload => entry !== null),

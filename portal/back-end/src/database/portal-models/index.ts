@@ -24,6 +24,11 @@ export * from './portal-user-notification.model';
 // `T037_001_portal_approval_requests.ts` and `T037_002_portal_campaign_audit_trail.ts`.
 export * from './portal-approval-request.model';
 export * from './portal-campaign-audit-trail.model';
+// T-171 — `reward_portal.activity_external_codes`, the external/transaction-type codes an
+// activity is also known by. Same append-only registration-point shape as the two T-037 lines
+// above (05-EXECUTION-PLAN.md §3); a `reward_portal` table, so it belongs in this barrel rather
+// than the `reward_config` one. See `T171_001_activity_external_codes.ts`.
+export * from './activity-external-code.model';
 
 import { PortalUser } from './portal-user.model';
 import { PortalUserCredential } from './portal-user-credential.model';
@@ -36,6 +41,7 @@ import { PortalUserRole } from './portal-user-role.model';
 import { PortalUserNotification } from './portal-user-notification.model';
 import { PortalApprovalRequest } from './portal-approval-request.model';
 import { PortalCampaignAuditTrail } from './portal-campaign-audit-trail.model';
+import { ActivityExternalCode } from './activity-external-code.model';
 
 export const PORTAL_MODELS = [
   PortalUser,
@@ -49,4 +55,5 @@ export const PORTAL_MODELS = [
   PortalUserNotification,
   PortalApprovalRequest,
   PortalCampaignAuditTrail,
+  ActivityExternalCode,
 ];

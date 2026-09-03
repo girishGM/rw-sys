@@ -48,6 +48,29 @@
  *    unfiltered list here would be exactly the gap `13-REWARD-MASTER-VALUE-SOURCES.md` §3's
  *    circular-dependency rule exists to close — this endpoint's whole job is filtering out what a
  *    Maker must not be offered.
+ *
+ * ### T-172 — the outbound request now carries the caller's own `tenantId`
+ *
+ * Filed as a defect against this task's own design: `apiLookup` called the provider's stored
+ * `endpoint_url` verbatim, with no per-request parameters at all. That is fine for a genuinely
+ * global upstream, but promo-code-service's real `GET /api/v1/promo-code-configs`
+ * (`04-API-CONTRACT.md` §1, `promo-code-service-plan`) is **tenant-scoped by design** — it
+ * requires a `tenantId` query parameter and 400s without one — so every call this proxy made on a
+ * Maker's behalf was answered 400 by the upstream and normalised to a 502 here, unconditionally.
+ *
+ * No column on `field_api_lookup_providers` can fix this (R1 forbids adding one without an
+ * architect decision, and T-121's schema has none today): the missing value isn't a per-provider
+ * constant, it's per-request, per-caller data that only exists once a request is authenticated.
+ * The fix therefore lives entirely in this method: `apiLookup` now takes the caller's own
+ * `tenantId` — read from the verified JWT via `@CurrentUser()` in the controller, never from a
+ * DTO (R3) — and appends it as a `?tenantId=` query parameter on every outbound request, via
+ * {@link appendTenantId}. `null` (a caller with no tenant scope, e.g. a country-only or global
+ * Super Admin) omits the parameter entirely rather than sending an empty one, leaving the
+ * upstream's own validation — and this class's existing 400→502 normalisation — to report it,
+ * exactly as every caller shape behaved before this fix. This is a generic convention for *every*
+ * active provider, not a `PROMO_CODE_CONFIG_SERVICE` special case: every upstream this proxy is
+ * confirmed to call is part of the same multi-tenant system this portal itself is, and appending
+ * an extra query parameter an upstream doesn't ask for is harmless.
  */
 import { Injectable } from '@nestjs/common';
 import {
@@ -236,8 +259,13 @@ export class FieldValueSourceLookupService {
     return options.filter((option) => option.sequenceOrder < own.sequenceOrder);
   }
 
-  /** `GET /field-value-sources/api/:providerCode`. */
-  async apiLookup(providerCode: string): Promise<FieldValueOption[]> {
+  /**
+   * `GET /field-value-sources/api/:providerCode`.
+   *
+   * `tenantId` is the caller's own, verified tenant scope (`AuthenticatedUser.tenantId`, R3) —
+   * see this file's header, "T-172", for why it exists as a parameter here and how it is used.
+   */
+  async apiLookup(providerCode: string, tenantId: number | null): Promise<FieldValueOption[]> {
     const provider = await this.findApiLookupProviderOrFail(providerCode);
 
     if (provider.status !== 'active') {
@@ -250,7 +278,7 @@ export class FieldValueSourceLookupService {
     const headers = buildAuthHeaders(provider.authType, authConfig);
 
     const body = await this.httpClient.requestJson(
-      provider.endpointUrl,
+      appendTenantId(provider.endpointUrl, tenantId),
       provider.httpMethod,
       headers,
     );
@@ -296,6 +324,30 @@ function toContextOption(
     componentCode: link.component.componentCode,
     sequenceOrder: link.sequenceOrder,
   };
+}
+
+/**
+ * T-172 — appends the caller's own `tenantId` (verified JWT only, never client-supplied — R3) as
+ * a `tenantId` query parameter on `endpointUrl`, so a tenant-scoped upstream (promo-code-service's
+ * `GET /api/v1/promo-code-configs`, confirmed by reading `04-API-CONTRACT.md` §1 and its own
+ * `parseListPromoCodeConfigsQuery`) sees the same parameter every other tenant-scoped call in this
+ * system carries, instead of nothing at all.
+ *
+ * `tenantId === null` (a caller with no tenant scope) leaves `endpointUrl` untouched — see this
+ * file's header for why that is the deliberate, unchanged behaviour for that caller shape, not a
+ * gap this task closes.
+ *
+ * Deliberately not `new URL(endpointUrl)`: `endpoint_url` has no format validation at the DTO
+ * layer (`create-field-api-lookup-provider.dto.ts` — plain `@IsString()`, no `@IsUrl()`), a
+ * handful of this module's own tests store a bare placeholder like `'u'` for provider rows that
+ * are never actually dispatched to `fetch`, and a malformed value must still fail the same clean
+ * 502 `FieldApiLookupHttpClient.requestJson` already produces for a bad URL — not throw a raw,
+ * unhandled `TypeError` out of a URL parser before that class is even reached.
+ */
+function appendTenantId(endpointUrl: string, tenantId: number | null): string {
+  if (tenantId === null) return endpointUrl;
+  const separator = endpointUrl.includes('?') ? '&' : '?';
+  return `${endpointUrl}${separator}tenantId=${encodeURIComponent(String(tenantId))}`;
 }
 
 /**

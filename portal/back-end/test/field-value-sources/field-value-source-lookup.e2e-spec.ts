@@ -19,6 +19,11 @@
  * against the real seeded `PROMO_CODE_CONFIG_SERVICE` row (`GET .../api/PROMO_CODE_CONFIG_SERVICE`
  * → 501); T-169 replaced that with a suite-owned fixture in TC-4 below once T-165 made "stays
  * `planned` forever" a false premise for that specific row — see TC-4's own comment.
+ *
+ * T-172 (below, in the "API lookup" describe block, right after TC-6) adds the regression
+ * coverage for the defect T-167 reproduced live: this proxy sent the caller's `tenantId` nowhere,
+ * so a tenant-scoped upstream (promo-code-service) always answered 400 → 502. Both new cases
+ * capture the real HTTP request this suite's own fixture server receives.
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
@@ -410,6 +415,49 @@ describe('T-123 — API lookup', () => {
       { value: 1, label: 'Alpha' },
       { value: 2, label: 'Beta' },
     ]);
+  });
+
+  // T-172 — the reported live defect (T-167): a tenant-scoped upstream like promo-code-service's
+  // `GET /api/v1/promo-code-configs` requires a `tenantId` query parameter and 400s without one,
+  // which this proxy's own error normalisation turns into an unconditional 502 for every caller.
+  // Proven here against a real HTTP request this suite's own fixture server receives and inspects
+  // — not a mock of the seam, the seam itself (AGENT-PROTOCOL §3).
+  it("T-172 TC-2/TC-3: the maker's own tenantId reaches the upstream as a real query parameter", async () => {
+    let receivedUrl: string | undefined;
+    currentHandler = (req, res) => {
+      receivedUrl = req.url;
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify([{ id: 1, label: 'Alpha' }]));
+    };
+
+    const res = await get('maker', `/field-value-sources/api/${ACTIVE_PROVIDER_CODE}`);
+
+    expect(res.status).toBe(200);
+    expect(receivedUrl).toBeDefined();
+    const receivedTenantId = new URL(receivedUrl as string, 'http://127.0.0.1').searchParams.get(
+      'tenantId',
+    );
+    // The maker actor was created above with the real, seeded `tenantId` — this is the exact
+    // value promo-code-service's own `parseListPromoCodeConfigsQuery` requires, read only from
+    // the verified JWT (R3), never from anything the request could supply.
+    expect(receivedTenantId).toBe(String(tenantId));
+  });
+
+  it('T-172: a caller with no tenant scope (super_admin) reaches the upstream with no tenantId parameter at all', async () => {
+    let receivedUrl: string | undefined;
+    currentHandler = (req, res) => {
+      receivedUrl = req.url;
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('[]');
+    };
+
+    const res = await get('super', `/field-value-sources/api/${ACTIVE_PROVIDER_CODE}`);
+
+    expect(res.status).toBe(200);
+    expect(receivedUrl).toBeDefined();
+    expect(new URL(receivedUrl as string, 'http://127.0.0.1').searchParams.has('tenantId')).toBe(
+      false,
+    );
   });
 
   it('a bearer credential is decrypted and sent as a real Authorization header', async () => {

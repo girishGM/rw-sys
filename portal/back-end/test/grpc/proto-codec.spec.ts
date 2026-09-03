@@ -171,7 +171,12 @@ describe('proto-codec — round trips', () => {
           merchantCode: 'M1',
           name: 'Merchant One',
           status: 'active',
-          activities: [{ activityId: 9, activityCode: 'A9', name: 'Spend' }],
+          // T-171 appended `external_codes` to `Activity`; this fixture claims to be a *fully
+          // populated* CampaignConfig, so it carries a real value for the new field rather than
+          // the empty default a bare `[]` would leave untested here.
+          activities: [
+            { activityId: 9, activityCode: 'A9', name: 'Spend', externalCodes: ['CARD_TXN'] },
+          ],
         },
       ],
       trackers: [

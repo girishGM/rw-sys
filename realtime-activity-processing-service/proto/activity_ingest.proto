@@ -1,0 +1,55 @@
+// T-RAP-022 — this service's own SERVER-SIDE contract for real-time activity ingestion
+// (`03-GRPC-CONTRACT.md` §1, `ARCHITECTURE.md` §6). Unlike `campaign_config.proto` (a client-side
+// mirror of a contract the portal owns), this service is the one that owns and serves
+// `ActivityIngestService` — this file is the authoritative source, copied field-for-field from
+// `03-GRPC-CONTRACT.md` §1 (message names, field names, field numbers, types all exactly as
+// specified there).
+//
+// This RPC is fire-and-forget beyond acknowledgment of receipt (§1's own note): it hands back
+// `accepted`/`duplicate` the moment the fan-out transaction into `activity_logs` commits, it does
+// not wait for Wave 3 (rule evaluation, tracker completion, reward creation) to finish — exactly
+// the same semantics the Kafka `activity.ingest.v1` consumer (T-RAP-023) has, since both
+// transports call the same `ActivityIngestionService.ingest` domain method
+// (`ARCHITECTURE.md` §6, `AGENT-PROTOCOL.md` R5).
+//
+// `activity_value` is `string` (decimal-as-string), never a numeric proto type — avoids float
+// precision loss over the wire, same convention `campaign_config.proto`'s own `money` fields and
+// `promo-code-service`'s `promo_code.v1.proto` already use for the identical reason.
+//
+// Deliberately no `tenant_id` field on `SubmitActivityRequest` — this service resolves the
+// caller's tenant from its own mTLS client-identity → tenant mapping (this task's own auth layer,
+// `src/grpc/mtls.guard.ts`), never from a caller-supplied wire field
+// (`src/modules/idempotency/inbound-activity.types.ts`'s own header: "never a field on the wire
+// payload itself").
+
+syntax = "proto3";
+
+package rewardrap.ingest.v1;
+
+service ActivityIngestService {
+  rpc SubmitActivity (SubmitActivityRequest) returns (SubmitActivityResponse);
+}
+
+message SubmitActivityRequest {
+  string customer_id = 1;
+  string customer_id_type = 2;
+  string activity_performed_date = 3;   // full ISO-8601 with zone offset, e.g. "2026-09-01T10:15:30Z" — REQUIRED to carry an explicit offset, not assumed UTC by omission
+  string transaction_type = 4;          // one of transaction_type / activity_code required
+  string activity_code = 5;
+  string activity_type = 6;
+  string activity_category = 7;
+  string activity_value = 8;            // decimal-as-string — avoids float precision loss over the wire
+  string activity_value_unit = 9;
+  string channel = 10;
+  string activity_performed_env = 11;
+  string activity_name = 12;
+  string activity_event_id = 13;        // OPTIONAL but strongly recommended — ARCHITECTURE.md §7
+  string correlation_id = 14;           // OPTIONAL — service generates one if blank
+  string merchant_code = 15;            // OPTIONAL
+}
+
+message SubmitActivityResponse {
+  string correlation_id = 1;
+  string status = 2;                    // "accepted" | "duplicate" — never a per-tracker-component outcome here (async, see below)
+  repeated string matched_tracker_components = 3;  // tracker_component_code values this activity fanned out to, for the caller's own visibility
+}

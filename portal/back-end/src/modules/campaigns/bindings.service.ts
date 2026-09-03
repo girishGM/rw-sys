@@ -626,17 +626,22 @@ export class BindingsService {
     // misdirected config never reaches promo-code-service at all.
     await this.assertPromoCodeAttachable(policy, dto);
 
+    // T-170: the three id fields go over the wire as **plain decimal strings of the portal's own
+    // real ids** — no encoding, no derivation. promo-code-service stores them verbatim in
+    // `varchar` columns (T-PC-052) and only compares them for equality, so a row over there reads
+    // back as the portal's actual tenant/campaign/user id with nothing to decode. See
+    // `PromoCodeBindRequest` for why the earlier client-side UUID encoding was rejected.
     await this.promoCodeService.bind({
       promoCodeConfigId: dto.promoCodeConfig,
       // R3: both of these come from the verified JWT / the campaign already loaded under the
       // tenancy scope, never from the request body.
-      tenantId: campaign.tenantId,
+      tenantId: String(campaign.tenantId),
       bindLevel: toBindLevel(dto.level),
       // `refId` is absent at campaign level (`ck_cc_ref`'s shape, enforced by the shared
       // contract), where the campaign itself is what the binding refers to.
-      bindRefId: dto.refId ?? campaign.id,
+      bindRefId: String(dto.refId ?? campaign.id),
       // `userId`, not `id` — `AuthenticatedUser` carries no `id` (the task file's shorthand).
-      boundBy: actor.userId,
+      boundBy: String(actor.userId),
     });
   }
 

@@ -16,12 +16,24 @@
  * enough to this one handler, that a third file would be pure overhead — so it is declared
  * class-validator-first, right where it is used, the same way a one-off DTO for a single handler
  * appears elsewhere in this codebase when it has no other consumer.
+ *
+ * ### T-172 — `apiLookup` now reads `@CurrentUser()`
+ *
+ * See `field-value-source-lookup.service.ts`'s header ("T-172") for why: the generic proxy needs
+ * the caller's own `tenantId` to reach a tenant-scoped upstream, and R3 means that value can only
+ * come from the verified JWT `JwtAuthGuard` already populated onto the request — never a query
+ * parameter or body field a client could set to any tenant it likes. `contextLookup` is
+ * deliberately untouched; nothing about its behaviour is part of this fix.
  */
 import { Controller, Get, Param, Query } from '@nestjs/common';
 import { Type } from 'class-transformer';
 import { IsInt, IsOptional, Min } from 'class-validator';
 import { Roles } from '@/common/rbac/decorators/roles.decorator';
 import { ALL_PORTAL_ROLES } from '@/common/rbac/rbac.constants';
+import {
+  CurrentUser,
+  type AuthenticatedUser,
+} from '@/modules/auth/decorators/current-user.decorator';
 import { envelope, type DataEnvelope } from './dto/field-value-source-response.dto';
 import {
   FieldValueSourceLookupService,
@@ -63,7 +75,8 @@ export class FieldValueSourceLookupController {
   @Get('api/:providerCode')
   async apiLookup(
     @Param('providerCode') providerCode: string,
+    @CurrentUser() actor: AuthenticatedUser,
   ): Promise<DataEnvelope<readonly FieldValueOption[]>> {
-    return envelope(await this.lookup.apiLookup(providerCode));
+    return envelope(await this.lookup.apiLookup(providerCode, actor.tenantId));
   }
 }

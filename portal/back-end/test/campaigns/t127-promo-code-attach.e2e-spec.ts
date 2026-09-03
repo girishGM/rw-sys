@@ -843,15 +843,17 @@ describe('T-127 · attaching a PROMO_CODE reward to a real campaign', () => {
     });
 
     // T-166 — and the binding really left this process, over a real socket, with §2's body built
-    // from the campaign and the verified maker. `tenantId`/`boundBy` are the portal's own integer
-    // ids; see the T-166 completion report on the uuid-shaped contract in 04-API-CONTRACT.md §2.
+    // from the campaign and the verified maker. T-170: `tenantId`/`bindRefId`/`boundBy` are the
+    // portal's own ids as plain decimal **strings** — promo-code-service stores them verbatim in
+    // `varchar` columns (T-PC-052), so what a real server parsed off the wire here is exactly what
+    // it would persist. Asserted post-`JSON.parse`, which is where a number/string mix-up shows.
     expect(promoCodeBinds).toEqual([
       {
         promoCodeConfigId: 'RAYA_2026',
-        tenantId,
+        tenantId: String(tenantId),
         bindLevel: 'CAMPAIGN',
-        bindRefId: id,
-        boundBy: expect.any(Number) as unknown as number,
+        bindRefId: String(id),
+        boundBy: expect.stringMatching(/^\d+$/) as unknown as string,
       },
     ]);
   });
