@@ -21,6 +21,9 @@ export interface PortalCampaign {
   readonly startDate: string;
   readonly endDate: string;
   readonly status: string;
+  /** Needed to call promo-code-service's own generate endpoint (its `tenantId` bind key) —
+   * see `engine/reward.ts`. */
+  readonly tenantId: number;
 }
 
 export const TRACKER_COMPLETION_LOGICS = ['all', 'any', 'n_of'] as const;
@@ -40,6 +43,10 @@ export interface PortalRewardAssignment {
   readonly unitType: string | null;
   readonly unitCode: string | null;
   readonly amount: string | null;
+  /** The bound `promo_code_config` id (a promo-code-service UUID) when this reward's live unit
+   * is `voucher`/`PROMO_CODE` and a maker has attached one via the campaign wizard; `null`
+   * otherwise — see `engine/reward.ts`'s real-generation path. */
+  readonly promoCodeConfigId: string | null;
   readonly status: string;
 }
 

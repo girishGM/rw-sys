@@ -10,6 +10,7 @@ describe('toPortalCampaign', () => {
       startDate: '2026-08-15',
       endDate: '2026-09-15',
       status: 'active',
+      tenantId: 1,
     });
 
     expect(mapped).toEqual({
@@ -20,6 +21,7 @@ describe('toPortalCampaign', () => {
       startDate: '2026-08-15',
       endDate: '2026-09-15',
       status: 'active',
+      tenantId: 1,
     });
   });
 });

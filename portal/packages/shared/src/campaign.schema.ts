@@ -550,6 +550,11 @@ export const rewardAssignmentSchema = z
     unitCode: z.string().nullable(),
     /** The per-grant amount when the policy config exposes one; `null` when it does not. */
     amount: z.string().nullable(),
+    /** The bound `promo_code_config` id (a promo-code-service UUID) when this reward's live
+     * unit is `PROMO_CODE` and a maker has attached one via the campaign wizard; `null`
+     * otherwise. Lets a caller of the journey endpoint generate a real code for this reward
+     * without re-deriving the binding. */
+    promoCodeConfigId: z.string().nullable(),
     status: z.string(),
   })
   .strict();

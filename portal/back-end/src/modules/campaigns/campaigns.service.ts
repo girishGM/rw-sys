@@ -486,6 +486,7 @@ export class CampaignsService {
 
     const rewardDto = (assignment: (typeof rewardAssignments)[number]): RewardAssignment => {
       const entry = describedRewards.get(assignment.rewardPolicyId);
+      const promoCodeConfig = entry?.policy?.config.promoCodeConfig;
       return {
         id: assignment.id,
         level: assignment.level,
@@ -498,6 +499,11 @@ export class CampaignsService {
         unitType: entry?.unitType ?? null,
         unitCode: entry?.unitCode ?? null,
         amount: entry?.amount ?? null,
+        // `writePromoCodeConfig` (bindings.service.ts) is the only writer of this key, on a
+        // PROMO_CODE-unit policy's own `config` JSON — surfaced here so a caller of the journey
+        // endpoint (e.g. test-app/tracking-service) can call promo-code-service's own generate
+        // endpoint for this reward without re-deriving the binding itself.
+        promoCodeConfigId: typeof promoCodeConfig === 'string' ? promoCodeConfig : null,
         status: assignment.status,
       };
     };

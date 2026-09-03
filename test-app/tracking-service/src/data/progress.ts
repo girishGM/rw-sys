@@ -75,6 +75,16 @@ export class ProgressStore {
     this.byCustomer.set(customerId, [...campaigns]);
   }
 
+  /** Appends campaigns this customer has no entry for yet, leaving every existing one (and its
+   * accumulated completion state) untouched — `data/campaign-sync.ts`'s own enrollment step, so a
+   * campaign the portal activates after this customer was first seen still gets tracked, without
+   * resetting anything already in progress. */
+  addCampaigns(customerId: string, campaigns: readonly CampaignProgress[]): void {
+    if (campaigns.length === 0) return;
+    const existing = this.byCustomer.get(customerId) ?? [];
+    this.byCustomer.set(customerId, [...existing, ...campaigns]);
+  }
+
   /**
    * Marks one component complete/incomplete for one customer, in place. Returns the updated
    * {@link TrackerProgress} so a caller (T-004's engine) can immediately check

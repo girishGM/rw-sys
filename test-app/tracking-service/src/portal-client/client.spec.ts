@@ -27,6 +27,7 @@ const RAW_CAMPAIGN = {
   startDate: '2026-07-01',
   endDate: '2026-09-30',
   status: 'active',
+  tenantId: 1,
 };
 
 const RAW_JOURNEY = {
@@ -66,6 +67,7 @@ const RAW_JOURNEY = {
           unitType: 'currency',
           unitCode: null,
           amount: null,
+          promoCodeConfigId: null,
           status: 'active',
         },
       ],
@@ -112,6 +114,7 @@ describe('PortalClient', () => {
         startDate: '2026-07-01',
         endDate: '2026-09-30',
         status: 'active',
+        tenantId: 1,
       },
     ]);
   });

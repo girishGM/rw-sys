@@ -33,6 +33,7 @@ export interface RawCampaign {
   readonly startDate: string;
   readonly endDate: string;
   readonly status: string;
+  readonly tenantId: number;
 }
 
 export interface RawRewardAssignment {
@@ -46,6 +47,7 @@ export interface RawRewardAssignment {
   readonly unitType: string | null;
   readonly unitCode: string | null;
   readonly amount: string | null;
+  readonly promoCodeConfigId: string | null;
   readonly status: string;
 }
 
@@ -89,6 +91,7 @@ export function toPortalCampaign(raw: RawCampaign): PortalCampaign {
     startDate: raw.startDate,
     endDate: raw.endDate,
     status: raw.status,
+    tenantId: raw.tenantId,
   };
 }
 
@@ -111,6 +114,7 @@ function toRewardAssignment(raw: RawRewardAssignment): PortalRewardAssignment {
     unitType: raw.unitType,
     unitCode: raw.unitCode,
     amount: raw.amount,
+    promoCodeConfigId: raw.promoCodeConfigId,
     status: raw.status,
   };
 }

@@ -20,6 +20,7 @@ import {
   pickRewardAssignment,
   type EvaluableTracker,
 } from '../engine';
+import { activeCampaigns, ensureEnrolled } from '../data/campaign-sync';
 import { completedComponentCount, trackerThreshold, type TrackerProgress } from '../data/progress';
 import {
   describeActivity,
@@ -90,13 +91,17 @@ export function createActivitiesRouter(state: AppState): Router {
       const merchant = typeof body.merchant === 'string' ? body.merchant : null;
       const amount = typeof body.amount === 'number' ? body.amount : null;
 
-      const [realCampaigns, campaignsProgress] = await Promise.all([
-        state.portal.getCampaigns(),
-        Promise.resolve(state.progress.getForCustomer(customerId)),
-      ]);
+      await ensureEnrolled(state.portal, state.progress, customerId);
+      const realCampaigns = await activeCampaigns(state.portal);
       const realCampaignById = new Map<number, PortalCampaign>(
         realCampaigns.map((campaign) => [campaign.id, campaign]),
       );
+      // Only campaigns still active right now accrue progress — one the portal has since
+      // paused/completed/archived must not keep matching activities just because this customer
+      // has an old `ProgressStore` row for it.
+      const campaignsProgress = state.progress
+        .getForCustomer(customerId)
+        .filter((campaign) => realCampaignById.has(campaign.campaignId));
 
       const progressDeltas: ProgressDelta[] = [];
       const newRewards: RewardLedgerEntry[] = [];
@@ -152,7 +157,12 @@ export function createActivitiesRouter(state: AppState): Router {
             const realCampaign = realCampaignById.get(campaign.campaignId);
 
             if (assignment && realCampaign) {
-              const reward = buildRewardForCompletedTracker(customerId, realCampaign, assignment);
+              const reward = await buildRewardForCompletedTracker(
+                customerId,
+                realCampaign,
+                assignment,
+                { promoCodeClient: state.promoCode },
+              );
               state.rewards.addReward(reward);
               newRewards.push(reward);
               state.sse.emit(customerId, 'reward-earned', reward);

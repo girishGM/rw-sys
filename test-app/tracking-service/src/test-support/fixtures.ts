@@ -29,6 +29,7 @@ export const FIXTURE_CAMPAIGNS: readonly PortalCampaign[] = [
     startDate: '2026-01-01',
     endDate: '2026-12-31',
     status: 'active',
+    tenantId: 1,
   },
   {
     id: FIXTURE_NOF_CAMPAIGN_ID,
@@ -38,6 +39,7 @@ export const FIXTURE_CAMPAIGNS: readonly PortalCampaign[] = [
     startDate: '2026-01-01',
     endDate: '2026-12-31',
     status: 'active',
+    tenantId: 1,
   },
 ];
 
@@ -92,6 +94,7 @@ const FIXTURE_JOURNEYS = new Map<number, PortalCampaignJourney>([
               unitType: 'voucher',
               unitCode: null,
               amount: null,
+              promoCodeConfigId: null,
               status: 'active',
             },
           ],
@@ -161,6 +164,7 @@ const FIXTURE_JOURNEYS = new Map<number, PortalCampaignJourney>([
               unitType: 'points',
               unitCode: 'PTS',
               amount: null,
+              promoCodeConfigId: null,
               status: 'active',
             },
           ],
@@ -258,6 +262,11 @@ export interface FixtureStores {
   /** T-013 — every `AppState` needs one; fixtures start empty, same as `rewards`. */
   readonly activities: ActivityHistoryStore;
   readonly portal: FakePortalDataSource;
+  /** `null` — every route test spreads this straight into an `AppState` and exercises the
+   * reward-minting *flow*, not promo-code-service's own generation (that's `engine/reward.spec.ts`,
+   * against a fake `PromoCodeClient`); `null` here is the same "unconfigured" fallback path
+   * `createPromoCodeClientFromEnv` produces for real when the env vars are unset. */
+  readonly promoCode: null;
 }
 
 /** Every demo customer enrolled, zero progress, no rewards yet — the same starting shape
@@ -269,5 +278,5 @@ export function buildFixtureStores(): FixtureStores {
   for (const customer of CUSTOMERS) {
     progress.setForCustomer(customer.id, buildInitialCampaignProgress());
   }
-  return { progress, rewards, activities, portal: new FakePortalDataSource() };
+  return { progress, rewards, activities, portal: new FakePortalDataSource(), promoCode: null };
 }
