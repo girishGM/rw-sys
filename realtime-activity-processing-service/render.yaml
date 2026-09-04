@@ -1,0 +1,80 @@
+# Render Blueprint for realtime-activity-processing-service — a DEMO/first-deploy topology
+# description, not a guaranteed one-click production deploy (same caveat every other
+# `render.yaml` in this repo carries: Render's Blueprint field names shift between versions and
+# this was written without a live Render account to verify against). The live service was
+# actually created directly via Render's REST API (`POST /v1/services`), the same convention
+# `promo-code-service/render.yaml`'s own header documents — this file is a description of the
+# intended config, kept for anyone recreating the service from scratch; editing it does not by
+# itself change the live service.
+#
+# This service reuses the SAME Postgres instance `portal/render.yaml` already provisions
+# (`reward-portal-db`) — a new schema (`realtime_activity_processing`) and a new least-privilege
+# role (`rap_app`, created by this service's own migration), not a second database. There is
+# deliberately no `databases:` block below — this file never provisions Postgres itself.
+#
+# Render's `fromDatabase:` field-linking only resolves references WITHIN the same Blueprint
+# file. This is a separate Blueprint pointed at that already-existing database, so
+# DB_HOST/DB_PORT/DB_NAME below are plain `sync: false` manual-entry vars instead — copied from
+# that instance's own dashboard once, since it is the same physical database.
+#
+# Two roles, two credential groups, same split every other service in this repo already uses:
+#   DB_APP_*        `rap_app` (least-privilege, scoped to the `realtime_activity_processing`
+#                   schema only) — what the running `runtime` container actually uses.
+#   DB_MIGRATION_*  the privileged role used ONLY by the `migrator` build target's one-off
+#                   `db:migrate` run — never read by the running service, and deliberately not
+#                   wired to any Render-managed service below; running the migration against a
+#                   live Render database is a manual/scripted step
+#                   (`scripts/render-db-sync.js`), not something this file executes on its own.
+#
+# `KAFKA_BROKERS` cannot be given a real value here either: this Blueprint stands up no Kafka
+# cluster on Render, and the deployed HTTP runtime (`node dist/main.js`) never opens a broker
+# connection anyway — `src/app.module.ts` only wires ConfigModule + HealthModule, so this var is
+# validated by `config.schema.ts` at boot but never actually dialed. Kept `sync: false` rather
+# than a `localhost:9093` value that would only work against this project's own local-dev
+# Redpanda compose file.
+
+services:
+  - type: web
+    name: realtime-activity-processing-service
+    runtime: docker
+    plan: free
+    dockerfilePath: Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "3020"
+
+      # --- Database: the `realtime_activity_processing` schema on the portal's EXISTING
+      # `reward-portal-db` Render Postgres instance — copy these three from that instance's own
+      # dashboard.
+      - key: DB_HOST
+        sync: false
+      - key: DB_PORT
+        sync: false
+      - key: DB_NAME
+        sync: false
+      - key: DB_SSL
+        value: "true"
+
+      # DB_APP_* — the least-privilege `rap_app` role this service's own migration creates.
+      - key: DB_APP_USERNAME
+        value: rap_app
+      - key: DB_APP_PASSWORD
+        sync: false
+
+      # DB_MIGRATION_* — used only by the `migrator` Docker build target's one-off CLI run
+      # (never by this running service). Render's own auto-created database user for
+      # `reward-portal-db`.
+      - key: DB_MIGRATION_USERNAME
+        sync: false
+      - key: DB_MIGRATION_PASSWORD
+        sync: false
+
+      # --- Kafka: no broker is provisioned by this Blueprint, and the deployed runtime never
+      # dials one (see header) — required by config.schema.ts at boot regardless, so this must
+      # still be set to *some* non-empty value.
+      - key: KAFKA_BROKERS
+        sync: false
