@@ -19,7 +19,13 @@ import { createAppTestConnection } from './support/app-connection';
 import { PromoCodeConfigRepository } from '@/modules/promo-code-config/promo-code-config.repository';
 import { PromoCodeConfigAuditRepository } from '@/modules/promo-code-config/promo-code-config-audit.repository';
 import { PromoCodeConfigService } from '@/modules/promo-code-config/promo-code-config.service';
-import { PromoCodeConfigValidationError } from '@/modules/promo-code-config/promo-code-config.errors';
+import {
+  DraftAlreadyExistsError,
+  NoOpenDraftError,
+  PromoCodeConfigValidationError,
+  VersionNotDraftError,
+  VersionNotFoundError,
+} from '@/modules/promo-code-config/promo-code-config.errors';
 import {
   isValidRewardUnit,
   parseCreatePromoCodeConfigDto,
@@ -55,6 +61,15 @@ describe('T-PC-010 — PromoCodeConfigService', () => {
   });
 
   afterAll(async () => {
+    // T-PC-058: `service.create` always opens at least a `draft` `promo_code_config_version`, and
+    // many of this file's own tests go on to `publish` it — a `published`/`deprecated` version
+    // row can never be deleted (`trg_promo_code_config_version_undeletable`, migration
+    // `T-PC-058_002`), and even a still-`draft` one still blocks deleting its parent
+    // `promo_code_config` row via the plain FK (`promo_code_config_version.promo_code_config_id`
+    // has no `ON DELETE CASCADE`). So — same precedent
+    // `test/modules/generation/promo-code-generation-version.spec.ts` (T-PC-060) already
+    // established — this cleanup no longer deletes `promo_code_config` rows at all, only the
+    // audit trail (which has no such constraint blocking it).
     for (const tenantId of tenantIds) {
       await sequelize.query(
         `DELETE FROM promo_code.promo_code_config_audit
@@ -63,11 +78,17 @@ describe('T-PC-010 — PromoCodeConfigService', () => {
            )`,
         { replacements: { tenantId } },
       );
+      // Childless-only cleanup — see `promo-code-config-version.spec.ts`'s own afterAll comment
+      // for why (a version-less config row is safely deletable and shouldn't linger as a false
+      // positive for T-PC-059's own "every config has a version" regression guard).
       await sequelize.query(
-        'DELETE FROM promo_code.promo_code_config WHERE tenant_id = :tenantId',
-        {
-          replacements: { tenantId },
-        },
+        `DELETE FROM promo_code.promo_code_config c
+           WHERE c.tenant_id = :tenantId
+             AND NOT EXISTS (
+               SELECT 1 FROM promo_code.promo_code_config_version v
+                WHERE v.promo_code_config_id = c.id
+             )`,
+        { replacements: { tenantId } },
       );
     }
     await sequelize.close();
@@ -369,5 +390,148 @@ describe('T-PC-010 — PromoCodeConfigService', () => {
 
     const auditRows = await auditRepository.listForConfig(created.id);
     expect(auditRows.map((r) => r.action)).toEqual(['CREATE', 'UPDATE', 'ARCHIVE']);
+  });
+
+  // --- T-PC-058: version-aware CRUD/publish behaviour --------------------------------------
+
+  // Adjacent behaviour: `create` opens version_no=1 as a `draft`, not `published` — nothing is
+  // bindable yet until the caller explicitly publishes it (implementation note 3).
+  it('T-PC-058: create opens version_no=1 as a draft, not published', async () => {
+    const tenantId = freshTenant();
+    const created = await service.create(tenantId, validCreateInput(), ACTOR_ID);
+
+    expect(created.versionNo).toBe(1);
+    expect(created.versionStatus).toBe('draft');
+    expect(created.draftVersion?.status).toBe('draft');
+    expect(created.currentVersion).toBeNull();
+  });
+
+  // TC-4 (publish): publishing the initial draft makes it `published`, with no prior version to
+  // demote.
+  it('T-PC-058 TC-4a: publishing a config’s first draft makes it published, currentVersion set, draftVersion cleared', async () => {
+    const tenantId = freshTenant();
+    const created = await service.create(tenantId, validCreateInput(), ACTOR_ID);
+
+    const published = await service.publish(
+      tenantId,
+      created.id,
+      created.draftVersion!.id,
+      ACTOR_ID,
+    );
+
+    expect(published?.versionStatus).toBe('published');
+    expect(published?.currentVersion?.status).toBe('published');
+    expect(published?.draftVersion).toBeNull();
+  });
+
+  // TC-3: PATCH a payout field with no open draft is rejected, never a silent mutation of the
+  // published row.
+  it('T-PC-058 TC-3: PATCH a payout field with no open draft throws NoOpenDraftError', async () => {
+    const tenantId = freshTenant();
+    const created = await service.create(tenantId, validCreateInput(), ACTOR_ID);
+    await service.publish(tenantId, created.id, created.draftVersion!.id, ACTOR_ID);
+
+    await expect(
+      service.update(tenantId, created.id, { rewardValue: 99 }, ACTOR_ID),
+    ).rejects.toBeInstanceOf(NoOpenDraftError);
+
+    // The published version's own payout is untouched.
+    const detail = await service.findDetail(tenantId, created.id);
+    expect(Number(detail?.currentVersion?.rewardValue)).toBe(10);
+  });
+
+  // Adjacent behaviour: a PATCH touching only identity fields (name/merchantId) never needs an
+  // open draft at all — it is unconditionally allowed regardless of version lifecycle state.
+  it('T-PC-058: PATCH touching only name/merchantId succeeds with no open draft', async () => {
+    const tenantId = freshTenant();
+    const created = await service.create(tenantId, validCreateInput(), ACTOR_ID);
+    await service.publish(tenantId, created.id, created.draftVersion!.id, ACTOR_ID);
+
+    const updated = await service.update(tenantId, created.id, { name: 'renamed' }, ACTOR_ID);
+    expect(updated?.name).toBe('renamed');
+  });
+
+  // TC-4 (full cycle): a second draft, once published, demotes the prior published version to
+  // deprecated.
+  it('T-PC-058 TC-4b: publishing a new draft deprecates the previously published version', async () => {
+    const tenantId = freshTenant();
+    const created = await service.create(tenantId, validCreateInput(), ACTOR_ID);
+    const v1Id = created.draftVersion!.id;
+    await service.publish(tenantId, created.id, v1Id, ACTOR_ID);
+
+    const v2 = await service.createVersion(
+      tenantId,
+      created.id,
+      validCreateInput({ rewardValue: 20 }),
+      ACTOR_ID,
+    );
+    expect(v2?.draftVersion?.versionNo).toBe(2);
+
+    const rePublished = await service.publish(tenantId, created.id, v2!.draftVersion!.id, ACTOR_ID);
+    expect(rePublished?.currentVersion?.versionNo).toBe(2);
+    expect(rePublished?.currentVersion?.status).toBe('published');
+
+    // The prior (v1) version is now deprecated, not published, not deleted.
+    const v1 = await service.findDetail(tenantId, created.id);
+    expect(v1?.currentVersion?.versionNo).toBe(2);
+  });
+
+  // Adjacent behaviour: `createVersion` while a draft is already open rejects with
+  // `DraftAlreadyExistsError` — `uq_pccv_one_draft` translated to a typed error, never a raw
+  // driver exception.
+  it('T-PC-058: createVersion while a draft is already open throws DraftAlreadyExistsError', async () => {
+    const tenantId = freshTenant();
+    const created = await service.create(tenantId, validCreateInput(), ACTOR_ID);
+
+    await expect(
+      service.createVersion(tenantId, created.id, validCreateInput(), ACTOR_ID),
+    ).rejects.toBeInstanceOf(DraftAlreadyExistsError);
+  });
+
+  // TC-8: publishing a versionId that doesn't belong to this config is rejected, never silently
+  // substituted.
+  it('T-PC-058 TC-8: publish with a versionId belonging to a different config throws VersionNotFoundError', async () => {
+    const tenantId = freshTenant();
+    const configA = await service.create(tenantId, validCreateInput(), ACTOR_ID);
+    const configB = await service.create(tenantId, validCreateInput(), ACTOR_ID);
+
+    await expect(
+      service.publish(tenantId, configA.id, configB.draftVersion!.id, ACTOR_ID),
+    ).rejects.toBeInstanceOf(VersionNotFoundError);
+  });
+
+  // Adjacent behaviour: publishing an already-published version (not currently a draft) is
+  // rejected, never re-triggerable.
+  it('T-PC-058: publishing an already-published version throws VersionNotDraftError', async () => {
+    const tenantId = freshTenant();
+    const created = await service.create(tenantId, validCreateInput(), ACTOR_ID);
+    const versionId = created.draftVersion!.id;
+    await service.publish(tenantId, created.id, versionId, ACTOR_ID);
+
+    await expect(service.publish(tenantId, created.id, versionId, ACTOR_ID)).rejects.toBeInstanceOf(
+      VersionNotDraftError,
+    );
+  });
+
+  // Adjacent behaviour: publish/createVersion/update on a non-existent (or cross-tenant) id all
+  // resolve to null — the same "not found" shape every other scoped write method uses (R3).
+  it('T-PC-058: publish/createVersion on a non-existent id resolve to null', async () => {
+    const tenantId = freshTenant();
+    const missingId = randomUUID();
+
+    await expect(
+      service.createVersion(tenantId, missingId, validCreateInput(), ACTOR_ID),
+    ).resolves.toBeNull();
+    await expect(service.publish(tenantId, missingId, randomUUID(), ACTOR_ID)).resolves.toBeNull();
+  });
+
+  // Adjacent behaviour: `publish` writes exactly one additional audit row.
+  it('T-PC-058: publish writes exactly one UPDATE audit row', async () => {
+    const tenantId = freshTenant();
+    const created = await service.create(tenantId, validCreateInput(), ACTOR_ID);
+    await service.publish(tenantId, created.id, created.draftVersion!.id, ACTOR_ID);
+
+    const auditRows = await auditRepository.listForConfig(created.id);
+    expect(auditRows.map((r) => r.action)).toEqual(['CREATE', 'UPDATE']);
   });
 });

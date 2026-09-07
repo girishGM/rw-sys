@@ -146,6 +146,15 @@ message BoundReward {
   string level   = 10;  // 'campaign' | 'tracker' | 'component'
   int32  ref_id  = 11;  // tracker id or component id; 0 at campaign level
   string status  = 12;
+
+  // T-RR-063: mirrors the portal's own T-173 addition (`campaign_config.v1.proto` lines 210-220,
+  // appended at the next free field numbers, 1-12 above untouched). How long the reward stays
+  // usable AFTER IT IS GIVEN, as a duration rather than a date -- the clock starts at redemption,
+  // an event the portal never observes; this service computes the real `expires_at` from this pair
+  // (`expiry-computation.ts`). **0/absent means the reward never expires** -- never "not configured
+  // yet", never "expires immediately".
+  int32  expiry_value = 13;
+  string expiry_unit  = 14;  // 'minutes' | 'hours' | 'days'; empty when expiry_value is 0/absent
 }
 
 message CampaignCap {

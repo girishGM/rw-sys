@@ -24,6 +24,7 @@ import type { Sequelize } from 'sequelize-typescript';
 import { QueryTypes } from 'sequelize';
 import { createAppTestConnection } from '../config/support/app-connection';
 import { PromoCodeConfigRepository } from '@/modules/promo-code-config/promo-code-config.repository';
+import { PromoCodeConfigVersionRepository } from '@/modules/promo-code-config/promo-code-config-version.repository';
 import { PromoCodeConfigAuditRepository } from '@/modules/promo-code-config/promo-code-config-audit.repository';
 import { PromoCodeConfigService } from '@/modules/promo-code-config/promo-code-config.service';
 import { CampaignBindingRepository } from '@/modules/campaign-binding/campaign-binding.repository';
@@ -31,11 +32,13 @@ import { CampaignBindingService } from '@/modules/campaign-binding/campaign-bind
 import {
   ConfigNotActiveError,
   CampaignBindingValidationError,
+  NoPublishedVersionError,
 } from '@/modules/campaign-binding/campaign-binding.errors';
 
 describe('T-PC-012 — CampaignBindingService', () => {
   let sequelize: Sequelize;
   let promoCodeConfigRepository: PromoCodeConfigRepository;
+  let promoCodeConfigVersionRepository: PromoCodeConfigVersionRepository;
   let promoCodeConfigService: PromoCodeConfigService;
   let bindingRepository: CampaignBindingRepository;
   let service: CampaignBindingService;
@@ -45,6 +48,7 @@ describe('T-PC-012 — CampaignBindingService', () => {
     sequelize = createAppTestConnection();
     await sequelize.authenticate();
     promoCodeConfigRepository = new PromoCodeConfigRepository(sequelize);
+    promoCodeConfigVersionRepository = new PromoCodeConfigVersionRepository(sequelize);
     const auditRepository = new PromoCodeConfigAuditRepository(sequelize);
     promoCodeConfigService = new PromoCodeConfigService(
       promoCodeConfigRepository,
@@ -52,10 +56,20 @@ describe('T-PC-012 — CampaignBindingService', () => {
       sequelize,
     );
     bindingRepository = new CampaignBindingRepository(sequelize);
-    service = new CampaignBindingService(bindingRepository, promoCodeConfigService, sequelize);
+    service = new CampaignBindingService(
+      bindingRepository,
+      promoCodeConfigService,
+      sequelize,
+      promoCodeConfigVersionRepository,
+    );
   });
 
   afterAll(async () => {
+    // T-PC-058: `campaign_promo_config` itself has no downstream FK pointing at it, so it's still
+    // safely deletable — but `seedActiveConfig` now always publishes a `promo_code_config_version`
+    // (bind requires one to pin to), which blocks deleting the parent `promo_code_config` row
+    // (undeletable trigger once published, plus the plain FK even for a still-draft one) — same
+    // precedent `promo-code-config.service.spec.ts`'s own afterAll comment documents.
     for (const tenantId of tenantIds) {
       await sequelize.query(
         'DELETE FROM promo_code.campaign_promo_config WHERE tenant_id = :tenantId',
@@ -70,11 +84,16 @@ describe('T-PC-012 — CampaignBindingService', () => {
            )`,
         { replacements: { tenantId } },
       );
+      // Childless-only cleanup (e.g. `seedActiveConfigWithNoPublishedVersion`'s own fixture) —
+      // see `promo-code-config-version.spec.ts`'s own afterAll comment.
       await sequelize.query(
-        'DELETE FROM promo_code.promo_code_config WHERE tenant_id = :tenantId',
-        {
-          replacements: { tenantId },
-        },
+        `DELETE FROM promo_code.promo_code_config c
+           WHERE c.tenant_id = :tenantId
+             AND NOT EXISTS (
+               SELECT 1 FROM promo_code.promo_code_config_version v
+                WHERE v.promo_code_config_id = c.id
+             )`,
+        { replacements: { tenantId } },
       );
     }
     await sequelize.close();
@@ -86,10 +105,16 @@ describe('T-PC-012 — CampaignBindingService', () => {
     return id;
   }
 
+  /** T-PC-058: a bindable config now needs a currently-`published` version, not just an `ACTIVE`
+   * identity row — created here, then immediately published, so this helper's contract ("a config
+   * `bind` will accept") is unchanged for every pre-existing test that calls it. */
   async function seedActiveConfig(tenantId: string): Promise<string> {
     const config = await promoCodeConfigRepository.create(tenantId, {
       merchantId: null,
       name: `t-pc-012 config ${randomUUID()}`,
+      createdBy: randomUUID(),
+    });
+    const draft = await promoCodeConfigVersionRepository.createDraft(tenantId, config.id, {
       codePrefix: null,
       codePostfix: null,
       codeLength: 8,
@@ -100,6 +125,18 @@ describe('T-PC-012 — CampaignBindingService', () => {
       rewardUnit: 'USD',
       maxRedemptionsPerCode: 1,
       codeExpiryDays: null,
+      createdBy: randomUUID(),
+    });
+    await promoCodeConfigVersionRepository.publish(tenantId, config.id, draft!.id, randomUUID());
+    return config.id;
+  }
+
+  /** A config that is `ACTIVE` but has no published version yet — the `NoPublishedVersionError`
+   * fixture. */
+  async function seedActiveConfigWithNoPublishedVersion(tenantId: string): Promise<string> {
+    const config = await promoCodeConfigRepository.create(tenantId, {
+      merchantId: null,
+      name: `t-pc-058 draft-only config ${randomUUID()}`,
       createdBy: randomUUID(),
     });
     return config.id;
@@ -130,6 +167,31 @@ describe('T-PC-012 — CampaignBindingService', () => {
     expect(created.promoCodeConfigId).toBe(configId);
     expect(created.bindLevel).toBe('CAMPAIGN');
     expect(created.bindRefId).toBe(bindRefId);
+  });
+
+  // T-PC-058: `bind` pins to the config's currently-`published` version.
+  it('T-PC-058: bind pins promoCodeConfigVersionId to the config’s currently-published version', async () => {
+    const tenantId = freshTenant();
+    const configId = await seedActiveConfig(tenantId);
+    const publishedVersion = await promoCodeConfigVersionRepository.findPublishedForConfig(
+      tenantId,
+      configId,
+    );
+
+    const created = await service.bind(bindInput({ promoCodeConfigId: configId, tenantId }));
+
+    expect(created.promoCodeConfigVersionId).toBe(publishedVersion!.id);
+  });
+
+  // T-PC-058: an ACTIVE config with no published version yet (only an open draft) has nothing to
+  // pin to.
+  it('T-PC-058: binding a config with no published version throws NoPublishedVersionError', async () => {
+    const tenantId = freshTenant();
+    const configId = await seedActiveConfigWithNoPublishedVersion(tenantId);
+
+    await expect(
+      service.bind(bindInput({ promoCodeConfigId: configId, tenantId })),
+    ).rejects.toThrow(NoPublishedVersionError);
   });
 
   // TC-2

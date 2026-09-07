@@ -104,6 +104,24 @@ export interface BoundRewardProto {
   level: string;
   refId: number;
   status: string;
+  /**
+   * T-RR-063 (T-173 on the portal side): a real gRPC response always carries `0`
+   * (`protoLoader`'s `defaults: true` always fills the zero value) to mean the reward never
+   * expires — matching the proto's own documented sentinel (`proto/campaign_config.proto`'s own
+   * `BoundReward` header).
+   *
+   * **Optional (`?`) on this TypeScript type only** — a real wire response is never missing it.
+   * Made optional purely because this interface was already constructed as a full object literal
+   * by a fixture predating this task (`test/notification/notification.service.spec.ts`'s own
+   * `buildBoundReward()`, outside this task's file scope, R3); `RewardSystemResolutionService.
+   * resolve()` (this task's own file) already treats an omitted value identically to an explicit
+   * `0` (`match.expiryValue || null`).
+   */
+  expiryValue?: number;
+  /** T-RR-063: `''` means the reward never expires (paired 1:1 with `expiryValue` being `0`/
+   * absent) -- otherwise one of `'minutes' | 'hours' | 'days'`. Optional for the identical reason
+   * `expiryValue` above is. */
+  expiryUnit?: string;
 }
 
 export interface CampaignCapProto {

@@ -35,6 +35,7 @@ import { Sequelize } from 'sequelize-typescript';
 import type { Config } from '@/config/config.schema';
 import { PROMO_CODE_SEQUELIZE } from './promo-code-config.constants';
 import { PromoCodeConfigRepository } from './promo-code-config.repository';
+import { PromoCodeConfigVersionRepository } from './promo-code-config-version.repository';
 import { PromoCodeConfigAuditRepository } from './promo-code-config-audit.repository';
 import { PromoCodeConfigService } from './promo-code-config.service';
 import { PromoCodeConfigController } from './promo-code-config.controller';
@@ -70,6 +71,7 @@ class SequelizeShutdownHook implements OnModuleDestroy {
         }),
     },
     PromoCodeConfigRepository,
+    PromoCodeConfigVersionRepository,
     PromoCodeConfigAuditRepository,
     PromoCodeConfigService,
     InternalServiceTokenStartupCheck,
@@ -78,6 +80,7 @@ class SequelizeShutdownHook implements OnModuleDestroy {
   exports: [
     PROMO_CODE_SEQUELIZE,
     PromoCodeConfigRepository,
+    PromoCodeConfigVersionRepository,
     PromoCodeConfigAuditRepository,
     PromoCodeConfigService,
   ],

@@ -5,11 +5,15 @@
  * resolved fallback channel, and writing a `reward_tracking_dispatch_retry` (tier 3, T-RR-035)
  * row once both attempts have failed for a row — the same proven interval-poll shape RAP's own
  * `outbox-publisher.service.ts` already established for its own outbound leg (T-RR-034's own
- * implementation note 1). This service's own outbound chain is one tier shorter than RAP's own
- * Kafka -> gRPC -> retry-table chain (no gRPC leg to reward-tracking-service exists,
- * `ARCHITECTURE.md` §9): Kafka (T-RR-034) <-> REST (T-RR-035), in whichever order
- * `dispatch_channel_config` resolves for a given row's scope, then `reward_tracking_dispatch_retry`
- * (T-RR-035) as the last resort.
+ * implementation note 1). **T-RR-062 note**: at the time T-RR-034/T-RR-035 were built, this
+ * service's own outbound chain was one tier shorter than RAP's own Kafka -> gRPC -> retry-table
+ * chain ("no gRPC leg to reward-tracking-service exists," per this file's own now-superseded
+ * header text) — T-RR-062 adds that third, gRPC leg (`RewardTrackingGrpcClient`), so the set of
+ * channels `dispatch_channel_config` can resolve `primary_channel`/`fallback_channel` to is now
+ * Kafka/REST/gRPC, in whichever order that table resolves for a given row's scope, then
+ * `reward_tracking_dispatch_retry` (T-RR-035) as the last resort — matching RAP's own three-transport
+ * shape, though gRPC is not expected to be the *resolved* channel on Render today
+ * (`grpc_enabled` defaults `false`, `ARCHITECTURE.md` §9/implementation note 6).
  *
  * **Tier-selection algorithm** (T-RR-035 implementation note 4):
  *  1. If the resolved primary channel is disabled (`kafkaEnabled`/`restEnabled` false for that
@@ -49,6 +53,14 @@
  * unexpected failure) is caught and logged there, never left to abort the rest of this cycle's
  * batch. See `processRowSafely`'s own header for exactly what does (and deliberately does not)
  * happen to a row that fails this way.
+ *
+ * **T-RR-062** widens `attemptChannel()`/`isChannelEnabled()` into a real three-way switch for the
+ * new `'GRPC'` `DispatchChannel` value, alongside the existing `'KAFKA'`/`'REST'` pair —
+ * `RewardTrackingGrpcClient` (this task's own new file). A gRPC transport-unreachable condition
+ * (`RewardTrackingGrpcUnreachableError`) is classified exactly like `KafkaBrokerUnreachableError`
+ * already is (implementation note 4 above): an immediate signal to skip this row's own retry
+ * budget and go straight to the fallback, never falling into the slower per-row retry-count path
+ * meant for message-level failures.
  */
 import {
   Injectable,
@@ -76,6 +88,10 @@ import {
   RewardTrackingKafkaProducerClient,
 } from './reward-tracking-kafka-producer.client';
 import { RewardTrackingRestClient } from './reward-tracking-rest.client';
+import {
+  RewardTrackingGrpcClient,
+  RewardTrackingGrpcUnreachableError,
+} from './reward-tracking-grpc.client';
 import { RewardTrackingDispatchRetryRepository } from './reward-tracking-dispatch-retry.repository';
 import { DispatchMetricsService } from './dispatch-metrics.service';
 import {
@@ -92,7 +108,13 @@ function describeError(error: unknown): string {
 }
 
 function isChannelEnabled(resolved: ResolvedDispatchChannel, channel: DispatchChannel): boolean {
-  return channel === 'KAFKA' ? resolved.kafkaEnabled : resolved.restEnabled;
+  if (channel === 'KAFKA') {
+    return resolved.kafkaEnabled;
+  }
+  if (channel === 'GRPC') {
+    return resolved.grpcEnabled;
+  }
+  return resolved.restEnabled;
 }
 
 /** One attempt outcome — never throws; every failure mode (per-message, broker-unreachable) is
@@ -128,6 +150,25 @@ export class OutboxPublisherService implements OnModuleInit, OnModuleDestroy {
     @Optional()
     @Inject(OUTBOX_PUBLISHER_AUTOSTART)
     private readonly autostart: boolean = true,
+    /**
+     * T-RR-062. Appended as the **last** constructor parameter, and typed optional (`?`), rather
+     * than inserted alongside `kafkaProducer`/`restClient` above (its natural sibling position):
+     * three files outside this task's own file scope (`test/e2e/full-pipeline.e2e-spec.ts`,
+     * `test/e2e/fixtures/reward-entry.fixtures.ts`, `test/e2e/observability.e2e-spec.ts`, all
+     * `agent-rr-qa`'s, R3) construct `new OutboxPublisherService(...)` directly with exactly ten
+     * positional arguments ending at `autostart`. Inserting a new parameter anywhere before that
+     * position would silently shift every later positional argument in those three files onto the
+     * wrong parameter — a same-shape defect to the one `RewardTrackingRestClient`'s own header
+     * (`T-RR-064`) already fixed for a different reason. Appending it last, `@Optional()` and
+     * possibly `undefined` in exactly those three unedited files, is safe *because* none of them
+     * ever exercises the gRPC path: no `dispatch_channel_config` row either seeds sets up in those
+     * suites, so `attemptChannel()`'s own `'GRPC'` branch (which is the only place this field is
+     * read) is never reached from them. Every real, Nest-DI-constructed instance (`dispatch.module.ts`)
+     * and this task's own `outbox-publisher.service.spec.ts` still receive a real
+     * `RewardTrackingGrpcClient`.
+     */
+    @Optional()
+    private readonly grpcClient?: RewardTrackingGrpcClient,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -275,10 +316,17 @@ export class OutboxPublisherService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    // Implementation note 4: either the primary's own attempt budget is exhausted, or Kafka
-    // reported the broker itself is unreachable (an immediate trigger regardless of budget) —
-    // either way, attempt the fallback now, synchronously, within this same cycle.
-    const fallbackChannel = primaryOutcome.brokerUnreachable ? 'REST' : resolved.fallbackChannel;
+    // Implementation note 4: either the primary's own attempt budget is exhausted, or the primary
+    // transport itself reported unreachable (an immediate trigger regardless of budget) — either
+    // way, attempt the fallback now, synchronously, within this same cycle. The "force REST"
+    // override is Kafka-specific (`ARCHITECTURE.md` §9's own "falls through to a REST call ...
+    // when Kafka is simply unavailable") — a gRPC-unreachable primary (T-RR-062) has no such
+    // documented override and simply uses whatever `dispatch_channel_config` actually names as the
+    // fallback channel, per the general step-3 rule above.
+    const fallbackChannel =
+      primaryOutcome.brokerUnreachable && resolved.primaryChannel === 'KAFKA'
+        ? 'REST'
+        : resolved.fallbackChannel;
     await this.attemptFallbackOrEscalate(
       row,
       resolved,
@@ -335,6 +383,20 @@ export class OutboxPublisherService implements OnModuleInit, OnModuleDestroy {
     try {
       if (channel === 'KAFKA') {
         await this.kafkaProducer.publish(row.topic, customerId, message);
+      } else if (channel === 'GRPC') {
+        // T-RR-062. `this.grpcClient` is only ever `undefined` for the three out-of-scope,
+        // unedited e2e call sites this file's own constructor header documents — none of which
+        // ever resolves `'GRPC'` as a channel, so this branch is unreachable from them in
+        // practice. A real, DI-constructed graph (`dispatch.module.ts`) always supplies a real
+        // instance. Guarded explicitly rather than a non-null assertion (R2) so a genuine
+        // misconfiguration fails loudly with a clear message instead of a raw `TypeError`.
+        if (!this.grpcClient) {
+          throw new Error(
+            'OutboxPublisherService: dispatch_channel_config resolved GRPC as a channel but no ' +
+              'RewardTrackingGrpcClient was provided to this instance.',
+          );
+        }
+        await this.grpcClient.dispatch(message);
       } else {
         await this.restClient.dispatch(message);
       }
@@ -342,7 +404,9 @@ export class OutboxPublisherService implements OnModuleInit, OnModuleDestroy {
     } catch (error) {
       return {
         ok: false,
-        brokerUnreachable: error instanceof KafkaBrokerUnreachableError,
+        brokerUnreachable:
+          error instanceof KafkaBrokerUnreachableError ||
+          error instanceof RewardTrackingGrpcUnreachableError,
         reason: describeError(error),
       };
     }
@@ -354,7 +418,10 @@ export class OutboxPublisherService implements OnModuleInit, OnModuleDestroy {
     // note 6). `{tier: 'retry_table'}` is reserved for a dispatch that succeeded from
     // `reward_tracking_dispatch_retry` specifically (`RewardTrackingDispatchRetryWorker`'s own
     // call site), never here.
-    this.metrics.incrementDispatchTier(channel === 'KAFKA' ? 'kafka' : 'rest');
+    // T-RR-062: a real three-way mapping, not a `KAFKA`-vs-everything-else ternary — a `GRPC`
+    // delivery must never be miscounted as `rest`.
+    const tier = channel === 'KAFKA' ? 'kafka' : channel === 'GRPC' ? 'grpc' : 'rest';
+    this.metrics.incrementDispatchTier(tier);
   }
 
   /** TC-5: both the primary-channel attempt(s) and the immediate fallback attempt have failed (or
@@ -370,8 +437,8 @@ export class OutboxPublisherService implements OnModuleInit, OnModuleDestroy {
     await this.outboxRepository.markFailed(row.id);
     // R8: `combinedReason` is checked by this task's own test suite never to contain
     // `customerId` — it is built only from `Error#message` strings produced by
-    // `RewardTrackingKafkaProducerClient`/`RewardTrackingRestClient`, neither of which ever
-    // includes the message body in its own thrown error.
+    // `RewardTrackingKafkaProducerClient`/`RewardTrackingRestClient`/`RewardTrackingGrpcClient`
+    // (T-RR-062), none of which ever includes the message body in its own thrown error.
     this.logger.error(
       `Both dispatch tiers exhausted for reward_tracking_dispatch_outbox row "${row.id}" ` +
         `(reward_entry "${row.rewardEntryId}") — wrote a reward_tracking_dispatch_retry row: ` +

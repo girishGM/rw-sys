@@ -168,11 +168,21 @@ export class PromoCodeServiceGrpcClient implements OnModuleDestroy {
    * back to REST within the same call), never this method. A completed response — `status:
    * "SUCCESS" | "FAILED"` — is returned normally either way: `03-GRPC-CONTRACT.md` §5's own "a
    * business outcome is not a protocol-level fault" convention, mirrored exactly from the REST
-   * connector's own `PromoCodeGenerateResponse` handling. */
+   * connector's own `PromoCodeGenerateResponse` handling.
+   *
+   * **T-RR-090.** `versionNo` is this connector's own shared `string | null` — this transport's
+   * *own* "absent" representation is proto3's empty-string default, not `null` (a `null` handed to
+   * protobufjs for a `string` field is not the same "legitimate absent value" every other transport
+   * treats it as). Translated at exactly this one boundary, both directions: `null -> ''` on the
+   * way out, and the mirror `'' -> null` on the way back in on the response — the real server's own
+   * gRPC controller applies the identical `emptyToUndefined(...) ?? null` translation on its side
+   * (confirmed by direct read of `promo-code.controller.ts`), so this is not a guess at the wire
+   * convention. */
   async generateCode(request: PromoCodeGenerateRequest): Promise<PromoCodeGenerateResponse> {
+    const wireRequest = { ...request, versionNo: request.versionNo ?? '' };
     return new Promise((resolve, reject) => {
       this.client.generateCode(
-        request,
+        wireRequest,
         new grpc.Metadata(),
         { deadline: Date.now() + this.timeoutMs },
         (error, response) => {
@@ -183,7 +193,11 @@ export class PromoCodeServiceGrpcClient implements OnModuleDestroy {
             reject(error);
             return;
           }
-          resolve(response);
+          resolve({
+            ...response,
+            versionNo:
+              response.versionNo && response.versionNo.length > 0 ? response.versionNo : null,
+          });
         },
       );
     });

@@ -25,6 +25,7 @@ import type {
 } from '@/modules/dispatch/reward-tracking-dispatch-retry.repository';
 import type { RewardTrackingKafkaProducerClient } from '@/modules/dispatch/reward-tracking-kafka-producer.client';
 import type { RewardTrackingRestClient } from '@/modules/dispatch/reward-tracking-rest.client';
+import type { RewardTrackingGrpcClient } from '@/modules/dispatch/reward-tracking-grpc.client';
 import type { DispatchServiceConfigResolver } from '@/modules/dispatch/dispatch.config';
 
 const AES_KEY_B64 = Buffer.alloc(32, 7).toString('base64');
@@ -40,6 +41,7 @@ const AVAILABLE_KAFKA_PRIMARY: ResolvedDispatchChannel = {
   fallbackChannel: 'REST',
   kafkaEnabled: true,
   restEnabled: true,
+  grpcEnabled: false,
 };
 
 function fakeDueRow(overrides: Partial<DueRetryRow> & { __customerId?: string } = {}): DueRetryRow {
@@ -70,6 +72,13 @@ function fakeDueRow(overrides: Partial<DueRetryRow> & { __customerId?: string } 
       externalReferenceId: 'PC-abc123',
       redeemedAt: new Date().toISOString(),
       correlationId: 'corr-1',
+      trackerCode: 'TRK1',
+      trackerComponentCode: 'COMP1',
+      merchantCode: null,
+      expiresAt: null,
+      rewardKind: null,
+      promoCodeConfigId: null,
+      promoCodeConfigVersionNo: null,
     },
     ...overrides,
   };
@@ -85,6 +94,7 @@ interface Fakes {
   dispatchResolver: DispatchChannelResolverService & { resolve: jest.Mock };
   kafkaProducer: RewardTrackingKafkaProducerClient & { publish: jest.Mock };
   restClient: RewardTrackingRestClient & { dispatch: jest.Mock };
+  grpcClient: RewardTrackingGrpcClient & { dispatch: jest.Mock };
   configResolver: DispatchServiceConfigResolver;
 }
 
@@ -104,6 +114,7 @@ function buildFakes(
     } as unknown as Fakes['dispatchResolver'],
     kafkaProducer: { publish: jest.fn() } as unknown as Fakes['kafkaProducer'],
     restClient: { dispatch: jest.fn() } as unknown as Fakes['restClient'],
+    grpcClient: { dispatch: jest.fn() } as unknown as Fakes['grpcClient'],
     configResolver: {
       resolve: jest.fn(async (key: string) => {
         if (key === 'dispatch.retry.maxAttempts') {
@@ -132,6 +143,7 @@ function buildWorker(
     1_000,
     60_000,
     false,
+    fakes.grpcClient,
   );
 }
 
@@ -247,6 +259,7 @@ describe('T-RR-035 — RewardTrackingDispatchRetryWorker', () => {
       fallbackChannel: 'KAFKA',
       kafkaEnabled: false,
       restEnabled: true,
+      grpcEnabled: false,
     });
     fakes.restClient.dispatch.mockResolvedValue(undefined);
     const worker = buildWorker(fakes);
@@ -305,5 +318,49 @@ describe('T-RR-035 — RewardTrackingDispatchRetryWorker', () => {
     worker.start();
     worker.stop();
     worker.stop();
+  });
+
+  it('T-RR-062: a row re-resolved to GRPC as primary at retry time is attempted via RewardTrackingGrpcClient, not Kafka/REST', async () => {
+    const row = fakeDueRow({ __customerId: 'CUST-RETRY-GRPC' });
+    const fakes = buildFakes([row], {
+      primaryChannel: 'GRPC',
+      fallbackChannel: 'REST',
+      kafkaEnabled: true,
+      restEnabled: true,
+      grpcEnabled: true,
+    });
+    fakes.grpcClient.dispatch.mockResolvedValue(undefined);
+    const metrics = new DispatchMetricsService();
+    const worker = buildWorker(fakes, metrics);
+
+    await worker.runOnce();
+
+    expect(fakes.grpcClient.dispatch).toHaveBeenCalledTimes(1);
+    expect(fakes.kafkaProducer.publish).not.toHaveBeenCalled();
+    expect(fakes.restClient.dispatch).not.toHaveBeenCalled();
+    expect(fakes.grpcClient.dispatch.mock.calls[0][0]).toMatchObject({
+      customerId: 'CUST-RETRY-GRPC',
+    });
+    expect(fakes.retryRepository.markDelivered).toHaveBeenCalledWith('retry-row-1');
+    expect(metrics.getDispatchTierCount('retry_table')).toBe(1);
+  });
+
+  it('T-RR-062: GRPC primary disabled falls through to the REST fallback at retry time', async () => {
+    const row = fakeDueRow();
+    const fakes = buildFakes([row], {
+      primaryChannel: 'GRPC',
+      fallbackChannel: 'REST',
+      kafkaEnabled: true,
+      restEnabled: true,
+      grpcEnabled: false,
+    });
+    fakes.restClient.dispatch.mockResolvedValue(undefined);
+    const worker = buildWorker(fakes);
+
+    await worker.runOnce();
+
+    expect(fakes.grpcClient.dispatch).not.toHaveBeenCalled();
+    expect(fakes.restClient.dispatch).toHaveBeenCalledTimes(1);
+    expect(fakes.retryRepository.markDelivered).toHaveBeenCalledWith('retry-row-1');
   });
 });

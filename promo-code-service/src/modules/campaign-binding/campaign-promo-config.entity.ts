@@ -4,8 +4,15 @@
  * `promo-code-config.entity.ts` (T-PC-010) — raw snake_case straight off Postgres vs. the
  * camelCase shape every layer above the repository actually works with.
  *
- * `boundAt`/`updatedAt` are kept as real `Date` objects here (unlike `promo-code-config.entity.ts`'s
- * `rewardValue`, this table has no `decimal` column to lose precision on) — `dto/
+ * **T-PC-058 update**: gains `promoCodeConfigVersionId` — the `promo_code_config_version` this
+ * binding is pinned to (migration `T-PC-058_003_campaign_promo_config_version_pin.ts`, `NOT NULL`
+ * at the DB level). Pinned once, at bind time, to whatever is currently the target config's
+ * `published` version — never re-pinned by a later edit to that config elsewhere; rebinding
+ * (`CampaignBindingService.bind` again for the same `(tenant, level, ref)`) is what moves the pin,
+ * by deactivating this row and creating a fresh one.
+ *
+ * `boundAt`/`updatedAt` are kept as real `Date` objects here (unlike `promo-code-config-version
+ * .entity.ts`'s `rewardValue`, this table has no `decimal` column to lose precision on) — `dto/
  * campaign-promo-config.response.dto.ts` is the one place that turns them into wire-format ISO
  * strings, so this file stays the single "what does a row actually look like" source of truth.
  */
@@ -17,6 +24,7 @@ export type CampaignPromoConfigStatus = 'ACTIVE' | 'INACTIVE';
 export interface CampaignPromoConfigRow {
   id: string;
   promo_code_config_id: string;
+  promo_code_config_version_id: string;
   tenant_id: string;
   bind_level: BindLevel;
   bind_ref_id: string;
@@ -30,6 +38,7 @@ export interface CampaignPromoConfigRow {
 export interface CampaignPromoConfig {
   id: string;
   promoCodeConfigId: string;
+  promoCodeConfigVersionId: string;
   tenantId: string;
   bindLevel: BindLevel;
   bindRefId: string;
@@ -43,6 +52,7 @@ export function toDomain(row: CampaignPromoConfigRow): CampaignPromoConfig {
   return {
     id: row.id,
     promoCodeConfigId: row.promo_code_config_id,
+    promoCodeConfigVersionId: row.promo_code_config_version_id,
     tenantId: row.tenant_id,
     bindLevel: row.bind_level,
     bindRefId: row.bind_ref_id,

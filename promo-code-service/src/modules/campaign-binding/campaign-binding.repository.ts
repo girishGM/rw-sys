@@ -27,6 +27,10 @@ import { toDomain } from './campaign-promo-config.entity';
 
 export interface CreateCampaignPromoConfigData {
   promoCodeConfigId: string;
+  // T-PC-058. The `promo_code_config_version` this binding pins to, resolved by
+  // `CampaignBindingService` (currently-`published` version of `promoCodeConfigId`) before this
+  // repository is ever called — `NOT NULL` at the DB level (migration `T-PC-058_003`).
+  promoCodeConfigVersionId: string;
   bindLevel: BindLevel;
   bindRefId: string;
   boundBy: string;
@@ -54,9 +58,11 @@ export class CampaignBindingRepository {
   ): Promise<CampaignPromoConfig> {
     const [row] = await this.sequelize.query<CampaignPromoConfigRow>(
       `INSERT INTO promo_code.campaign_promo_config
-         (promo_code_config_id, tenant_id, bind_level, bind_ref_id, bound_by)
+         (promo_code_config_id, promo_code_config_version_id, tenant_id, bind_level, bind_ref_id,
+          bound_by)
        VALUES
-         (:promoCodeConfigId, :tenantId, :bindLevel, :bindRefId, :boundBy)
+         (:promoCodeConfigId, :promoCodeConfigVersionId, :tenantId, :bindLevel, :bindRefId,
+          :boundBy)
        RETURNING *`,
       {
         type: QueryTypes.SELECT,

@@ -228,6 +228,10 @@ export class GenerateRequestedConsumer implements OnModuleInit, OnModuleDestroy 
           customerId: payload.customerId,
           merchantId: payload.merchantId ?? null,
           transport: 'KAFKA',
+          // T-PC-061: passed through untouched, same "generateCode() accepts unknown, extra keys
+          // its own schema doesn't declare are silently dropped" no-op as the gRPC adapter's own
+          // note (`promo-code.controller.ts`) — not a resolved pin until T-PC-060 lands.
+          versionNo: payload.versionNo ?? null,
           activityContext: payload.activityContext ?? null,
         });
         // TC-6/TC-7: whatever `generateCode()` decided (SUCCESS or a business FAILED) is a

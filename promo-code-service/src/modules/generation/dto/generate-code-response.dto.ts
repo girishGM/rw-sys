@@ -21,6 +21,9 @@ export interface GenerateCodeResponseDto {
   expiresAt: string | null;
   errorCode: string | null;
   errorMessage: string | null;
+  /** T-PC-060 (defect fix filed against T-PC-058). `null` on `FAILED`, or on `SUCCESS` for a
+   * pre-`T-PC-060` row (`GenerationSuccessResult.versionNo`'s own note on why it's optional). */
+  versionNo: string | null;
 }
 
 export function toGenerateCodeResponseDto(result: GenerationResult): GenerateCodeResponseDto {
@@ -34,5 +37,6 @@ export function toGenerateCodeResponseDto(result: GenerationResult): GenerateCod
     expiresAt: result.expiresAt ? result.expiresAt.toISOString() : null,
     errorCode: result.errorCode,
     errorMessage: result.errorMessage,
+    versionNo: result.versionNo ?? null,
   };
 }

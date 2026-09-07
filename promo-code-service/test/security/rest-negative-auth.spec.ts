@@ -24,6 +24,7 @@ import { randomUUID } from 'node:crypto';
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import request from 'supertest';
+import { QueryTypes } from 'sequelize';
 import type { Sequelize } from 'sequelize-typescript';
 import { AppModule } from '@/app.module';
 import { createAppTestConnection } from '../config/support/app-connection';
@@ -44,27 +45,51 @@ describe('T-PC-041 — REST negative-authorization sweep, every admin/bind endpo
 
   afterAll(async () => {
     for (const tenantId of tenantIds) {
-      await sequelize.query(
-        `DELETE FROM promo_code.campaign_promo_config WHERE tenant_id = :tenantId`,
-        { replacements: { tenantId } },
-      );
-      await sequelize.query(
-        `DELETE FROM promo_code.promo_code_config_audit
-           WHERE promo_code_config_id IN (
-             SELECT id FROM promo_code.promo_code_config WHERE tenant_id = :tenantId
-           )`,
-        { replacements: { tenantId } },
-      );
-      await sequelize.query(
-        'DELETE FROM promo_code.promo_code_config WHERE tenant_id = :tenantId',
-        {
-          replacements: { tenantId },
-        },
-      );
+      await cleanupTenant(sequelize, tenantId);
     }
     await sequelize.close();
     await app.close();
   });
+
+  /**
+   * T-PC-065: `seedConfig()` creates every config through the real `POST
+   * /api/v1/promo-code-configs` endpoint, which — since T-PC-058 split payout fields onto a
+   * versioned `promo_code_config_version` row — always opens at least a `draft` version in the
+   * same transaction. `promo_code_config_version.promo_code_config_id` has no `ON DELETE CASCADE`,
+   * so an unconditional `DELETE FROM promo_code_config` throws a foreign-key violation that
+   * crashes the whole suite (`Test suite failed to run`, not an individual test failure) —
+   * reproduced directly on the pre-fix body of this function via `npx jest
+   * test/security/rest-negative-auth.spec.ts` before this fix. The final delete is therefore
+   * childless-only: a config that still has a version child (every config this file creates) is
+   * left in place, same "immutable history, not a leak this test can or should work around"
+   * pattern already established by `test/config/promo-code-config-version.spec.ts`'s own
+   * `afterAll` and applied identically across every other promo-code-config/campaign-binding spec
+   * that hit this same FK shape (`test/binding/campaign-binding.e2e-spec.ts`,
+   * `test/e2e/setup/e2e-test-app.ts`, etc). A published/deprecated version row is additionally
+   * permanently undeletable by `trg_promo_code_config_version_undeletable`, but the childless-only
+   * filter is what actually matters here — it's the FK, not the trigger, that crashed this suite.
+   */
+  async function cleanupTenant(db: Sequelize, tenantId: string): Promise<void> {
+    await db.query('DELETE FROM promo_code.campaign_promo_config WHERE tenant_id = :tenantId', {
+      replacements: { tenantId },
+    });
+    await db.query(
+      `DELETE FROM promo_code.promo_code_config_audit
+         WHERE promo_code_config_id IN (
+           SELECT id FROM promo_code.promo_code_config WHERE tenant_id = :tenantId
+         )`,
+      { replacements: { tenantId } },
+    );
+    await db.query(
+      `DELETE FROM promo_code.promo_code_config c
+         WHERE c.tenant_id = :tenantId
+           AND NOT EXISTS (
+             SELECT 1 FROM promo_code.promo_code_config_version v
+              WHERE v.promo_code_config_id = c.id
+           )`,
+      { replacements: { tenantId } },
+    );
+  }
 
   function freshTenant(): string {
     const id = randomUUID();
@@ -202,5 +227,63 @@ describe('T-PC-041 — REST negative-authorization sweep, every admin/bind endpo
   it('adjacent: GET /health is deliberately unauthenticated (not a missed guard)', async () => {
     const response = await request(app.getHttpServer()).get('/health');
     expect(response.status).not.toBe(401);
+  });
+
+  // T-PC-065 regression coverage for `cleanupTenant`'s own childless-only filter.
+  describe('T-PC-065 regression — cleanupTenant tolerates a version-child config row', () => {
+    it('TC-3: does not throw a foreign-key violation for a config seedConfig() created (which always has a version child), and leaves that row in place', async () => {
+      const { tenantId, configId } = await seedConfig();
+
+      // Proves R58's own FK shape didn't change under us: the config really does have a version
+      // child before cleanup runs, which is exactly the precondition the unfixed body of
+      // `cleanupTenant` (an unconditional `DELETE FROM promo_code_config`) could not tolerate.
+      const [{ count: versionCountBefore }] = await sequelize.query<{ count: string }>(
+        'SELECT COUNT(*)::int AS count FROM promo_code.promo_code_config_version WHERE promo_code_config_id = :configId',
+        { type: QueryTypes.SELECT, replacements: { configId } },
+      );
+      expect(Number(versionCountBefore)).toBeGreaterThan(0);
+
+      // The assertion that matters: on the pre-fix body (`DELETE FROM promo_code_config WHERE
+      // tenant_id = :tenantId`, no childless filter) this rejects with a foreign-key-violation and
+      // the `await` below throws, failing this test — confirmed by reverting `cleanupTenant` to
+      // that body and re-running this file with `npx jest test/security/rest-negative-auth.spec.ts`.
+      await cleanupTenant(sequelize, tenantId);
+
+      const rows = await sequelize.query(
+        'SELECT id FROM promo_code.promo_code_config WHERE id = :configId',
+        { type: QueryTypes.SELECT, replacements: { configId } },
+      );
+      expect(rows).toHaveLength(1);
+    });
+
+    it('TC-4 (adjacent): a genuinely childless config row is still deleted', async () => {
+      const tenantId = freshTenant();
+      const actorId = randomUUID();
+      // Deliberately bypasses the real `POST` endpoint (unlike `seedConfig()`) so this row never
+      // gets a version child — see `promo-code-config-version.migration.spec.ts`'s own
+      // `insertIdentity()` for the same "identity row only" pattern this mirrors.
+      const [{ id: configId }] = await sequelize.query<{ id: string }>(
+        `INSERT INTO promo_code.promo_code_config (tenant_id, merchant_id, name, created_by, updated_by)
+         VALUES (:tenantId, :merchantId, :name, :actorId, :actorId)
+         RETURNING id`,
+        {
+          type: QueryTypes.SELECT,
+          replacements: {
+            tenantId,
+            merchantId: null,
+            name: `t-pc-065 childless-config ${randomUUID()}`,
+            actorId,
+          },
+        },
+      );
+
+      await cleanupTenant(sequelize, tenantId);
+
+      const rows = await sequelize.query(
+        'SELECT id FROM promo_code.promo_code_config WHERE id = :configId',
+        { type: QueryTypes.SELECT, replacements: { configId } },
+      );
+      expect(rows).toHaveLength(0);
+    });
   });
 });

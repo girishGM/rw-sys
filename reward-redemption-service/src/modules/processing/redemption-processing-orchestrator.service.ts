@@ -46,6 +46,16 @@
  * actually called (today, only `CompletionSweepService`, T-RR-021 — see that file's own T-RR-057
  * note).
  *
+ * **T-RR-063.** Both terminal transitions this orchestrator drives directly
+ * (`markCompletedDirect`/`markDispatchedExternal`) now also receive a computed `expiresAt`: a fresh
+ * `const nowUtc = new Date()`, taken immediately before each call (never shared across the two
+ * branches — the `SUCCESS` branch's own instant is *after* `connector.redeem()` resolves, which can
+ * be an arbitrary network hop, so reusing an earlier `nowUtc` there would anchor the expiry to the
+ * wrong instant), fed into `computeExpiresAt()` (`expiry-computation.ts`) alongside
+ * `resolvedReward.expiryValue`/`expiryUnit` (`RewardSystemResolutionService`, T-RR-022/T-173).
+ * `resolvedReward` is already resolved once per call and reused for both branches — this is not a
+ * second lookup.
+ *
  * **T-RR-065 (defect fix).** `06-CACHING-AND-TENANT-CONFIG.md` §5's claim-time `tenant_code`/
  * `country_code` enrichment step ("immediately after a row is claimed ... before §4's
  * reward-system resolution") had no call site anywhere in this service — every entry reached
@@ -104,6 +114,7 @@ import {
   RewardSystemResolutionService,
   TenantSchemaEnrichmentService,
 } from './reward-system-resolution.service';
+import { computeExpiresAt } from './expiry-computation';
 
 /**
  * Deliberately narrower than `RewardSystemConnector` itself — this orchestrator never needs to
@@ -160,7 +171,15 @@ export class RedemptionProcessingOrchestrator {
       // §4 point 2 / §2's table: no active connector-config row resolves for this system_code —
       // "genuinely nothing to call" is the direct `-> completed` path (TC-2). The connector
       // interface is never touched on this branch.
-      const completed = await this.stateMachine.markCompletedDirect(entry.id);
+      // T-RR-063: `nowUtc` is this transition's own redemption instant — computed here, right
+      // before the write, not reused from any earlier point in this method.
+      const nowUtc = new Date();
+      const expiresAt = computeExpiresAt(
+        nowUtc,
+        resolvedReward.expiryValue ?? null,
+        resolvedReward.expiryUnit ?? null,
+      );
+      const completed = await this.stateMachine.markCompletedDirect(entry.id, expiresAt);
       // T-RR-057: this *is* the direct no-external-call `-> completed` path §3 explicitly calls
       // out — increment only now that the write has actually committed.
       this.metrics.incrementRewardRedemptionsCompleted(resolvedReward.systemCode);
@@ -186,10 +205,20 @@ export class RedemptionProcessingOrchestrator {
       // passed here any more — `markDispatchedExternal` no longer writes its own
       // `external_system_call_log` row (the connector that just returned `result` already wrote
       // its own, unconditionally, before returning — see that method's own doc comment).
+      // T-RR-063: `nowUtc` computed only now, after `connector.redeem()` has already resolved —
+      // that call can be an arbitrary network hop, so it must not anchor the expiry to an instant
+      // taken before it (this file's own header note).
+      const nowUtc = new Date();
+      const expiresAt = computeExpiresAt(
+        nowUtc,
+        resolvedReward.expiryValue ?? null,
+        resolvedReward.expiryUnit ?? null,
+      );
       return this.stateMachine.markDispatchedExternal({
         entryId: entry.id,
         externalSystemCode: connectorConfig.system_code,
         externalReferenceId: result.externalReferenceId,
+        expiresAt,
       });
     }
 

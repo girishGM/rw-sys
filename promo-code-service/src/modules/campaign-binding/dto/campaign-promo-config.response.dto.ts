@@ -11,6 +11,8 @@ import type { CampaignPromoConfig } from '../campaign-promo-config.entity';
 export interface CampaignPromoConfigResponseDto {
   id: string;
   promoCodeConfigId: string;
+  // T-PC-058. The `promo_code_config_version` this binding is pinned to.
+  promoCodeConfigVersionId: string;
   tenantId: string;
   bindLevel: string;
   bindRefId: string;
@@ -26,6 +28,7 @@ export function toCampaignPromoConfigResponse(
   return {
     id: domain.id,
     promoCodeConfigId: domain.promoCodeConfigId,
+    promoCodeConfigVersionId: domain.promoCodeConfigVersionId,
     tenantId: domain.tenantId,
     bindLevel: domain.bindLevel,
     bindRefId: domain.bindRefId,

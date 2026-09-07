@@ -8,6 +8,18 @@
 //
 // `amount`/`reward_value` are `string`, never a numeric proto type (§2): binary floating point
 // cannot represent monetary decimals exactly.
+//
+// T-PC-061 (defect fix, filed against T-PC-058): `version_no` added to both `GenerateCodeRequest`
+// (an explicit, frozen-at-grant-time version pin an upstream caller may already have resolved —
+// `02-KAFKA-CONTRACTS.md` §3's own `promo-code.generate.requested.v1` mirrors this field for the
+// same reason) and `GenerateCodeResponse` (the resolved version, echoed back — `02-KAFKA-CONTRACTS.md`
+// §5's `promo-code.generate.result.v1` mirrors this too). Both are appended as new field numbers,
+// never reusing or renumbering an existing one — an existing caller that omits `version_no`
+// entirely is unaffected (proto3 default: empty string). **Wire contract only**: actually resolving
+// an explicit `version_no` against `promo_code_config_version` and populating the response field
+// with the real resolved value is `PromoCodeGenerationService`'s own job (T-PC-060,
+// `agent-promo-generation`'s scope, not this file's) — `GenerateCodeResponse.version_no` is emitted
+// as `""` by `promo-code.controller.ts` until that lands; see that file's own comment.
 
 syntax = "proto3";
 
@@ -32,6 +44,10 @@ message GenerateCodeRequest {
   string customer_id     = 5;
   string merchant_id     = 6;   // optional — empty string if absent
   ActivityContext activity_context = 7;
+  // T-PC-061: optional explicit version pin (frozen-at-grant-time, resolved upstream by the
+  // caller) — empty string if absent, in which case resolution falls back to the binding's own
+  // currently-pinned version (T-PC-060). New field, appended — never renumbers 1-7 above.
+  string version_no      = 8;
 }
 
 message ActivityContext {
@@ -50,6 +66,11 @@ message GenerateCodeResponse {
   string expires_at          = 7;   // ISO 8601, empty if none
   string error_code          = 8;
   string error_message       = 9;
+  // T-PC-061: the resolved version_no this code was actually generated under — populated only on
+  // SUCCESS, empty string on FAILED (same convention as `code`/`reward_value` above) or when the
+  // resolving `PromoCodeGenerationService` doesn't yet populate it (T-PC-060, not this file's own
+  // scope — see this file's header comment). New field, appended — never renumbers 1-9 above.
+  string version_no          = 10;
 }
 
 message ListActivePromoCodeConfigsRequest {

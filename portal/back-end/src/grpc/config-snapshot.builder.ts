@@ -153,6 +153,19 @@ export interface BoundRewardPayload {
   readonly level: string;
   readonly refId: number;
   readonly status: string;
+  /** T-173 — the version's expiry duration. `0`/`''` is "never expires", the same reading the
+   * `.proto` states for fields 13/14; it is never "not configured" and never "already expired". */
+  readonly expiryValue: number;
+  readonly expiryUnit: string;
+  /** T-173 — `reward_versions.reward_kind` (T-119's column, never projected onto this message
+   * before). `''` when the version has no Kind set, never a fabricated default. */
+  readonly rewardKind: string;
+  /** T-173 — the promo-code config bound to this reward policy, read from the JSON the portal
+   * already stores (`reward_policies.config.promoCodeConfig`, T-127). `''` when none. */
+  readonly promoCodeConfigId: string;
+  /** T-173 — `0` until T-174 gives the portal somewhere to record a pinned promo-code config
+   * version. Deliberately not derived from anything: there is nothing to derive it from. */
+  readonly promoCodeConfigVersionNo: number;
 }
 
 export interface CampaignCapPayload {
@@ -695,6 +708,16 @@ export class ConfigSnapshotBuilder {
         level: entry.level,
         refId: entry.refId,
         status: entry.status,
+        // T-173 — read off the same resolved version row every field above already comes from, so
+        // a pinned version reports the expiry *it* promised and not whatever the current version
+        // says. A version that could not be resolved (`version === null`, the "no country-assigned
+        // version" case the header documents) reports "never expires" rather than guessing.
+        expiryValue: version?.expiryValue ?? 0,
+        expiryUnit: version?.expiryUnit ?? '',
+        rewardKind: version?.rewardKind ?? '',
+        promoCodeConfigId: promoCodeConfigOf(policy),
+        // Nothing to read yet — T-174 is what adds a place to store it (implementation note 4).
+        promoCodeConfigVersionNo: 0,
       };
     });
   }
@@ -865,6 +888,26 @@ function pinDateOf(campaign: TenantCampaign): Date {
 function campaignDate(value: Date): string {
   const day = calendarDateOf(value instanceof Date ? value : new Date(value));
   return `${day}T00:00:00.000Z`;
+}
+
+/**
+ * T-173 — the promo-code config bound to a reward policy, or `''`.
+ *
+ * There is no column for this: the portal's own record of the binding is the opaque
+ * `promoCodeConfig` string inside `reward_policies.config`, written by
+ * `bindings.service.ts#writePromoCodeConfig` (T-127) and sent to promo-code-service as-is. It is
+ * projected straight through here — never parsed, validated or reshaped — because it is that
+ * service's identifier, not this one's, and it is deliberately **not** UUID- or number-typed
+ * (`promo-code-service`'s own contract: opaque decimal strings).
+ *
+ * A non-string value in that JSON (a number, an object, a `null` written by hand) yields `''`
+ * rather than a coerced `"[object Object]"`: an unreadable binding is better reported as absent
+ * than as a config id that resolves to nothing downstream. `campaigns.service.ts` applies the same
+ * `typeof === 'string'` test to the same field for the same reason.
+ */
+function promoCodeConfigOf(policy: RewardPolicy): string {
+  const value = policy.config?.promoCodeConfig;
+  return typeof value === 'string' ? value : '';
 }
 
 /**

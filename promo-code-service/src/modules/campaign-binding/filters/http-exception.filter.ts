@@ -22,6 +22,7 @@ import {
   BindingConflictError,
   CampaignBindingValidationError,
   ConfigNotActiveError,
+  NoPublishedVersionError,
 } from '../campaign-binding.errors';
 
 @Catch()
@@ -46,6 +47,14 @@ export class HttpExceptionFilter implements ExceptionFilter {
       });
     }
     if (exception instanceof ConfigNotActiveError) {
+      return new ConflictException({
+        statusCode: 409,
+        message: exception.message,
+      });
+    }
+    // T-PC-058: the config itself is fine, it just has nothing published to pin to yet — same
+    // 409 family as `ConfigNotActiveError` above (a state conflict, not a validation failure).
+    if (exception instanceof NoPublishedVersionError) {
       return new ConflictException({
         statusCode: 409,
         message: exception.message,

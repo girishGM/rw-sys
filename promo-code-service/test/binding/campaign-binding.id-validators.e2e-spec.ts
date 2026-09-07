@@ -17,12 +17,14 @@ import request from 'supertest';
 import type { Sequelize } from 'sequelize-typescript';
 import { AppModule } from '@/app.module';
 import { PromoCodeConfigRepository } from '@/modules/promo-code-config/promo-code-config.repository';
+import { PromoCodeConfigVersionRepository } from '@/modules/promo-code-config/promo-code-config-version.repository';
 import { createAppTestConnection } from '../config/support/app-connection';
 
 describe('T-PC-053 — campaign-promo-config bind accepts plain portal-shaped ids', () => {
   let app: INestApplication;
   let sequelize: Sequelize;
   let promoCodeConfigRepository: PromoCodeConfigRepository;
+  let promoCodeConfigVersionRepository: PromoCodeConfigVersionRepository;
   const tenantIds: string[] = [];
 
   beforeAll(async () => {
@@ -33,9 +35,12 @@ describe('T-PC-053 — campaign-promo-config bind accepts plain portal-shaped id
     sequelize = createAppTestConnection();
     await sequelize.authenticate();
     promoCodeConfigRepository = new PromoCodeConfigRepository(sequelize);
+    promoCodeConfigVersionRepository = new PromoCodeConfigVersionRepository(sequelize);
   });
 
   afterAll(async () => {
+    // T-PC-058: see `promo-code-config.service.spec.ts`'s own afterAll comment — `seedActiveConfig`
+    // always publishes a version, which blocks deleting the parent `promo_code_config` row.
     for (const tenantId of tenantIds) {
       await sequelize.query(
         'DELETE FROM promo_code.campaign_promo_config WHERE tenant_id = :tenantId',
@@ -48,11 +53,15 @@ describe('T-PC-053 — campaign-promo-config bind accepts plain portal-shaped id
            )`,
         { replacements: { tenantId } },
       );
+      // Childless-only cleanup — see `promo-code-config-version.spec.ts`'s own afterAll comment.
       await sequelize.query(
-        'DELETE FROM promo_code.promo_code_config WHERE tenant_id = :tenantId',
-        {
-          replacements: { tenantId },
-        },
+        `DELETE FROM promo_code.promo_code_config c
+           WHERE c.tenant_id = :tenantId
+             AND NOT EXISTS (
+               SELECT 1 FROM promo_code.promo_code_config_version v
+                WHERE v.promo_code_config_id = c.id
+             )`,
+        { replacements: { tenantId } },
       );
     }
     await sequelize.close();
@@ -74,6 +83,9 @@ describe('T-PC-053 — campaign-promo-config bind accepts plain portal-shaped id
     const config = await promoCodeConfigRepository.create(tenantId, {
       merchantId: null,
       name: `t-pc-053 e2e config ${randomUUID()}`,
+      createdBy: randomUUID(),
+    });
+    const draft = await promoCodeConfigVersionRepository.createDraft(tenantId, config.id, {
       codePrefix: null,
       codePostfix: null,
       codeLength: 8,
@@ -86,6 +98,7 @@ describe('T-PC-053 — campaign-promo-config bind accepts plain portal-shaped id
       codeExpiryDays: null,
       createdBy: randomUUID(),
     });
+    await promoCodeConfigVersionRepository.publish(tenantId, config.id, draft!.id, randomUUID());
     return config.id;
   }
 

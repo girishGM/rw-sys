@@ -33,6 +33,7 @@ import { DispatchChannelResolverService } from '@/modules/dispatch/dispatch-chan
 import { RewardTrackingOutboxRepository } from '@/modules/dispatch/reward-tracking-outbox.repository';
 import { RewardTrackingKafkaProducerClient } from '@/modules/dispatch/reward-tracking-kafka-producer.client';
 import { RewardTrackingRestClient } from '@/modules/dispatch/reward-tracking-rest.client';
+import { RewardTrackingGrpcClient } from '@/modules/dispatch/reward-tracking-grpc.client';
 import { RewardTrackingDispatchRetryRepository } from '@/modules/dispatch/reward-tracking-dispatch-retry.repository';
 import { RewardTrackingDispatchRetryWorker } from '@/modules/dispatch/reward-tracking-dispatch-retry.worker';
 import { OutboxPublisherService } from '@/modules/dispatch/outbox-publisher.service';
@@ -71,6 +72,10 @@ describe('T-RR-064 — DispatchModule compiles via real Nest DI', () => {
       expect(moduleRef.get(RewardTrackingKafkaProducerClient)).toBeInstanceOf(
         RewardTrackingKafkaProducerClient,
       );
+      // T-RR-062: same interface-typed-constructor-param shape as RewardTrackingRestClient
+      // (`@Optional()` on its own `options` parameter, mirroring T-RR-064's own fix) — proving it
+      // resolves via real Nest DI too, not just via a direct `new` in a unit test.
+      expect(moduleRef.get(RewardTrackingGrpcClient)).toBeInstanceOf(RewardTrackingGrpcClient);
       expect(moduleRef.get(RewardTrackingDispatchRetryRepository)).toBeInstanceOf(
         RewardTrackingDispatchRetryRepository,
       );

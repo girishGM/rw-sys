@@ -20,6 +20,7 @@ import { EncryptionService } from '@/modules/encryption/encryption.service';
 import { OutboxPublisherService } from '@/modules/dispatch/outbox-publisher.service';
 import { DispatchMetricsService } from '@/modules/dispatch/dispatch-metrics.service';
 import { KafkaBrokerUnreachableError } from '@/modules/dispatch/reward-tracking-kafka-producer.client';
+import type { RewardTrackingGrpcClient } from '@/modules/dispatch/reward-tracking-grpc.client';
 import type {
   DispatchChannelResolverService,
   ResolvedDispatchChannel,
@@ -46,12 +47,14 @@ const AVAILABLE_KAFKA_PRIMARY: ResolvedDispatchChannel = {
   fallbackChannel: 'REST',
   kafkaEnabled: true,
   restEnabled: true,
+  grpcEnabled: false,
 };
 const AVAILABLE_REST_PRIMARY: ResolvedDispatchChannel = {
   primaryChannel: 'REST',
   fallbackChannel: 'KAFKA',
   kafkaEnabled: true,
   restEnabled: true,
+  grpcEnabled: false,
 };
 
 function fakePendingRow(
@@ -83,6 +86,14 @@ function fakePendingRow(
       externalReferenceId: 'PC-abc123',
       redeemedAt: new Date().toISOString(),
       correlationId: 'corr-1',
+      // T-RR-062.
+      trackerCode: 'TRK1',
+      trackerComponentCode: 'COMP1',
+      merchantCode: null,
+      expiresAt: null,
+      rewardKind: null,
+      promoCodeConfigId: null,
+      promoCodeConfigVersionNo: null,
     },
   };
   return { ...base, ...overrides };
@@ -98,6 +109,7 @@ interface Fakes {
   dispatchResolver: DispatchChannelResolverService & { resolve: jest.Mock };
   kafkaProducer: RewardTrackingKafkaProducerClient & { publish: jest.Mock };
   restClient: RewardTrackingRestClient & { dispatch: jest.Mock };
+  grpcClient: RewardTrackingGrpcClient & { dispatch: jest.Mock };
   retryRepository: RewardTrackingDispatchRetryRepository & { create: jest.Mock };
   configResolver: DispatchServiceConfigResolver;
 }
@@ -122,6 +134,9 @@ function buildFakes(
     restClient: {
       dispatch: jest.fn(),
     } as unknown as Fakes['restClient'],
+    grpcClient: {
+      dispatch: jest.fn(),
+    } as unknown as Fakes['grpcClient'],
     retryRepository: {
       create: jest.fn().mockResolvedValue(undefined),
     } as unknown as Fakes['retryRepository'],
@@ -154,6 +169,7 @@ function buildService(
     fakes.retryRepository,
     20,
     false,
+    fakes.grpcClient,
   );
 }
 
@@ -204,6 +220,13 @@ describe('T-RR-034/T-RR-035 — OutboxPublisherService', () => {
       redeemedAt: row.payload.redeemedAt,
       correlationId: 'corr-1',
       customerId: 'CUST-1',
+      trackerCode: 'TRK1',
+      trackerComponentCode: 'COMP1',
+      merchantCode: null,
+      expiresAt: null,
+      rewardKind: null,
+      promoCodeConfigId: null,
+      promoCodeConfigVersionNo: null,
     });
     expect(fakes.outboxRepository.markPublished).toHaveBeenCalledWith('outbox-row-1');
     expect(fakes.outboxRepository.incrementAttempts).not.toHaveBeenCalled();
@@ -378,6 +401,7 @@ describe('T-RR-034/T-RR-035 — OutboxPublisherService', () => {
       fallbackChannel: 'KAFKA',
       kafkaEnabled: false,
       restEnabled: true,
+      grpcEnabled: false,
     });
     fakes.restClient.dispatch.mockResolvedValue(undefined);
     const service = buildService(fakes);
@@ -414,6 +438,10 @@ describe('T-RR-034/T-RR-035 — OutboxPublisherService', () => {
     expect(fakes.dispatchResolver.resolve).not.toHaveBeenCalled();
     expect(fakes.outboxRepository.markPublished).not.toHaveBeenCalled();
   });
+
+  // T-RR-062: GRPC-as-a-third-channel test cases (TC-4/TC-5/TC-6) live in their own file,
+  // `outbox-publisher.grpc-channel.spec.ts` — this task's own "Files owned" list names it
+  // separately from this pre-existing spec file.
 
   it('processes multiple pending rows independently', async () => {
     const rowA = fakePendingRow({ id: 'row-a', rewardEntryId: 'entry-a', __customerId: 'CUST-A' });

@@ -82,6 +82,10 @@ function buildResolvedReward(overrides: Partial<ResolvedRewardSystem> = {}): Res
     refId: 0,
     versionNo: 1,
     status: 'active',
+    // T-RR-063: no expiry by default -- tests that care about the computed `expires_at` override
+    // these two explicitly (see the dedicated "T-RR-063" describe block below).
+    expiryValue: null,
+    expiryUnit: null,
     ...overrides,
   };
 }
@@ -250,6 +254,8 @@ describe('T-RR-024 — RedemptionProcessingOrchestrator', () => {
       entryId: entry.id,
       externalSystemCode: 'PROMO_CODE_SERVICE',
       externalReferenceId: 'PROMO-ABC123',
+      // T-RR-063: the default `buildResolvedReward()` fixture has no expiry configured.
+      expiresAt: null,
     });
     expect(stateMachine.markCompletedDirect).not.toHaveBeenCalled();
     expect(stateMachine.markRetrying).not.toHaveBeenCalled();
@@ -270,7 +276,8 @@ describe('T-RR-024 — RedemptionProcessingOrchestrator', () => {
 
     const result = await orchestrator.processClaimedEntry(entry);
 
-    expect(stateMachine.markCompletedDirect).toHaveBeenCalledWith(entry.id);
+    // T-RR-063: the default `buildResolvedReward()` fixture has no expiry configured.
+    expect(stateMachine.markCompletedDirect).toHaveBeenCalledWith(entry.id, null);
     expect(connectorRegistry.resolve).not.toHaveBeenCalled();
     expect(connector.redeem).not.toHaveBeenCalled();
     expect(stateMachine.markDispatchedExternal).not.toHaveBeenCalled();
@@ -535,7 +542,7 @@ describe('T-RR-024 — RedemptionProcessingOrchestrator', () => {
       const result = await orchestrator.processClaimedEntry(entry);
 
       expect(tenantSchemaEnrichment.enrich).toHaveBeenCalledWith(entry);
-      expect(stateMachine.markCompletedDirect).toHaveBeenCalledWith(entry.id);
+      expect(stateMachine.markCompletedDirect).toHaveBeenCalledWith(entry.id, null);
       expect(result.status).toBe('completed');
       expect(
         metrics.getCounterValue('reward_redemptions_completed_total', {
@@ -559,6 +566,63 @@ describe('T-RR-024 — RedemptionProcessingOrchestrator', () => {
       expect(connector.redeem).not.toHaveBeenCalled();
       expect(stateMachine.markDispatchedExternal).not.toHaveBeenCalled();
       expect(stateMachine.markCompletedDirect).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('T-RR-063 — expires_at computed from the resolved BoundReward expiry duration', () => {
+    const FIXED_NOW = new Date('2026-05-01T00:00:00.000Z');
+
+    beforeEach(() => {
+      jest.useFakeTimers();
+      jest.setSystemTime(FIXED_NOW);
+    });
+
+    afterEach(() => {
+      jest.useRealTimers();
+    });
+
+    it('markDispatchedExternal receives expiresAt = redemption instant + the resolved duration', async () => {
+      const { orchestrator, resolutionService, stateMachine, connector } = buildHarness();
+      resolutionService.resolve.mockResolvedValue(
+        buildResolvedReward({ expiryValue: 15, expiryUnit: 'minutes' }),
+      );
+      connector.redeem.mockResolvedValue({
+        outcome: 'SUCCESS',
+        externalReferenceId: 'PROMO-EXPIRY',
+        responseSummary: {},
+      });
+
+      await orchestrator.processClaimedEntry(buildEntry());
+
+      expect(stateMachine.markDispatchedExternal).toHaveBeenCalledWith(
+        expect.objectContaining({ expiresAt: new Date(FIXED_NOW.getTime() + 15 * 60_000) }),
+      );
+    });
+
+    it('markCompletedDirect receives expiresAt = redemption instant + the resolved duration', async () => {
+      const { orchestrator, configResolver, resolutionService, stateMachine } = buildHarness();
+      configResolver.resolve.mockResolvedValue(null);
+      resolutionService.resolve.mockResolvedValue(
+        buildResolvedReward({ expiryValue: 5, expiryUnit: 'hours' }),
+      );
+
+      const entry = buildEntry();
+      await orchestrator.processClaimedEntry(entry);
+
+      expect(stateMachine.markCompletedDirect).toHaveBeenCalledWith(
+        entry.id,
+        new Date(FIXED_NOW.getTime() + 5 * 3_600_000),
+      );
+    });
+
+    it('a never-expiring BoundReward (expiryValue/expiryUnit null) passes expiresAt = null, not a fabricated date', async () => {
+      const { orchestrator, configResolver, stateMachine } = buildHarness();
+      configResolver.resolve.mockResolvedValue(null);
+
+      const entry = buildEntry();
+      await orchestrator.processClaimedEntry(entry);
+
+      expect(stateMachine.markCompletedDirect).toHaveBeenCalledWith(entry.id, null);
     });
   });
 });

@@ -22,6 +22,27 @@
  *     `CONFIG_NOT_BOUND` is returned and no other tenant's binding ever leaks through, independent
  *     of whichever binding *does* exist for a different tenant at that same `bind_ref_id` value —
  *     a stronger version of T-PC-031's own TC-2 (which only tests "no binding exists at all").
+ *
+ * **T-PC-063 (defect fix filed against T-PC-058).** `seedBoundConfig()`/TC-6b used to construct a
+ * single `PromoCodeConfigRepository.create()` object literal carrying both identity fields
+ * (`merchantId`/`name`) and payout/code-generation fields (`codePrefix`/`codeLength`/.../
+ * `codeExpiryDays`) — migration `T-PC-058_001_split_promo_code_config_version.ts` (landed by
+ * T-PC-059) moved every payout column off `promo_code_config` onto the new
+ * `promo_code_config_version` table, so that literal started failing `npm run typecheck` with
+ * TS2353 ("codePrefix does not exist in type CreatePromoCodeConfigData") the moment T-PC-059
+ * landed. **Reproduced**: `git stash` of this file's own T-PC-063 diff, then `npm run typecheck`,
+ * reproduced that exact TS2353 at this file's own (then) lines 191/305 — restored after confirming
+ * red. Fixed by seeding through `PromoCodeConfigService.create()` (identity + first `draft`
+ * version, one call) + `PromoCodeConfigService.publish()` (`draft -> published`) end to end,
+ * exactly the fix `test/e2e/load/support/load-test-harness.ts`'s own header (also T-PC-063)
+ * documents for the identical seeding pattern. `CampaignBindingService.bind()` only ever pins a
+ * config's currently-`published` version (`campaign-binding.service.ts`'s own
+ * `assertConfigActiveAndPublished`) — so `seedBoundConfig()` must publish before binding.
+ * `afterAll`'s own cleanup no longer deletes `promo_code_config` rows for the same reason that
+ * file's `teardown()` no longer does: every config here now has a `published`
+ * `promo_code_config_version` child row, and `trg_promo_code_config_version_undeletable`
+ * (migration `T-PC-058_002`) plus the plain (undeclared-`ON DELETE`, so `NO ACTION`) FK from that
+ * child row both reject deleting the parent identity row out from under it.
  */
 import 'reflect-metadata';
 import { randomUUID } from 'node:crypto';
@@ -34,7 +55,7 @@ import type { Sequelize } from 'sequelize-typescript';
 import { QueryTypes } from 'sequelize';
 import { GrpcMicroserviceRootModule } from '@/grpc/grpc-server.main';
 import { buildGrpcMicroserviceOptions } from '@/grpc/grpc-server.bootstrap';
-import { PromoCodeConfigRepository } from '@/modules/promo-code-config/promo-code-config.repository';
+import { PromoCodeConfigService } from '@/modules/promo-code-config/promo-code-config.service';
 import { CampaignBindingService } from '@/modules/campaign-binding/campaign-binding.service';
 import { createAppTestConnection } from '../config/support/app-connection';
 import { TestCertAuthority, type IssuedCertificate } from '../grpc/support/test-cert-authority';
@@ -71,7 +92,7 @@ describe('T-PC-041 — gRPC negative-authorization sweep (real mTLS, real Postgr
   let ca: TestCertAuthority;
   let microserviceApp: INestMicroservice;
   let sequelize: Sequelize;
-  let promoCodeConfigRepository: PromoCodeConfigRepository;
+  let promoCodeConfigService: PromoCodeConfigService;
   let bindingService: CampaignBindingService;
   let address: string;
   let allowedCert: IssuedCertificate;
@@ -97,7 +118,7 @@ describe('T-PC-041 — gRPC negative-authorization sweep (real mTLS, real Postgr
     microserviceApp = await NestFactory.createMicroservice(GrpcMicroserviceRootModule, options);
     await microserviceApp.listen();
 
-    promoCodeConfigRepository = microserviceApp.get(PromoCodeConfigRepository);
+    promoCodeConfigService = microserviceApp.get(PromoCodeConfigService);
     bindingService = microserviceApp.get(CampaignBindingService);
 
     sequelize = createAppTestConnection();
@@ -138,10 +159,11 @@ describe('T-PC-041 — gRPC negative-authorization sweep (real mTLS, real Postgr
            )`,
         { replacements: { tenantId } },
       );
-      await sequelize.query(
-        'DELETE FROM promo_code.promo_code_config WHERE tenant_id = :tenantId',
-        { replacements: { tenantId } },
-      );
+      // T-PC-063: deliberately does **not** delete `promo_code_config`/`promo_code_config_version`
+      // rows any more — see this file's own header. Every config seeded here now has a
+      // `published` `promo_code_config_version` child row, and
+      // `trg_promo_code_config_version_undeletable` (migration `T-PC-058_002`) plus the plain FK
+      // from that child row both reject deleting the parent identity row out from under it.
     }
     if (serviceIdentityIds.length > 0) {
       await sequelize.query('DELETE FROM promo_code.grpc_service_identity WHERE id IN (:ids)', {
@@ -185,24 +207,37 @@ describe('T-PC-041 — gRPC negative-authorization sweep (real mTLS, real Postgr
   async function seedBoundConfig(): Promise<{ tenantId: string; bindRefId: string }> {
     const tenantId = freshTenant();
     const actorId = randomUUID();
-    const config = await promoCodeConfigRepository.create(tenantId, {
-      merchantId: null,
-      name: `t-pc-041 grpc-negative-auth ${randomUUID()}`,
-      codePrefix: 'GNA-',
-      codePostfix: null,
-      codeLength: 10,
-      characterSet: 'ALPHANUMERIC',
-      excludeAmbiguousChars: true,
-      rewardValueType: 'FIXED_AMOUNT',
-      rewardValue: 10,
-      rewardUnit: 'USD',
-      maxRedemptionsPerCode: 1,
-      codeExpiryDays: 30,
-      createdBy: actorId,
-    });
+    const created = await promoCodeConfigService.create(
+      tenantId,
+      {
+        // T-PC-063: `merchantId`/`codePostfix` omitted rather than `null` — the create DTO's own
+        // zod schema (`create-promo-code-config.dto.ts`) makes every optional field accept
+        // *undefined*, not `null` (confirmed directly: `.optional()` without `.nullable()`
+        // rejects a `null` value with a ZodError) — the exact same "omit, don't null" convention
+        // `promo-code-config.service.spec.ts`'s own `validCreateInput()` (T-PC-010,
+        // agent-promo-config's scope) already establishes for this schema.
+        name: `t-pc-041 grpc-negative-auth ${randomUUID()}`,
+        codePrefix: 'GNA-',
+        codeLength: 10,
+        characterSet: 'ALPHANUMERIC',
+        excludeAmbiguousChars: true,
+        rewardValueType: 'FIXED_AMOUNT',
+        rewardValue: 10,
+        rewardUnit: 'USD',
+        maxRedemptionsPerCode: 1,
+        codeExpiryDays: 30,
+      },
+      actorId,
+    );
+    if (!created.draftVersion) {
+      // Defensive only (R3) — `PromoCodeConfigService.create()` always returns the freshly
+      // created draft version alongside the identity row it was just created under.
+      throw new Error(`seedBoundConfig: expected a draft version for "${created.id}"`);
+    }
+    await promoCodeConfigService.publish(tenantId, created.id, created.draftVersion.id, actorId);
     const bindRefId = randomUUID();
     await bindingService.bind({
-      promoCodeConfigId: config.id,
+      promoCodeConfigId: created.id,
       tenantId,
       bindLevel: 'CAMPAIGN',
       bindRefId,
@@ -299,21 +334,22 @@ describe('T-PC-041 — gRPC negative-authorization sweep (real mTLS, real Postgr
   it('TC-6b: ListActivePromoCodeConfigs never returns another tenant’s config summaries', async () => {
     const tenantA = freshTenant();
     const actorId = randomUUID();
-    const configA = await promoCodeConfigRepository.create(tenantA, {
-      merchantId: null,
-      name: `t-pc-041 tenant-a-only ${randomUUID()}`,
-      codePrefix: null,
-      codePostfix: null,
-      codeLength: 8,
-      characterSet: 'NUMERIC',
-      excludeAmbiguousChars: false,
-      rewardValueType: 'POINTS',
-      rewardValue: 50,
-      rewardUnit: 'pts',
-      maxRedemptionsPerCode: 1,
-      codeExpiryDays: null,
-      createdBy: actorId,
-    });
+    const configA = await promoCodeConfigService.create(
+      tenantA,
+      {
+        // T-PC-063: `merchantId`/`codePrefix`/`codePostfix`/`codeExpiryDays` omitted rather than
+        // `null` — see `seedBoundConfig`'s own comment above for why.
+        name: `t-pc-041 tenant-a-only ${randomUUID()}`,
+        codeLength: 8,
+        characterSet: 'NUMERIC',
+        excludeAmbiguousChars: false,
+        rewardValueType: 'POINTS',
+        rewardValue: 50,
+        rewardUnit: 'pts',
+        maxRedemptionsPerCode: 1,
+      },
+      actorId,
+    );
     const tenantB = freshTenant();
     const client = allowedClient();
 

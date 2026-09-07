@@ -120,6 +120,9 @@ function buildResolvedReward(): ResolvedRewardSystem {
     refId: 0,
     versionNo: 1,
     status: 'active',
+    // T-RR-063: this load-test fixture has no opinion on expiry -- never expires.
+    expiryValue: null,
+    expiryUnit: null,
   };
 }
 

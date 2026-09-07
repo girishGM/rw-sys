@@ -81,6 +81,25 @@ export interface ResolvedRewardSystem {
   refId: number;
   versionNo: number;
   status: string;
+  /**
+   * T-RR-063: `BoundReward.expiry_value`/`expiry_unit` (T-173), mapped from the proto's own
+   * `0`/`''` "never expires" sentinel to `null`/`null` — never `0`/`''` themselves, so a caller
+   * (`RedemptionProcessingOrchestrator` -> `computeExpiresAt`, `expiry-computation.ts`) can treat
+   * `null` as the one, unambiguous "no expiry" signal.
+   *
+   * **Optional (`?`), not just nullable**, for the identical cross-scope reason
+   * `reward-redemption-entry.model.ts`'s own `expires_at` is optional (see that field's own
+   * comment): this interface was already constructed as a full object literal by fixture builders
+   * outside this task's file scope (`test/e2e/observability.e2e-spec.ts`,
+   * `test/e2e/fixtures/reward-entry.fixtures.ts`, R3) before this task added these two fields.
+   * `RedemptionProcessingOrchestrator` (this task's own file) treats an omitted value identically
+   * to an explicit `null` (`?? null` at its own call site) — a fixture that predates T-RR-063 and
+   * never set an opinion on expiry gets the same "never expires" behavior a real
+   * `RewardSystemResolutionService.resolve()` call would give it for a `BoundReward` with no
+   * expiry configured.
+   */
+  expiryValue?: number | null;
+  expiryUnit?: 'minutes' | 'hours' | 'days' | null;
 }
 
 /** TC-5: thrown instead of returning `undefined`/proceeding with a guessed `system_code` when no
@@ -158,6 +177,13 @@ export class RewardSystemResolutionService {
       refId: match.refId,
       versionNo: match.versionNo,
       status: match.status,
+      // T-RR-063. Deliberately `|| null`, not `??` (proto3's `int32`/`string` defaults are always
+      // present — `protoLoader`'s `defaults: true`, `campaign-config.client.ts`'s own construction
+      // — so `match.expiryValue`/`match.expiryUnit` are never `undefined`; `??` would let the
+      // proto's own documented `0`/`''` "never expires" sentinel pass straight through as `0`/`''`
+      // instead of the `null`/`null` every downstream consumer relies on, TC-3/TC-4).
+      expiryValue: match.expiryValue || null,
+      expiryUnit: (match.expiryUnit || null) as 'minutes' | 'hours' | 'days' | null,
     };
   }
 }

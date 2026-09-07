@@ -142,6 +142,10 @@ function successResponse(
     expiresAt: '',
     errorCode: '',
     errorMessage: '',
+    // T-RR-090: this is the raw proto message the mock server hands back (not yet through the
+    // client's own null-translation) — proto3's own default for an unset string, same convention
+    // every other field on this fixture already uses.
+    versionNo: '',
     ...overrides,
   };
 }
@@ -157,6 +161,8 @@ function failedResponse(errorCode: string, errorMessage = 'boom'): PromoCodeGene
     expiresAt: '',
     errorCode,
     errorMessage,
+    // T-RR-090.
+    versionNo: '',
   };
 }
 
@@ -170,6 +176,8 @@ function sampleRequest(
     bindRefId: 'CAMP1',
     customerId: 'customer-1',
     merchantId: '',
+    // T-RR-090.
+    versionNo: null,
     activityContext: { amount: '50.0000', currency: 'MYR', metadataJson: '{}' },
     ...overrides,
   };

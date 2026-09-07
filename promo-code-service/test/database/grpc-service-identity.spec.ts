@@ -62,7 +62,10 @@ describe('T-PC-044 — grpc_service_identity migration (008)', () => {
 
   // TC-1/TC-2: table exists, with the schema's other tables unaffected (TC-4, adjacent
   // behaviour — the count includes the 5 pre-existing tables plus this one, never fewer).
-  it('TC-1/TC-2: promo_code.grpc_service_identity exists alongside the 5 T-PC-002 tables', async () => {
+  // Updated by T-PC-059 to also include `promo_code_config_version` (identity/version split) —
+  // this test's own job is "every table this schema currently owns exists," and that set grew
+  // again; see `promo-code-config-version.migration.spec.ts` for that table's own coverage.
+  it('TC-1/TC-2: promo_code.grpc_service_identity exists alongside the other T-PC-002/T-PC-059 tables', async () => {
     // Selects a second column (`table_schema`) deliberately, not just `table_name` — same
     // driver quirk `migrations.spec.ts` TC-2 already documents: with the installed `pg` driver a
     // single-column SELECT comes back as `[[value], ...]` (array-of-arrays), not
@@ -79,6 +82,7 @@ describe('T-PC-044 — grpc_service_identity migration (008)', () => {
       'promo_code',
       'promo_code_config',
       'promo_code_config_audit',
+      'promo_code_config_version',
       'promo_code_outbox',
     ]);
   });

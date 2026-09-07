@@ -4,6 +4,13 @@
  * `promo_code_app` role (`test/config/support/app-connection.ts`), same real-DB style
  * `test/database/migrations.spec.ts` (T-PC-002) already established.
  *
+ * **T-PC-058 update**: `CreatePromoCodeConfigData` is now identity-only (`merchantId`/`name`/
+ * `createdBy` — every payout field moved to `promo_code_config_version`, migration
+ * `T-PC-058_001_split_promo_code_config_version.ts`). `list()` stays an identity-only read here;
+ * the join to a config's currently-`published` version (`listSummaries`) is covered in
+ * `promo-code-config-version.spec.ts` instead, alongside the rest of this task's own new
+ * version-aware coverage.
+ *
  * TC-1..TC-5, TC-7, TC-8, TC-14 (business-logic + audit-trail behaviour) live in
  * `promo-code-config.service.spec.ts` instead — this file covers TC-6, TC-9..TC-13 plus
  * `AGENT-PROTOCOL.md`/task verification steps 3 and 4, all of which are properties only a real
@@ -25,16 +32,6 @@ function baseData(overrides: Partial<CreatePromoCodeConfigData> = {}): CreatePro
   return {
     merchantId: null,
     name: `t-pc-010 config ${randomUUID()}`,
-    codePrefix: null,
-    codePostfix: null,
-    codeLength: 8,
-    characterSet: 'ALPHANUMERIC',
-    excludeAmbiguousChars: true,
-    rewardValueType: 'FIXED_AMOUNT',
-    rewardValue: 10,
-    rewardUnit: 'USD',
-    maxRedemptionsPerCode: 1,
-    codeExpiryDays: null,
     createdBy: ACTOR_ID,
     ...overrides,
   };
@@ -180,19 +177,21 @@ describe('T-PC-010 — PromoCodeConfigRepository', () => {
     ).rejects.toBeInstanceOf(ConfigNameConflictError);
   });
 
-  // Adjacent behaviour: a non-uniqueness DB error (e.g. a CHECK-constraint violation) is
-  // rethrown as-is, not misclassified as a name conflict — `translateUniqueViolation`'s "no
-  // match" fallback.
+  // Adjacent behaviour: a non-uniqueness DB error (e.g. a length-bound violation on `name`,
+  // `varchar(120)`) is rethrown as-is, not misclassified as a name conflict —
+  // `translateUniqueViolation`'s "no match" fallback. (T-PC-058: `codeLength`'s own CHECK
+  // constraint moved off this table entirely, onto `promo_code_config_version` — this identity
+  // table's own remaining bound is `name`'s column width.)
   it('adjacent behaviour: a non-uniqueness DB error is rethrown unchanged, not misclassified as a conflict', async () => {
     const tenantId = freshTenant();
     let caught: unknown;
     try {
-      await repository.create(tenantId, baseData({ codeLength: 3 }));
+      await repository.create(tenantId, baseData({ name: 'x'.repeat(121) }));
     } catch (error) {
       caught = error;
     }
     expect(caught).not.toBeInstanceOf(ConfigNameConflictError);
-    expect(String((caught as Error).message)).toMatch(/code_length/);
+    expect(String((caught as Error).message)).toMatch(/value too long/i);
   });
 
   // Adjacent behaviour: `archive` on an id that doesn't resolve for the given tenant (wrong

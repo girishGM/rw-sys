@@ -28,6 +28,14 @@
  * when the implementation genuinely needs it, inside this agent's own `dispatch/**` scope grant"
  * precedent this file's own header already establishes.
  *
+ * **T-RR-062 adds `RewardTrackingGrpcClient`** (the third dispatch channel) to both `providers` and
+ * `exports` — same "extra registration added when the implementation genuinely needs it, inside
+ * this agent's own `dispatch/**` scope grant" precedent this file's own header already establishes.
+ * `OutboxPublisherService` receives it as its own new, `@Optional()`, last constructor parameter
+ * (see that file's own header for why it is appended last, not inserted alongside
+ * `kafkaProducer`/`restClient`) — Nest's normal type-based DI still supplies a real instance here,
+ * this module being the one place that actually constructs the full provider graph.
+ *
  * **T-RR-069 adds `TenantSchemaCacheModule` (`agent-rr-foundation`'s own file scope, T-RR-007) as
  * an import**, purely to reach its already-exported `DispatchChannelConfigCache` — the *real*,
  * invalidation-endpoint-and-reconciliation-poller-connected instance — and alias it onto the
@@ -55,6 +63,7 @@ import { DispatchChannelResolverService } from './dispatch-channel-resolver.serv
 import { RewardTrackingOutboxRepository } from './reward-tracking-outbox.repository';
 import { RewardTrackingKafkaProducerClient } from './reward-tracking-kafka-producer.client';
 import { RewardTrackingRestClient } from './reward-tracking-rest.client';
+import { RewardTrackingGrpcClient } from './reward-tracking-grpc.client';
 import { RewardTrackingDispatchRetryRepository } from './reward-tracking-dispatch-retry.repository';
 import { RewardTrackingDispatchRetryWorker } from './reward-tracking-dispatch-retry.worker';
 import { DispatchMetricsService } from './dispatch-metrics.service';
@@ -75,6 +84,7 @@ import { OutboxPublisherService } from './outbox-publisher.service';
     RewardTrackingOutboxRepository,
     RewardTrackingKafkaProducerClient,
     RewardTrackingRestClient,
+    RewardTrackingGrpcClient,
     RewardTrackingDispatchRetryRepository,
     RewardTrackingDispatchRetryWorker,
     DispatchMetricsService,
@@ -85,6 +95,7 @@ import { OutboxPublisherService } from './outbox-publisher.service';
     RewardTrackingOutboxRepository,
     RewardTrackingKafkaProducerClient,
     RewardTrackingRestClient,
+    RewardTrackingGrpcClient,
     RewardTrackingDispatchRetryRepository,
     RewardTrackingDispatchRetryWorker,
     DispatchMetricsService,

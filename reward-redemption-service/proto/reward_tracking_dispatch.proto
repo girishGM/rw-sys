@@ -1,0 +1,65 @@
+// T-RR-062. This service's own client-side contract for the gRPC leg of outbound dispatch to
+// reward-tracking-service (`ARCHITECTURE.md` §9) — the third transport alongside the existing
+// Kafka (`02-KAFKA-CONTRACTS.md` §2, `reward.redemption.completed.v1`) and REST
+// (`04-REST-CONTRACT.md` §3, `POST /api/v1/redemptions/completed`) pair. reward-tracking-service
+// does not exist anywhere in this repo (same non-existence caveat every outbound client in this
+// service already carries) — this is this service's own definition of the contract it expects,
+// not a copy of a real server-side `.proto` the way `promo_code_generation.proto` mirrors
+// promo-code-service's own file.
+//
+// A single unary RPC carrying exactly the same field set as the Kafka/REST message body
+// (`toRewardTrackingMessage`'s own output, `reward-tracking-outbox.repository.ts`) — deliberately,
+// so all three channels are provably carrying the same information end to end, with no
+// channel-specific translation layer that could silently drift. `customer_id` is the already-
+// decrypted value (R8) — never `customer_id_encrypted` — exactly like the Kafka message body and
+// the REST request body, decrypted once by `OutboxPublisherService` at the point of publish, never
+// persisted, never logged.
+//
+// Every monetary/decimal field is `string`, never a numeric proto type (same "binary floating
+// point cannot represent monetary decimals exactly" reasoning `promo_code_generation.proto`'s own
+// header states for its own `amount`/`reward_value` fields). Every nullable field is a plain
+// `string`/`int32`, with an empty string / `0` standing in for "absent" at the wire level exactly
+// like `promo_code_generation.proto`'s own `merchant_id`/`expires_at` convention — proto3 has no
+// native `null`, and this service already accepts that convention elsewhere rather than inventing
+// wrapper types for this one new client.
+
+syntax = "proto3";
+
+package rewardtracking.v1;
+
+service RewardTrackingDispatchService {
+  // Synchronous delivery of one already-finalized redemption fact — the gRPC equivalent of one
+  // Kafka publish to `reward.redemption.completed.v1` / one REST call to
+  // `POST /api/v1/redemptions/completed`. Idempotent on the consumer's own side, keyed by
+  // `reward_entry_id` (`02-KAFKA-CONTRACTS.md` §2's own delivery-semantics note applies here
+  // identically — this client makes no at-most-once/exactly-once guarantee of its own).
+  rpc DispatchRedemptionCompleted (RedemptionCompletedMessage) returns (DispatchAck);
+}
+
+message RedemptionCompletedMessage {
+  string reward_entry_id          = 1;
+  int32  tenant_id                = 2;
+  string tenant_code              = 3;
+  string country_code             = 4;
+  string customer_id              = 5;   // decrypted (R8) — never customer_id_encrypted
+  string campaign_code            = 6;
+  string reward_code              = 7;
+  string reward_category          = 8;
+  string reward_value             = 9;   // decimal-as-string — never a float
+  string reward_value_unit        = 10;
+  string external_system_code     = 11;  // empty string if absent
+  string external_reference_id    = 12;  // empty string if absent
+  string redeemed_at              = 13;  // ISO 8601
+  string correlation_id           = 14;
+  string tracker_code             = 15;
+  string tracker_component_code   = 16;
+  string merchant_code            = 17;  // empty string if absent
+  string expires_at               = 18;  // ISO 8601, empty string if none
+  string reward_kind              = 19;  // "PERCENTAGE" | "FIXED_AMOUNT" | "POINTS" | "PROMO_CODE" | "" (unknown)
+  string promo_code_config_id     = 20;  // empty string if absent/not applicable
+  int32  promo_code_config_version_no = 21;  // 0 if absent/not applicable
+}
+
+message DispatchAck {
+  string status = 1;   // "ACCEPTED" — a business outcome, not a protocol-level fault
+}

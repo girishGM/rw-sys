@@ -25,6 +25,13 @@
  * constraint; `ON CONSTRAINT` against it fails at runtime with "constraint ... does not exist"
  * (confirmed against the real migrated schema while implementing this task).
  *
+ * T-PC-059: `promo_code_config` was split into an identity row (`tenant_id`/`merchant_id`/`name`/
+ * `status`) and a `promo_code_config_version` row (every payout column). Each demo config now
+ * inserts both — the identity row first (`ON CONFLICT ... DO NOTHING RETURNING id`, so a rerun
+ * that hits the conflict skips the version insert too, preserving TC-2's idempotency), then one
+ * `version_no = 1`, `status = 'published'` version row carrying the same payout fields the single
+ * row used to hold directly.
+ *
  * T-PC-052: `DEMO_TENANT_ID` (`seed-data.constants.ts`) defaults to the plain string `'1'` —
  * matching the portal's own `int`-typed `tenants.id` for its first-seeded `DEMO` tenant, not a
  * UUID — and is overridable via the optional `DEMO_PORTAL_TENANT_ID` env var for an environment
@@ -49,26 +56,60 @@ import { DEMO_ACTOR_ID, DEMO_PROMO_CODE_CONFIGS } from './seed-data.constants';
  */
 export async function seedDemoPromoCodeConfigs(sequelize: Sequelize): Promise<void> {
   for (const config of DEMO_PROMO_CODE_CONFIGS) {
-    await sequelize.query(
-      `INSERT INTO promo_code.promo_code_config
-         (tenant_id, merchant_id, name, code_prefix, code_postfix, code_length, character_set,
-          exclude_ambiguous_chars, reward_value_type, reward_value, reward_unit,
-          max_redemptions_per_code, code_expiry_days, status, created_by, updated_by)
-       VALUES
-         (:tenant_id, :merchant_id, :name, :code_prefix, :code_postfix, :code_length,
-          :character_set, :exclude_ambiguous_chars, :reward_value_type, :reward_value,
-          :reward_unit, :max_redemptions_per_code, :code_expiry_days, :status, :created_by,
-          :updated_by)
-       ON CONFLICT (tenant_id, name) WHERE deleted_at IS NULL DO NOTHING`,
-      {
-        type: QueryTypes.RAW,
-        replacements: {
-          ...config,
-          created_by: DEMO_ACTOR_ID,
-          updated_by: DEMO_ACTOR_ID,
+    // Wrapped in one transaction per config — identity + version must land together, never one
+    // without the other (same atomicity fix `test/database/migrations.spec.ts`'s own `insertConfig`
+    // needed: an unpaired identity row with no version is a real, reproduced defect, not a
+    // hypothetical one).
+    // eslint-disable-next-line no-await-in-loop -- seeding is a short, fixed-size, intentionally sequential list
+    await sequelize.transaction(async (transaction) => {
+      const [identityRow] = await sequelize.query<{ id: string }>(
+        `INSERT INTO promo_code.promo_code_config
+           (tenant_id, merchant_id, name, status, created_by, updated_by)
+         VALUES (:tenant_id, :merchant_id, :name, :status, :created_by, :updated_by)
+         ON CONFLICT (tenant_id, name) WHERE deleted_at IS NULL DO NOTHING
+         RETURNING id`,
+        {
+          type: QueryTypes.SELECT,
+          replacements: {
+            tenant_id: config.tenant_id,
+            merchant_id: config.merchant_id,
+            name: config.name,
+            status: config.status,
+            created_by: DEMO_ACTOR_ID,
+            updated_by: DEMO_ACTOR_ID,
+          },
+          transaction,
         },
-      },
-    );
+      );
+      // Conflict on the identity row (already seeded by a previous run) — skip the version
+      // insert too, so a rerun never creates a second version for a config it didn't just create.
+      if (!identityRow) {
+        return;
+      }
+
+      await sequelize.query(
+        `INSERT INTO promo_code.promo_code_config_version
+           (promo_code_config_id, version_no, code_prefix, code_postfix, code_length,
+            character_set, exclude_ambiguous_chars, reward_value_type, reward_value, reward_unit,
+            max_redemptions_per_code, code_expiry_days, status, created_by, published_by,
+            published_at)
+         VALUES
+           (:configId, 1, :code_prefix, :code_postfix, :code_length, :character_set,
+            :exclude_ambiguous_chars, :reward_value_type, :reward_value, :reward_unit,
+            :max_redemptions_per_code, :code_expiry_days, 'published', :created_by, :published_by,
+            now())`,
+        {
+          type: QueryTypes.RAW,
+          replacements: {
+            ...config,
+            configId: identityRow.id,
+            created_by: DEMO_ACTOR_ID,
+            published_by: DEMO_ACTOR_ID,
+          },
+          transaction,
+        },
+      );
+    });
   }
 }
 

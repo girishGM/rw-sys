@@ -171,8 +171,30 @@ describe('T-PC-030 — GenerateRequestedConsumer (unit, mocked generation servic
       customerId: 'cust_8213',
       merchantId,
       transport: 'KAFKA',
+      versionNo: null,
       activityContext: { amount: '49.99', currency: 'USD', metadata: { foo: 'bar' } },
     });
+  });
+
+  // T-PC-061 TC-2/TC-4: an explicit versionNo on the payload is passed through to the domain
+  // service untouched — same request-side wire-contract proof as
+  // `promo-code.controller.spec.ts`'s own T-PC-061 test, for the Kafka transport.
+  it('T-PC-061: passes an explicit data.versionNo through to generateCode() untouched', async () => {
+    const generateCode = jest.fn().mockResolvedValue(successResult);
+    const { consumer } = buildConsumer(generateCode);
+    const envelope = validEnvelope({
+      data: {
+        bindLevel: 'CAMPAIGN',
+        bindRefId: randomUUID(),
+        customerId: 'cust_1',
+        versionNo: '3',
+      },
+    });
+
+    const outcome = await consumer.processMessage(toRawMessage(envelope, randomUUID()));
+
+    expect(outcome).toBe('ACK');
+    expect(generateCode).toHaveBeenCalledWith(expect.objectContaining({ versionNo: '3' }));
   });
 
   // TC-2

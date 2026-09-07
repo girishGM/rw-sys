@@ -55,6 +55,9 @@ describe('T-PC-053 — promo-code-config accepts plain portal-shaped ids', () =>
   });
 
   afterAll(async () => {
+    // T-PC-058: see `promo-code-config.service.spec.ts`'s own afterAll comment — every `POST`
+    // here opens a `promo_code_config_version` row, which blocks deleting the parent
+    // `promo_code_config` row.
     for (const tenantId of tenantIds) {
       await sequelize.query(
         `DELETE FROM promo_code.promo_code_config_audit
@@ -63,11 +66,15 @@ describe('T-PC-053 — promo-code-config accepts plain portal-shaped ids', () =>
            )`,
         { replacements: { tenantId } },
       );
+      // Childless-only cleanup — see `promo-code-config-version.spec.ts`'s own afterAll comment.
       await sequelize.query(
-        'DELETE FROM promo_code.promo_code_config WHERE tenant_id = :tenantId',
-        {
-          replacements: { tenantId },
-        },
+        `DELETE FROM promo_code.promo_code_config c
+           WHERE c.tenant_id = :tenantId
+             AND NOT EXISTS (
+               SELECT 1 FROM promo_code.promo_code_config_version v
+                WHERE v.promo_code_config_id = c.id
+             )`,
+        { replacements: { tenantId } },
       );
     }
     await sequelize.close();

@@ -1,0 +1,99 @@
+// T-RTS-011 — this service's own inbound gRPC ingestion contract
+// (`reward-tracking-service-plan/tasks/T-RTS-011-grpc-server-adapter.md`, `ARCHITECTURE.md` §2/§4).
+//
+// This is the CANONICAL definition of this RPC — unlike this service's own client-side
+// `src/modules/campaign-cache/proto/campaign_config.proto` (a copy of a contract the portal owns),
+// reward-tracking-service is the SERVER here, so this file is the source of truth for the wire
+// shape. `reward-redemption-service-plan/tasks/T-RR-062` ("add gRPC as a third dispatch channel")
+// is the task, on the OTHER repo, that will eventually build a client dialing this exact contract —
+// R0 forbids creating that client from this side, so whoever picks up T-RR-062's own gRPC leg must
+// copy this file's messages/RPC field-for-field (mirroring the same discipline this repo's own
+// campaign_config.proto copies already document), not invent a parallel shape.
+//
+// Field set mirrors `RewardTrackingIngestionService.ApplyRewardTrackingEventInput`
+// (`src/modules/ingestion/reward-tracking-ingestion.service.ts`, T-RTS-010) one-for-one, which is
+// itself reward-redemption-service's outbound `RewardTrackingDispatchPayload` shape
+// (`reward-redemption-service/src/modules/dispatch/reward-tracking-outbox.repository.ts`) extended
+// with the seven fields `T-RR-062` plans to add (`trackerCode`/`trackerComponentCode`/
+// `merchantCode`/`expiresAt`/`rewardKind`/`promoCodeConfigId`/`promoCodeConfigVersionNo`) plus
+// `unitType`/`unitCode` (`brain-storm/02-DATA-MODEL.md` §2.1's own `reward_fact` columns) —
+// see that service file's own header for why every one of those fields is optional here even
+// though `T-RR-062` hasn't shipped on the other side yet.
+//
+// ## Conventions (matching every other proto in this repo)
+//
+// - No `optional` keyword. A nullable/optional field uses its type's zero value (empty string for
+//   `string`, `0` for `int32`) as the "absent" sentinel, documented per-field below — same
+//   convention `campaign_config.proto`'s own header states ("optional — empty string if absent").
+// - Decimal amounts (`reward_value`) are always `string`, never a numeric proto type, to avoid
+//   float precision loss (same rule cited by every proto in this repo carrying money/decimal
+//   values).
+// - Timestamps are RFC3339 strings, never a numeric epoch or a proto well-known `Timestamp` type —
+//   same convention `campaign_config.proto`'s `start_date`/`end_date`/`served_at` already use.
+//
+// `customerId` arrives already decrypted (plaintext) on the wire, exactly like every other channel
+// this service exposes (Kafka `T-RTS-012`, REST `T-RTS-013`) — re-encrypted immediately on receipt,
+// never logged in between (R6, this task's own implementation note 1).
+
+syntax = "proto3";
+
+package rewardtracking.ingest.v1;
+
+option java_multiple_files = true;
+option java_package = "com.rewardtrackingservice.ingest.v1";
+option go_package = "rewardtrackingservice/ingest/v1;ingestv1";
+
+// -------------------------------------------------------------------------------------------
+// Service — one unary RPC, no business decision ever made here (R1/R8).
+// -------------------------------------------------------------------------------------------
+
+service RewardTrackingIngestService {
+  // Idempotent ingestion of one reward.redemption.completed.v1-shaped event
+  // (T-RTS-010's own `applyRewardTrackingEvent`). A malformed request (missing a required field)
+  // is always a gRPC-level `INVALID_ARGUMENT` error, never a silently-accepted event or an
+  // in-body failure status (this task's own implementation note 2).
+  rpc IngestRewardTrackingEvent (IngestRewardTrackingEventRequest) returns (IngestRewardTrackingEventResponse);
+}
+
+// -------------------------------------------------------------------------------------------
+// IngestRewardTrackingEvent
+// -------------------------------------------------------------------------------------------
+
+message IngestRewardTrackingEventRequest {
+  string reward_entry_id    = 1;   // required — the exactly-once dedupe key (R3)
+  string correlation_id     = 2;   // required
+  int32  tenant_id          = 3;   // required
+  string tenant_code        = 4;   // optional — empty string if absent
+  string country_code       = 5;   // optional — empty string if absent
+
+  // Plaintext — re-encrypted/hashed immediately on receipt, never logged (R6).
+  string customer_id        = 6;   // required
+
+  string campaign_code            = 7;   // required
+  string tracker_code             = 8;   // required
+  string tracker_component_code   = 9;   // required
+  string merchant_code            = 10;  // optional — empty string if absent
+
+  string reward_code       = 11;  // required
+  string reward_category   = 12;  // required
+  string reward_kind       = 13;  // optional — empty string if absent; 'FIXED_AMOUNT'|'PERCENTAGE'|'POINTS'|'PHYSICAL'|'PROMO_CODE'
+  string unit_type         = 14;  // optional — empty string if absent
+  string unit_code         = 15;  // optional — empty string if absent
+  string reward_value      = 16;  // required — decimal as STRING, never a float (R4)
+  string reward_value_unit = 17;  // required
+
+  string external_system_code  = 18;  // optional — empty string if absent
+  string external_reference_id = 19;  // optional — empty string if absent
+
+  string promo_code_config_id         = 20;  // optional — empty string if absent
+  int32  promo_code_config_version_no = 21;  // optional — 0 if absent (real version numbers start at 1)
+
+  string redeemed_at = 22;  // required — RFC3339
+  string expires_at  = 23;  // optional — empty string if absent; RFC3339; taken verbatim, never recomputed (R5)
+}
+
+message IngestRewardTrackingEventResponse {
+  // Exactly 'applied' or 'duplicate' — nothing else (this task's own implementation note 2). A
+  // malformed request never reaches this message at all; it is always a thrown gRPC error instead.
+  string status = 1;
+}

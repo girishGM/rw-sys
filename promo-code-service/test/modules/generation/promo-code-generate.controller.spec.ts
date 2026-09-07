@@ -24,6 +24,14 @@
  * instead of a separate `test/modules/generation/rest-generate-parity.e2e-spec.ts`, since it needs
  * the exact same `AppModule`/seed fixtures as every other case here. See this task's completion
  * report, "Deviations from spec".
+ *
+ * **T-PC-060 adaptation.** `seedActiveConfig`/`bindConfig` no longer go through
+ * `PromoCodeConfigRepository.create()`/`CampaignBindingService.bind()` — both broken by migration
+ * `T-PC-058_001_split_promo_code_config_version.ts`/`T-PC-058_003_campaign_promo_config_version_
+ * pin.ts` (landed dependencies, T-PC-059), both `agent-promo-config`'s exclusive scope (R8). See
+ * `promo-code-generation-version.spec.ts`'s own header for the full defect chain; adapted here to
+ * raw SQL, the same bypass pattern that file and `promo-code-generation.service.spec.ts` already
+ * establish.
  */
 import 'reflect-metadata';
 import { randomUUID } from 'node:crypto';
@@ -107,6 +115,8 @@ describe('T-PC-056 — PromoCodeGenerateController (REST)', () => {
   });
 
   afterAll(async () => {
+    // T-PC-060 adaptation: does not delete `promo_code_config`/`promo_code_config_version` rows —
+    // see `promo-code-generation-version.spec.ts`'s own `afterAll` for the identical reasoning.
     for (const tenantId of tenantIds) {
       await sequelize.query(
         `DELETE FROM promo_code.promo_code_outbox
@@ -127,12 +137,6 @@ describe('T-PC-056 — PromoCodeGenerateController (REST)', () => {
            )`,
         { replacements: { tenantId } },
       );
-      await sequelize.query(
-        'DELETE FROM promo_code.promo_code_config WHERE tenant_id = :tenantId',
-        {
-          replacements: { tenantId },
-        },
-      );
     }
     await sequelize.close();
     await app.close();
@@ -144,34 +148,56 @@ describe('T-PC-056 — PromoCodeGenerateController (REST)', () => {
     return id;
   }
 
+  /** T-PC-060 adaptation — see this file's own header. */
   async function seedActiveConfig(tenantId: string): Promise<string> {
-    const config = await promoCodeConfigRepository.create(tenantId, {
-      merchantId: null,
-      name: `t-pc-056 config ${randomUUID()}`,
-      codePrefix: null,
-      codePostfix: null,
-      codeLength: 12,
-      characterSet: 'ALPHANUMERIC',
-      excludeAmbiguousChars: true,
-      rewardValueType: 'FIXED_AMOUNT',
-      rewardValue: 10,
-      rewardUnit: 'USD',
-      maxRedemptionsPerCode: 1,
-      codeExpiryDays: null,
-      createdBy: randomUUID(),
-    });
-    return config.id;
+    const configId = randomUUID();
+    const actor = randomUUID();
+    await sequelize.query(
+      `INSERT INTO promo_code.promo_code_config
+         (id, tenant_id, merchant_id, name, status, created_by, updated_by)
+       VALUES (:id, :tenantId, NULL, :name, 'ACTIVE', :actor, :actor)`,
+      {
+        type: QueryTypes.INSERT,
+        replacements: { id: configId, tenantId, name: `t-pc-056 config ${randomUUID()}`, actor },
+      },
+    );
+    const versionId = randomUUID();
+    await sequelize.query(
+      `INSERT INTO promo_code.promo_code_config_version
+         (id, promo_code_config_id, version_no, code_prefix, code_postfix, code_length,
+          character_set, exclude_ambiguous_chars, reward_value_type, reward_value, reward_unit,
+          max_redemptions_per_code, code_expiry_days, status, created_by, published_by, published_at)
+       VALUES (:versionId, :configId, 1, NULL, NULL, 12, 'ALPHANUMERIC', true, 'FIXED_AMOUNT', 10,
+               'USD', 1, NULL, 'published', :actor, :actor, now())`,
+      { type: QueryTypes.INSERT, replacements: { versionId, configId, actor } },
+    );
+    return configId;
   }
 
+  /** T-PC-060 adaptation — see this file's own header. */
   async function bindConfig(tenantId: string, promoCodeConfigId: string): Promise<string> {
     const bindRefId = randomUUID();
-    await bindingService.bind({
-      promoCodeConfigId,
-      tenantId,
-      bindLevel: 'CAMPAIGN',
-      bindRefId,
-      boundBy: randomUUID(),
-    });
+    const rows = await sequelize.query<{ id: string }>(
+      `SELECT id FROM promo_code.promo_code_config_version
+         WHERE promo_code_config_id = :promoCodeConfigId ORDER BY version_no DESC LIMIT 1`,
+      { type: QueryTypes.SELECT, replacements: { promoCodeConfigId } },
+    );
+    await sequelize.query(
+      `INSERT INTO promo_code.campaign_promo_config
+         (promo_code_config_id, promo_code_config_version_id, tenant_id, bind_level, bind_ref_id,
+          bound_by, status)
+       VALUES (:promoCodeConfigId, :versionId, :tenantId, 'CAMPAIGN', :bindRefId, :boundBy, 'ACTIVE')`,
+      {
+        type: QueryTypes.INSERT,
+        replacements: {
+          promoCodeConfigId,
+          versionId: rows[0].id,
+          tenantId,
+          bindRefId,
+          boundBy: randomUUID(),
+        },
+      },
+    );
     return bindRefId;
   }
 

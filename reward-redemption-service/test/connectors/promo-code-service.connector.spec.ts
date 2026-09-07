@@ -150,6 +150,8 @@ function successBody(
     expiresAt: '',
     errorCode: '',
     errorMessage: '',
+    // T-RR-090.
+    versionNo: null,
     ...overrides,
   };
 }
@@ -165,6 +167,8 @@ function failedBody(errorCode: string, errorMessage = 'boom'): PromoCodeGenerate
     expiresAt: '',
     errorCode,
     errorMessage,
+    // T-RR-090.
+    versionNo: null,
   };
 }
 

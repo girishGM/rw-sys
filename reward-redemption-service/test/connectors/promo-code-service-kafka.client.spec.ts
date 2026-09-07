@@ -73,6 +73,8 @@ function requestData(
     bindRefId: 'CAMP_T_RR_081',
     customerId: 'MSISDN-60123456789',
     merchantId: 'MERCH_T_RR_081',
+    // T-RR-090.
+    versionNo: null,
     activityContext: { amount: '50.0000', currency: 'MYR', metadata: {} },
     ...overrides,
   };
@@ -144,6 +146,8 @@ describe('T-RR-081 — PromoCodeServiceKafkaClient.handleResultMessage (pure, no
       expiresAt: '2026-12-01T00:00:00.000Z',
       errorCode: null,
       errorMessage: null,
+      // T-RR-090: absent on this envelope -> defaults to null.
+      versionNo: null,
     });
   });
 

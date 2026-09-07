@@ -25,6 +25,7 @@ import {
   UC_PROMO_CODE_CODE,
   UC_PROMO_CODE_CORRELATION,
 } from '@/modules/generation/promo-code.repository';
+import type { PromoCodeConfigVersion } from '@/modules/generation/promo-code.repository';
 import type { PromoCode } from '@/modules/generation/promo-code.entity';
 import { PromoCodeGenerationService } from '@/modules/generation/promo-code-generation.service';
 
@@ -40,6 +41,10 @@ function fakePromoCode(overrides: Partial<PromoCode> = {}): PromoCode {
   return {
     id: randomUUID(),
     promoCodeConfigId: randomUUID(),
+    // T-PC-060: always populated for every new row — a plausible non-null default so
+    // `resolveVersionNoForPromoCode`'s own `findVersionById` lookup path is exercised the same
+    // way a real post-T-PC-060 row would be (`buildService`'s mock resolves any id to `version`).
+    promoCodeConfigVersionId: randomUUID(),
     campaignPromoConfigId: null,
     code: `CODE-${randomUUID().slice(0, 8)}`,
     customerId: 'cust_8213',
@@ -60,22 +65,20 @@ function fakePromoCode(overrides: Partial<PromoCode> = {}): PromoCode {
   };
 }
 
-function activeConfig(): {
-  id: string;
-  status: 'ACTIVE';
-  characterSet: 'ALPHANUMERIC';
-  codeLength: number;
-  codePrefix: null;
-  codePostfix: null;
-  excludeAmbiguousChars: boolean;
-  rewardValueType: 'FIXED_AMOUNT';
-  rewardValue: string;
-  rewardUnit: string;
-  codeExpiryDays: null;
-} {
+function activeConfig(): { id: string; status: 'ACTIVE' } {
+  return { id: randomUUID(), status: 'ACTIVE' };
+}
+
+// T-PC-060: the code-generation/payout columns moved off `promo_code_config` onto
+// `promo_code_config_version` (T-PC-058_001) — `PromoCodeGenerationService` now resolves this
+// shape via `PromoCodeRepository.findVersionById`/`findVersionByConfigAndVersionNo`/
+// `findActiveBindingVersionId`, not `PromoCodeConfigService.findById` (`activeConfig` above keeps
+// only the identity fields that service still owns).
+function activeVersion(promoCodeConfigId: string): PromoCodeConfigVersion {
   return {
     id: randomUUID(),
-    status: 'ACTIVE',
+    promoCodeConfigId,
+    versionNo: 1,
     characterSet: 'ALPHANUMERIC',
     codeLength: 10,
     codePrefix: null,
@@ -85,6 +88,7 @@ function activeConfig(): {
     rewardValue: '10.0000',
     rewardUnit: 'USD',
     codeExpiryDays: null,
+    status: 'published',
   };
 }
 
@@ -103,6 +107,14 @@ function buildService(
   jest.spyOn(repository, 'createOutboxRow').mockResolvedValue(undefined);
 
   const config = activeConfig();
+  const version = activeVersion(config.id);
+  // T-PC-060: no explicit `versionNo` in `validInput()` below, so every test in this file resolves
+  // through the binding's own pin — `findActiveBindingVersionId` + `findVersionById`.
+  // `findVersionByConfigAndVersionNo` is mocked too (unused unless a test supplies `versionNo`)
+  // purely so a future test can override it without also having to re-derive this wiring.
+  jest.spyOn(repository, 'findActiveBindingVersionId').mockResolvedValue(version.id);
+  jest.spyOn(repository, 'findVersionById').mockResolvedValue(version);
+  jest.spyOn(repository, 'findVersionByConfigAndVersionNo').mockResolvedValue(version);
   const campaignBindingService = {
     resolveActiveBinding: jest
       .fn()

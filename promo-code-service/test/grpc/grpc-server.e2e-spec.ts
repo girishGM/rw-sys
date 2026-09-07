@@ -25,6 +25,10 @@ import { QueryTypes } from 'sequelize';
 import { GrpcMicroserviceRootModule } from '@/grpc/grpc-server.main';
 import { buildGrpcMicroserviceOptions } from '@/grpc/grpc-server.bootstrap';
 import { PromoCodeConfigRepository } from '@/modules/promo-code-config/promo-code-config.repository';
+import {
+  PromoCodeConfigService,
+  type PromoCodeConfigDetail,
+} from '@/modules/promo-code-config/promo-code-config.service';
 import { CampaignBindingService } from '@/modules/campaign-binding/campaign-binding.service';
 import { PromoCodeGenerationService } from '@/modules/generation/promo-code-generation.service';
 import { createAppTestConnection } from '../config/support/app-connection';
@@ -63,6 +67,7 @@ describe('T-PC-031 — gRPC server (real mTLS, real Postgres) (e2e)', () => {
   let microserviceApp: INestMicroservice;
   let sequelize: Sequelize;
   let promoCodeConfigRepository: PromoCodeConfigRepository;
+  let promoCodeConfigService: PromoCodeConfigService;
   let bindingService: CampaignBindingService;
   let generationService: PromoCodeGenerationService;
   let address: string;
@@ -90,6 +95,7 @@ describe('T-PC-031 — gRPC server (real mTLS, real Postgres) (e2e)', () => {
     await microserviceApp.listen();
 
     promoCodeConfigRepository = microserviceApp.get(PromoCodeConfigRepository);
+    promoCodeConfigService = microserviceApp.get(PromoCodeConfigService);
     bindingService = microserviceApp.get(CampaignBindingService);
     generationService = microserviceApp.get(PromoCodeGenerationService);
 
@@ -133,10 +139,14 @@ describe('T-PC-031 — gRPC server (real mTLS, real Postgres) (e2e)', () => {
            )`,
         { replacements: { tenantId } },
       );
-      await sequelize.query(
-        'DELETE FROM promo_code.promo_code_config WHERE tenant_id = :tenantId',
-        { replacements: { tenantId } },
-      );
+      // T-PC-062: deliberately does **not** delete `promo_code_config` rows — every config this
+      // file seeds now goes through `createPublishedConfig()` (T-PC-058's real service layer), so
+      // each has a real `published` `promo_code_config_version` row referencing it via FK, and
+      // that version row can never be deleted (`trg_promo_code_config_version_undeletable`,
+      // migration `T-PC-058_002`, "never deleted, only deprecated/retired"). Deleting the parent
+      // identity row while that FK reference still exists would fail loudly (`003_create_
+      // campaign_promo_config.ts`'s own documented `ON DELETE` convention) — same precedent
+      // `promo-code-generation-version.spec.ts`'s own `afterAll` already established.
     }
     if (serviceIdentityIds.length > 0) {
       await sequelize.query('DELETE FROM promo_code.grpc_service_identity WHERE id IN (:ids)', {
@@ -179,6 +189,67 @@ describe('T-PC-031 — gRPC server (real mTLS, real Postgres) (e2e)', () => {
     return createTestClient(address, credentials);
   }
 
+  /**
+   * T-PC-062. `PromoCodeConfigRepository.create()` is identity-only since T-PC-058/059 split
+   * `promo_code_config` from `promo_code_config_version` — a config needs a `published` version
+   * before `CampaignBindingService.bind()` (which now pins one, TC-058 implementation note 3) or
+   * `ListActivePromoCodeConfigs`'s own `listSummaries()` join (T-PC-062) will recognise it as
+   * usable at all. Goes through the real service layer (`PromoCodeConfigService.create()` +
+   * `.publish()`), not a raw-SQL bypass — unlike `promo-code-generation-version.spec.ts`'s own
+   * precedent, this file's target repositories/services are not themselves broken, only the
+   * pre-split call sites were.
+   */
+  async function createPublishedConfig(
+    tenantId: string,
+    actorId: string,
+    overrides: Partial<{
+      merchantId: string;
+      name: string;
+      codePrefix: string;
+      rewardValueType: 'FIXED_AMOUNT' | 'PERCENTAGE' | 'POINTS';
+      rewardValue: number;
+      rewardUnit: string;
+      characterSet: 'NUMERIC' | 'ALPHA' | 'ALPHANUMERIC';
+      excludeAmbiguousChars: boolean;
+      /** Omitted (never supplied to the DTO) means "never expires" — `service.create()`'s own
+       * `dto.codeExpiryDays ?? null` default, matching this file's pre-T-PC-058 `null` fixtures. */
+      codeExpiryDays: number;
+    }> = {},
+  ): Promise<PromoCodeConfigDetail> {
+    const created = await promoCodeConfigService.create(
+      tenantId,
+      {
+        ...(overrides.merchantId !== undefined ? { merchantId: overrides.merchantId } : {}),
+        name: overrides.name ?? `t-pc-031 e2e config ${randomUUID()}`,
+        ...(overrides.codePrefix !== undefined ? { codePrefix: overrides.codePrefix } : {}),
+        codeLength: 10,
+        characterSet: overrides.characterSet ?? 'ALPHANUMERIC',
+        excludeAmbiguousChars: overrides.excludeAmbiguousChars ?? true,
+        rewardValueType: overrides.rewardValueType ?? 'FIXED_AMOUNT',
+        rewardValue: overrides.rewardValue ?? 10,
+        rewardUnit: overrides.rewardUnit ?? 'USD',
+        maxRedemptionsPerCode: 1,
+        ...(overrides.codeExpiryDays !== undefined
+          ? { codeExpiryDays: overrides.codeExpiryDays }
+          : {}),
+      },
+      actorId,
+    );
+    if (!created.draftVersion) {
+      throw new Error('expected PromoCodeConfigService.create() to open a draft version');
+    }
+    const published = await promoCodeConfigService.publish(
+      tenantId,
+      created.id,
+      created.draftVersion.id,
+      actorId,
+    );
+    if (!published) {
+      throw new Error('expected PromoCodeConfigService.publish() to return the updated config');
+    }
+    return published;
+  }
+
   async function seedBoundConfig(
     overrides: Partial<{
       rewardValueType: 'FIXED_AMOUNT' | 'PERCENTAGE' | 'POINTS';
@@ -189,20 +260,14 @@ describe('T-PC-031 — gRPC server (real mTLS, real Postgres) (e2e)', () => {
   ): Promise<{ tenantId: string; bindRefId: string; configId: string }> {
     const tenantId = freshTenant();
     const actorId = randomUUID();
-    const config = await promoCodeConfigRepository.create(tenantId, {
-      merchantId: null,
-      name: `t-pc-031 e2e config ${randomUUID()}`,
+    const config = await createPublishedConfig(tenantId, actorId, {
       codePrefix: 'GRPC-',
-      codePostfix: null,
-      codeLength: 10,
-      characterSet: 'ALPHANUMERIC',
-      excludeAmbiguousChars: true,
-      rewardValueType: overrides.rewardValueType ?? 'FIXED_AMOUNT',
-      rewardValue: overrides.rewardValue ?? 10,
-      rewardUnit: overrides.rewardUnit ?? 'USD',
-      maxRedemptionsPerCode: 1,
+      ...(overrides.rewardValueType !== undefined
+        ? { rewardValueType: overrides.rewardValueType }
+        : {}),
+      ...(overrides.rewardValue !== undefined ? { rewardValue: overrides.rewardValue } : {}),
+      ...(overrides.rewardUnit !== undefined ? { rewardUnit: overrides.rewardUnit } : {}),
       codeExpiryDays: overrides.codeExpiryDays ?? 30,
-      createdBy: actorId,
     });
     const bindRefId = randomUUID();
     await bindingService.bind({
@@ -377,20 +442,13 @@ describe('T-PC-031 — gRPC server (real mTLS, real Postgres) (e2e)', () => {
   it('TC-8: ListActivePromoCodeConfigs returns the thin summary shape', async () => {
     const tenantId = freshTenant();
     const actorId = randomUUID();
-    const config = await promoCodeConfigRepository.create(tenantId, {
-      merchantId: null,
+    const config = await createPublishedConfig(tenantId, actorId, {
       name: `t-pc-031 tc8 ${randomUUID()}`,
-      codePrefix: null,
-      codePostfix: null,
-      codeLength: 8,
       characterSet: 'NUMERIC',
       excludeAmbiguousChars: false,
       rewardValueType: 'POINTS',
       rewardValue: 100,
       rewardUnit: 'pts',
-      maxRedemptionsPerCode: 1,
-      codeExpiryDays: null,
-      createdBy: actorId,
     });
     const client = allowedClient();
 
@@ -415,35 +473,22 @@ describe('T-PC-031 — gRPC server (real mTLS, real Postgres) (e2e)', () => {
     const tenantId = freshTenant();
     const merchantId = randomUUID();
     const actorId = randomUUID();
-    const tenantWide = await promoCodeConfigRepository.create(tenantId, {
-      merchantId: null,
+    const tenantWide = await createPublishedConfig(tenantId, actorId, {
       name: `t-pc-031 tc9 tenant-wide ${randomUUID()}`,
-      codePrefix: null,
-      codePostfix: null,
-      codeLength: 8,
       characterSet: 'NUMERIC',
       excludeAmbiguousChars: false,
       rewardValueType: 'FIXED_AMOUNT',
       rewardValue: 5,
       rewardUnit: 'USD',
-      maxRedemptionsPerCode: 1,
-      codeExpiryDays: null,
-      createdBy: actorId,
     });
-    const merchantScoped = await promoCodeConfigRepository.create(tenantId, {
+    const merchantScoped = await createPublishedConfig(tenantId, actorId, {
       merchantId,
       name: `t-pc-031 tc9 merchant ${randomUUID()}`,
-      codePrefix: null,
-      codePostfix: null,
-      codeLength: 8,
       characterSet: 'NUMERIC',
       excludeAmbiguousChars: false,
       rewardValueType: 'FIXED_AMOUNT',
       rewardValue: 5,
       rewardUnit: 'USD',
-      maxRedemptionsPerCode: 1,
-      codeExpiryDays: null,
-      createdBy: actorId,
     });
     const client = allowedClient();
 

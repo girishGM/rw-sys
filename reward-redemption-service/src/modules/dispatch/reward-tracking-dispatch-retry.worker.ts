@@ -24,6 +24,18 @@
  * `external_reference_id` — only `reward_tracking_dispatch_retry` rows (`01-DATABASE.md` §7),
  * exactly as `outbox-publisher.service.ts`'s own header documents for its sibling tiers. Decrypts
  * `customerId` only for the duration of one due cycle's attempt(s), never persisting it (R8).
+ *
+ * **T-RR-062** widens `attemptOrder`/`tryChannel` for the new `'GRPC'` `DispatchChannel` value —
+ * without this, a row whose `dispatch_channel_config` re-resolves to `GRPC` at retry time
+ * (implementation note 5 above) would build an empty `attemptOrder` and fail every due cycle with
+ * "no enabled dispatch channel resolved," never actually attempting the transport that was
+ * configured — a real functional gap this task's own widening of `DispatchChannel` would otherwise
+ * silently introduce at this tier. `grpcClient` is appended as the **last** constructor parameter,
+ * `@Optional()`, for the identical reason `outbox-publisher.service.ts` appends its own — this
+ * file's only test (`reward-tracking-dispatch-retry.worker.spec.ts`) is inside this task's own file
+ * scope and updated accordingly, but appending last rather than inserting alongside
+ * `kafkaProducer`/`restClient` costs nothing and keeps both files' constructor-parameter shapes
+ * consistent with each other.
  */
 import {
   Inject,
@@ -47,6 +59,7 @@ import {
 import { toRewardTrackingMessage } from './reward-tracking-outbox.repository';
 import { RewardTrackingKafkaProducerClient } from './reward-tracking-kafka-producer.client';
 import { RewardTrackingRestClient } from './reward-tracking-rest.client';
+import { RewardTrackingGrpcClient } from './reward-tracking-grpc.client';
 import { DispatchMetricsService } from './dispatch-metrics.service';
 import {
   DEFAULT_RETRY_BACKOFF_BASE_MS,
@@ -73,10 +86,19 @@ async function tryChannel(
   topic: string,
   customerId: string,
   message: Record<string, unknown>,
+  grpcClient?: RewardTrackingGrpcClient,
 ): Promise<string | null> {
   try {
     if (channel === 'KAFKA') {
       await kafkaProducer.publish(topic, customerId, message);
+    } else if (channel === 'GRPC') {
+      if (!grpcClient) {
+        throw new Error(
+          'RewardTrackingDispatchRetryWorker: dispatch_channel_config resolved GRPC as a channel ' +
+            'but no RewardTrackingGrpcClient was provided to this instance.',
+        );
+      }
+      await grpcClient.dispatch(message);
     } else {
       await restClient.dispatch(message);
     }
@@ -116,6 +138,9 @@ export class RewardTrackingDispatchRetryWorker implements OnModuleInit, OnModule
     @Optional()
     @Inject(RETRY_WORKER_AUTOSTART)
     private readonly autostart: boolean = true,
+    // T-RR-062: appended last, `@Optional()` — see this file's own header for why.
+    @Optional()
+    private readonly grpcClient?: RewardTrackingGrpcClient,
   ) {}
 
   onModuleInit(): void {
@@ -190,6 +215,10 @@ export class RewardTrackingDispatchRetryWorker implements OnModuleInit, OnModule
     if (resolved.restEnabled && resolved.primaryChannel === 'REST') {
       attemptOrder.push('REST');
     }
+    // T-RR-062.
+    if (resolved.grpcEnabled && resolved.primaryChannel === 'GRPC') {
+      attemptOrder.push('GRPC');
+    }
     if (
       resolved.kafkaEnabled &&
       resolved.fallbackChannel === 'KAFKA' &&
@@ -204,6 +233,14 @@ export class RewardTrackingDispatchRetryWorker implements OnModuleInit, OnModule
     ) {
       attemptOrder.push('REST');
     }
+    // T-RR-062.
+    if (
+      resolved.grpcEnabled &&
+      resolved.fallbackChannel === 'GRPC' &&
+      !attemptOrder.includes('GRPC')
+    ) {
+      attemptOrder.push('GRPC');
+    }
 
     let lastError: string | null = null;
     for (const channel of attemptOrder) {
@@ -214,6 +251,7 @@ export class RewardTrackingDispatchRetryWorker implements OnModuleInit, OnModule
         topic,
         customerId,
         message,
+        this.grpcClient,
       );
       if (error === null) {
         await this.resolve(row.id, channel);

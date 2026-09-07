@@ -21,16 +21,20 @@ export interface DispatchChannelResolveContext {
 }
 
 /**
- * `01-DATABASE.md` §5's own column set, exactly — `kafkaEnabled`/`restEnabled` are never collapsed
- * into `primaryChannel`/`fallbackChannel` (implementation note 5): a channel can be the configured
- * `primary_channel` yet still be individually disabled, and the caller needs both pieces of
- * information independently.
+ * `01-DATABASE.md` §5's own column set, exactly — `kafkaEnabled`/`restEnabled`/`grpcEnabled` are
+ * never collapsed into `primaryChannel`/`fallbackChannel` (implementation note 5): a channel can be
+ * the configured `primary_channel` yet still be individually disabled, and the caller needs both
+ * pieces of information independently.
+ *
+ * `grpcEnabled` added by T-RR-062 — sibling to `kafkaEnabled`/`restEnabled`, same shape, same
+ * "individually disabled" independence.
  */
 export interface ResolvedDispatchChannel {
   primaryChannel: DispatchChannel;
   fallbackChannel: DispatchChannel;
   kafkaEnabled: boolean;
   restEnabled: boolean;
+  grpcEnabled: boolean;
 }
 
 /** TC-8. Thrown instead of returning a hardcoded default when no row resolves at any scope,
@@ -55,6 +59,11 @@ function toResolved(row: DispatchChannelConfigRow): ResolvedDispatchChannel {
     fallbackChannel: row.fallback_channel,
     kafkaEnabled: row.kafka_enabled,
     restEnabled: row.rest_enabled,
+    // T-RR-062: `grpc_enabled` is typed optional on the row (`dispatch-channel-config.model.ts`'s
+    // own header) purely so out-of-scope hand-built test literals that predate this column still
+    // compile — every real row from Postgres always has a real `boolean` here (`DEFAULT false`).
+    // `?? false` reproduces that same safe default for the rare literal that omits it.
+    grpcEnabled: row.grpc_enabled ?? false,
   };
 }
 

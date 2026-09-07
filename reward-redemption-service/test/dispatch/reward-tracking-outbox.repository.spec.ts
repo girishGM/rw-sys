@@ -122,6 +122,15 @@ describe('T-RR-034 — RewardTrackingOutboxRepository', () => {
         externalReferenceId: entry.external_reference_id,
         redeemedAt: entry.redeemed_at?.toISOString(),
         correlationId: entry.correlation_id,
+        // T-RR-062: six new fields (seven, per that task's own "implementation note 1" counting)
+        // — this fixture's own defaults leave every T-RR-062-cross-repo-blocked one `null`.
+        trackerCode: entry.tracker_code,
+        trackerComponentCode: entry.tracker_component_code,
+        merchantCode: entry.merchant_code,
+        expiresAt: null,
+        rewardKind: null,
+        promoCodeConfigId: null,
+        promoCodeConfigVersionNo: null,
       });
       expect(payload).not.toHaveProperty('customerId');
     });

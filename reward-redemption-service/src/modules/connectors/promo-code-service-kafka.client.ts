@@ -35,11 +35,11 @@
  * implementation note 3), never this class.
  */
 import { randomUUID } from 'node:crypto';
-import { Injectable, Logger, type OnModuleDestroy } from '@nestjs/common';
+import { Inject, Injectable, Logger, type OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Kafka, logLevel, type Consumer, type Producer } from 'kafkajs';
 import type { Config } from '@/config/config.schema';
-import type { ServiceConfigResolverService } from '@/modules/service-config/service-config-resolver.service';
+import { ServiceConfigResolverService } from '@/modules/service-config/service-config-resolver.service';
 import type { PromoCodeBindLevel } from './promo-code-service.connector.types';
 import { PromoCodeKafkaRequestReplyRegistry } from './promo-code-kafka-request-reply.registry';
 
@@ -71,6 +71,12 @@ export interface PromoCodeGenerateRequestData {
   bindRefId: string;
   customerId: string;
   merchantId: string | null;
+  /** T-RR-090. Mirrors `PromoCodeGenerateRequest.versionNo` (`promo-code-service.connector.types.ts`)
+   * unchanged — `02-KAFKA-CONTRACTS.md` §3's own `versionNo` field already uses this transport's
+   * native JSON `null` for "absent" (its own worked example literally shows `"versionNo": null`),
+   * so unlike the gRPC client this transport needs no null-representation translation at its own
+   * boundary; `toKafkaRequestData` (`promo-code-service.connector.ts`) passes it straight through. */
+  versionNo: string | null;
   activityContext: {
     amount: string;
     currency: string;
@@ -94,6 +100,10 @@ export interface PromoCodeGenerateResultData {
   expiresAt: string | null;
   errorCode: string | null;
   errorMessage: string | null;
+  /** T-RR-090. Mirrors `PromoCodeGenerateResponse.versionNo` — `02-KAFKA-CONTRACTS.md` §5's own
+   * `versionNo`, "the resolved version_no this code was actually generated under — populated only
+   * on SUCCESS, null on FAILED." */
+  versionNo: string | null;
 }
 
 interface KafkaEnvelope<T> {
@@ -150,6 +160,18 @@ export class PromoCodeServiceKafkaClient implements OnModuleDestroy {
 
   constructor(
     private readonly config: ConfigService<Config, true>,
+    /**
+     * T-RR-081 fix: `PromoCodeKafkaServiceConfigResolver` is an interface (a `Pick<...>`), which
+     * erases to `Object` in TypeScript's emitted `design:paramtypes` metadata — Nest's implicit
+     * constructor injection cannot resolve that back to `ServiceConfigResolverService` on its
+     * own. Explicit `@Inject(ServiceConfigResolverService)` is the same fix already applied at
+     * every other narrow-interface injection site in this codebase
+     * (`OutboxPublisherService`/`RewardTrackingDispatchRetryWorker`'s own
+     * `DispatchServiceConfigResolver` parameters) — without it, any real Nest DI graph that wires
+     * this class (e.g. `ClaimWorkerRootModule`) fails to compile with "Nest can't resolve
+     * dependencies of PromoCodeServiceKafkaClient (ConfigService, ?)".
+     */
+    @Inject(ServiceConfigResolverService)
     private readonly serviceConfig: PromoCodeKafkaServiceConfigResolver,
   ) {}
 
@@ -345,6 +367,8 @@ export class PromoCodeServiceKafkaClient implements OnModuleDestroy {
       expiresAt: data.expiresAt ?? null,
       errorCode: data.errorCode ?? null,
       errorMessage: data.errorMessage ?? null,
+      // T-RR-090.
+      versionNo: data.versionNo ?? null,
     });
   }
 }

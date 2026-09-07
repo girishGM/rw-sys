@@ -227,6 +227,14 @@ describe('proto-codec — round trips', () => {
           level: 'tracker',
           refId: 5,
           status: 'active',
+          // T-173 — this fixture's claim is that the config is **fully** populated, so the five
+          // fields appended to `BoundReward` are given distinctive values rather than left to
+          // decode as zero values. A field absent here is a field this round trip never exercises.
+          expiryValue: 15,
+          expiryUnit: 'minutes',
+          rewardKind: 'POINTS',
+          promoCodeConfigId: '90210',
+          promoCodeConfigVersionNo: 2,
         },
       ],
       caps: [

@@ -57,6 +57,14 @@ export function baseEntryFields(
     external_system_code: 'PROMO_CODE_SERVICE',
     external_reference_id: `PC-${randomUUID()}`,
     redeemed_at: new Date(),
+    // T-RR-062: expires_at (T-RR-063's own column, never previously wired into this fixture's own
+    // INSERT column list below — this task is the first to also read it from an inserted row) and
+    // the three new T-RR-062 columns all default to `null`, the same "nullable means not yet known,
+    // never fabricated" value every real un-overridden row has today.
+    expires_at: null,
+    reward_kind: null,
+    promo_code_config_id: null,
+    promo_code_config_version_no: null,
     ...overrides,
   };
 }
@@ -76,7 +84,7 @@ export async function insertEntry(
         reward_code, reward_category, reward_value, reward_value_unit, reward_entry_date,
         completion_cycle, reward_processed_env, country_code, tenant_code, ingestion_channel,
         status, retry_count, next_attempt_at, external_system_code, external_reference_id,
-        redeemed_at)
+        redeemed_at, expires_at, reward_kind, promo_code_config_id, promo_code_config_version_no)
      VALUES
        (:id, :correlation_id, :tenant_id, :customer_id_encrypted, :customer_id_hash,
         :customer_id_type, :activity_performed_date, :transaction_type, :activity_code,
@@ -85,7 +93,8 @@ export async function insertEntry(
         :tracker_component_code, :merchant_code, :reward_code, :reward_category, :reward_value,
         :reward_value_unit, :reward_entry_date, :completion_cycle, :reward_processed_env,
         :country_code, :tenant_code, :ingestion_channel, :status, :retry_count, :next_attempt_at,
-        :external_system_code, :external_reference_id, :redeemed_at)
+        :external_system_code, :external_reference_id, :redeemed_at, :expires_at, :reward_kind,
+        :promo_code_config_id, :promo_code_config_version_no)
      RETURNING *`,
     { type: QueryTypes.SELECT, replacements: f },
   );

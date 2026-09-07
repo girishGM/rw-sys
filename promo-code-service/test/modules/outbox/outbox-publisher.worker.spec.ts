@@ -128,12 +128,19 @@ describe('T-PC-022 — OutboxPublisherWorker', () => {
     };
   }
 
+  /**
+   * T-PC-060 (defect fix filed against T-PC-058): `code_length`/`character_set`/
+   * `reward_value_type`/`reward_value`/`reward_unit` moved off `promo_code_config` onto the new
+   * `promo_code_config_version` table (migration `T-PC-058_001_split_promo_code_config_version.ts`,
+   * T-PC-059 — a landed dependency). This worker's own tests only ever need a valid
+   * `promo_code_config_id` FK target for `promo_code`/`promo_code_outbox` rows — never a version —
+   * so the fix here is simply to stop inserting the now-dropped columns, not to also seed a version
+   * row nothing in this file reads.
+   */
   async function seedConfig(tenantId: string): Promise<string> {
     const [row] = await sequelize.query<{ id: string }>(
-      `INSERT INTO promo_code.promo_code_config
-         (tenant_id, name, code_length, character_set, reward_value_type, reward_value,
-          reward_unit, created_by, updated_by)
-       VALUES (:tenantId, :name, 8, 'ALPHANUMERIC', 'FIXED_AMOUNT', 10.00, 'USD', :userId, :userId)
+      `INSERT INTO promo_code.promo_code_config (tenant_id, name, status, created_by, updated_by)
+       VALUES (:tenantId, :name, 'ACTIVE', :userId, :userId)
        RETURNING id`,
       {
         type: QueryTypes.SELECT,

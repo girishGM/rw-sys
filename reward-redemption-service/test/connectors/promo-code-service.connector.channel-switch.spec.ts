@@ -148,6 +148,8 @@ function restSuccessBody(): PromoCodeGenerateResponse {
     expiresAt: '',
     errorCode: '',
     errorMessage: '',
+    // T-RR-090.
+    versionNo: null,
   };
 }
 
@@ -184,6 +186,9 @@ let grpcServerResponse: PromoCodeGenerateResponse = {
   expiresAt: '',
   errorCode: '',
   errorMessage: '',
+  // T-RR-090: this is the raw proto message the mock server hands back (not yet through the
+  // client's own null-translation) — proto3's own default for an unset string.
+  versionNo: '',
 };
 
 function startMockGrpcServer(): Promise<{ server: grpc.Server; port: number }> {
@@ -372,6 +377,8 @@ describe('T-RR-080 — PromoCodeServiceConnector, REST-vs-gRPC channel switch', 
       expiresAt: '',
       errorCode: '',
       errorMessage: '',
+      // T-RR-090.
+      versionNo: '',
     };
     const connector = new PromoCodeServiceConnector(
       encryption,
@@ -451,6 +458,8 @@ describe('T-RR-080 — PromoCodeServiceConnector, REST-vs-gRPC channel switch', 
       expiresAt: '',
       errorCode: 'CONFIG_INACTIVE',
       errorMessage: 'binding is inactive',
+      // T-RR-090.
+      versionNo: '',
     };
     const connector = new PromoCodeServiceConnector(
       encryption,

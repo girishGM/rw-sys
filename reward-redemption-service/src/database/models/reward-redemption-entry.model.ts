@@ -59,6 +59,45 @@ export interface RewardRedemptionEntryRow {
   external_system_code: string | null;
   external_reference_id: string | null;
   redeemed_at: Date | null;
+  /** T-RR-063 (migration `020`). The absolute UTC instant this redeemed reward stops being
+   * usable, computed at redemption time from the resolved `BoundReward`'s `expiry_value`/
+   * `expiry_unit` duration (T-173) — `null` when the reward never expires, or when the row has
+   * not yet reached `dispatched_external`/`completed` (the only two writers of this column,
+   * `redemption-state-machine.service.ts`).
+   *
+   * **Deliberately optional (`?`), unlike every sibling nullable column above** (e.g.
+   * `next_attempt_at: Date | null`, always required): this field was appended after several other
+   * tasks' own fixture builders across the tree already constructed full `RewardRedemptionEntryRow`
+   * object literals (e.g. `test/security/connector-credential-leakage.spec.ts`, outside this task's
+   * file scope, R3) — making it required would force an edit to every one of those files just to
+   * keep them compiling, for a column their own tests have no opinion on. `pg`/Sequelize still
+   * always returns the real column (a real `null` for any pre-existing or never-expiring row), so
+   * every actual runtime read remains exactly `Date | null`; `?` only widens what a hand-built test
+   * literal is allowed to omit.
+   */
+  expires_at?: Date | null;
+  /** T-RR-062 (migration `022`, implementation notes 1a/1b). Distinguishes a `PERCENTAGE` reward's
+   * `reward_value` (a rate, never meaningfully summable) from a `FIXED_AMOUNT`/`POINTS` reward's (a
+   * real, additive amount) and from a `PROMO_CODE` reward (tracked as the code itself, never a
+   * redemption value) — the `reward-tracking-service` aggregation-design gap this task's own header
+   * describes. `null` until `realtime-activity-processing-service-plan/tasks/T-RAP-062` (still
+   * `pending`) starts stamping it upstream **and** this service's own Wave 1 ingestion is separately
+   * extended to read it — never fabricated in the meantime. Optional (`?`), same reasoning as
+   * `expires_at` immediately above: several fixture builders across the tree
+   * (e.g. `test/security/connector-credential-leakage.spec.ts`, outside this task's file scope, R3)
+   * already construct full `RewardRedemptionEntryRow` object literals that predate this field. */
+  reward_kind?: 'PERCENTAGE' | 'FIXED_AMOUNT' | 'POINTS' | 'PROMO_CODE' | null;
+  /** T-RR-062 (migration `022`, implementation note 1b). Which promo-code recipe produced this
+   * `reward_kind = 'PROMO_CODE'` entry — `null` for every other `reward_kind`, and `null` for every
+   * row until the same cross-repo blocker as `reward_kind` above lands. This task only persists and
+   * forwards whatever value RAP already stamped; it never calls promo-code-service itself and never
+   * resolves a version on its own (that is `T-RR-082`'s own, distinct scope). Optional (`?`), same
+   * reasoning as `reward_kind`/`expires_at` above. */
+  promo_code_config_id?: string | null;
+  /** T-RR-062 (migration `022`, implementation note 1b). Sibling to `promo_code_config_id` — which
+   * version of that config produced this entry. Optional (`?`), same reasoning as its siblings
+   * above. */
+  promo_code_config_version_no?: number | null;
   created_at: Date;
   updated_at: Date;
 }

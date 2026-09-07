@@ -38,6 +38,10 @@ function makeRow(
     tenant_id: null,
     kafka_enabled: true,
     rest_enabled: true,
+    // T-RR-062: sibling to kafka_enabled/rest_enabled, defaulted `false` here too — matching the
+    // real column's own `DEFAULT false` (migration `021`) so a test that doesn't care about gRPC
+    // gets the exact same "not opted in" behaviour a real, unmigrated-by-hand row would.
+    grpc_enabled: false,
     primary_channel: 'KAFKA',
     fallback_channel: 'REST',
     created_at: new Date(),
@@ -140,6 +144,7 @@ describe('T-RR-033 — DispatchChannelResolverService', () => {
       fallbackChannel: 'REST',
       kafkaEnabled: true,
       restEnabled: true,
+      grpcEnabled: false,
     });
   });
 
@@ -192,6 +197,7 @@ describe('T-RR-033 — DispatchChannelResolverService', () => {
       fallbackChannel: 'KAFKA',
       kafkaEnabled: true,
       restEnabled: true,
+      grpcEnabled: false,
     });
   });
 
@@ -242,6 +248,30 @@ describe('T-RR-033 — DispatchChannelResolverService', () => {
       fallbackChannel: 'REST',
       kafkaEnabled: false,
       restEnabled: true,
+      grpcEnabled: false,
+    });
+  });
+
+  // T-RR-062: grpc_enabled on the resolved row is surfaced as-is, same independence from
+  // primary/fallback channel as kafka_enabled/rest_enabled above (TC-6's own sibling case).
+  it('T-RR-062: grpc_enabled=true on a GRPC-primary resolved row is returned as grpcEnabled: true', async () => {
+    const { resolver } = setup([
+      makeRow({
+        scope_level: 'GLOBAL',
+        primary_channel: 'GRPC',
+        fallback_channel: 'REST',
+        grpc_enabled: true,
+      }),
+    ]);
+
+    const result = await resolver.resolve({});
+
+    expect(result).toEqual({
+      primaryChannel: 'GRPC',
+      fallbackChannel: 'REST',
+      kafkaEnabled: true,
+      restEnabled: true,
+      grpcEnabled: true,
     });
   });
 

@@ -73,6 +73,25 @@ describe('T-PC-041 — input-validation boundary audit (real Postgres/broker) (e
     expect(response.body.name).toBe(SQL_INJECTION_SHAPE);
     await tableStillIntact('promo_code.promo_code_config');
 
+    // T-PC-064: `listSummaries` (`promo-code-config.repository.ts`'s own header, T-PC-058)
+    // deliberately excludes a config with no `published` version yet — "never returned with a
+    // fabricated/`null` payout." This config is still `draft`-only at this point, so the list
+    // round-trip below would find nothing regardless of the injection payload; publish first so
+    // this assertion is actually exercising the byte-for-byte round-trip it claims to, not a
+    // vacuous "list is empty" pass. Same root cause as `E2ETestHarness.createBoundConfig`'s own
+    // missing-publish gap (T-PC-064's own task) — reproduced directly: this test failed with
+    // `expect(stored).toBeDefined()` -> `undefined` before this fix, confirming the list really
+    // was empty, not that the injection payload broke something.
+    const draftVersionId = response.body.draftVersion?.id as string | undefined;
+    if (!draftVersionId) {
+      throw new Error('TC-9: expected a draftVersion on the create response');
+    }
+    const publishResponse = await request(harness.app.getHttpServer())
+      .post(`/api/v1/promo-code-configs/${response.body.id}/versions/${draftVersionId}/publish`)
+      .set(...authHeader())
+      .send({ tenantId, actorId });
+    expect(publishResponse.status).toBe(200);
+
     // Round-trips byte-for-byte through a real read too — never partially executed/truncated.
     const listResponse = await request(harness.app.getHttpServer())
       .get('/api/v1/promo-code-configs')

@@ -40,6 +40,8 @@ describe('T-PC-011 — PromoCodeConfig admin lifecycle (e2e)', () => {
   });
 
   afterAll(async () => {
+    // T-PC-058: see `promo-code-config.service.spec.ts`'s own afterAll comment — this lifecycle
+    // always publishes a version, which blocks deleting the parent `promo_code_config` row.
     for (const tenantId of tenantIds) {
       await sequelize.query(
         `DELETE FROM promo_code.promo_code_config_audit
@@ -48,11 +50,15 @@ describe('T-PC-011 — PromoCodeConfig admin lifecycle (e2e)', () => {
            )`,
         { replacements: { tenantId } },
       );
+      // Childless-only cleanup — see `promo-code-config-version.spec.ts`'s own afterAll comment.
       await sequelize.query(
-        'DELETE FROM promo_code.promo_code_config WHERE tenant_id = :tenantId',
-        {
-          replacements: { tenantId },
-        },
+        `DELETE FROM promo_code.promo_code_config c
+           WHERE c.tenant_id = :tenantId
+             AND NOT EXISTS (
+               SELECT 1 FROM promo_code.promo_code_config_version v
+                WHERE v.promo_code_config_id = c.id
+             )`,
+        { replacements: { tenantId } },
       );
     }
     await sequelize.close();
@@ -69,8 +75,10 @@ describe('T-PC-011 — PromoCodeConfig admin lifecycle (e2e)', () => {
     return ['Authorization', `Bearer ${process.env.INTERNAL_SERVICE_TOKEN}`];
   }
 
-  // TC-16
-  it('create → list (appears) → archive → list (no longer appears)', async () => {
+  // TC-16. T-PC-058: `POST` alone only opens a `draft` version — the config isn't list-visible
+  // until that draft is explicitly published (implementation note 3), so this lifecycle now
+  // includes an explicit publish step between create and the first list assertion.
+  it('create → publish → list (appears) → archive → list (no longer appears)', async () => {
     const tenantId = freshTenant();
     const actorId = randomUUID();
     const name = `t-pc-011 e2e ${randomUUID()}`;
@@ -90,6 +98,14 @@ describe('T-PC-011 — PromoCodeConfig admin lifecycle (e2e)', () => {
       });
     expect(createResponse.status).toBe(201);
     const configId = createResponse.body.id as string;
+    const draftVersionId = createResponse.body.draftVersion.id as string;
+
+    const publishResponse = await request(app.getHttpServer())
+      .post(`/api/v1/promo-code-configs/${configId}/versions/${draftVersionId}/publish`)
+      .set(...authHeader())
+      .send({ tenantId, actorId });
+    expect(publishResponse.status).toBe(200);
+    expect(publishResponse.body.versionStatus).toBe('published');
 
     const listAfterCreate = await request(app.getHttpServer())
       .get('/api/v1/promo-code-configs')

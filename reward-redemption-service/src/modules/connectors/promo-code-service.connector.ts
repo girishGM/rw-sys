@@ -68,6 +68,18 @@
  * documented deviation from this task's own implementation note 2 (gRPC auth is mTLS, not
  * `GENERATION_SERVICE_TOKEN` — confirmed by direct read of the real, already-built server side).
  * `performCall`'s own header documents the tier-selection algorithm actually implemented.
+ *
+ * **T-RR-090.** `buildRequestBody` now stamps the frozen `entry.promo_code_config_version_no`
+ * (`T-RR-062`) onto every request as `versionNo`, on all three channels — this task's own
+ * "shared request-building step, not duplicated per-transport code" requirement (implementation
+ * note 3), since `T-RR-080`/`T-RR-081` had already landed by the time this task started (both
+ * `done` in `progress.json`, neither had defined the field yet). Each transport applies its own
+ * correct null-representation only at its own boundary: `toRestRequestBody` (this file) omits the
+ * key entirely for REST (its real schema is `.optional()`, not `.nullable()` — a literal JSON
+ * `null` is a `400`, confirmed by direct read of the real server-side DTO), `PromoCodeServiceGrpcClient
+ * .generateCode` translates `null <-> ''` at proto3's own boundary, and the Kafka client passes
+ * `null` straight through (that wire contract already uses JSON `null` natively). See
+ * `promo-code-service.connector.types.ts`'s own `versionNo` doc comment for the full reasoning.
  */
 import { Injectable, Logger, OnModuleDestroy, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -173,12 +185,39 @@ function buildRequestBody(
     bindRefId: entry.campaign_code,
     customerId: decryptedCustomerId,
     merchantId: entry.merchant_code ?? '',
+    // T-RR-090. Read off the already-claimed row, never re-resolved (implementation note 1) — `!=
+    // null` catches both `null` and `undefined` (the column is optional, T-RR-062's own precedent
+    // for every entry that predates that stamping) and reduces both to the one legitimate `null`
+    // this connector ever sends. `String(...)` matches every other numeric-typed entry field this
+    // request already coerces to a wire string (`tenantId`, this file's own header note).
+    versionNo:
+      entry.promo_code_config_version_no != null
+        ? String(entry.promo_code_config_version_no)
+        : null,
     activityContext: {
       amount: entry.activity_value,
       currency: entry.activity_value_unit,
       metadataJson: '{}',
     },
   };
+}
+
+/**
+ * T-RR-090. The REST-specific wire body — **omits `versionNo` entirely when `null`, never sends a
+ * literal JSON `null`.** Confirmed by direct read of the real server-side schema
+ * (`promo-code-service/src/modules/generation/dto/generate-code-request.dto.ts`):
+ * `versionNo: z.string().min(1).optional()` — `.optional()`, not `.nullable()`. A JSON body with
+ * `"versionNo": null` fails that validation with a real HTTP `400` (`BadRequestException`,
+ * `parseGenerateCodeRequest`'s own header) instead of falling back to the binding's own pin the way
+ * an *absent* key does — the exact "generates under the wrong recipe, or worse, fails outright"
+ * landmine this task's own header flags. `PromoCodeGenerateRequest.versionNo` itself stays typed
+ * `string | null` (this file's one shared, canonical request shape, used by the gRPC/Kafka call
+ * sites too, each applying their own transport's correct null-representation at their own boundary
+ * — implementation note 3) — only this REST-specific serialization step drops the key.
+ */
+function toRestRequestBody(request: PromoCodeGenerateRequest): Record<string, unknown> {
+  const { versionNo, ...rest } = request;
+  return versionNo !== null ? { ...rest, versionNo } : rest;
 }
 
 /**
@@ -206,6 +245,13 @@ function toKafkaRequestData(request: PromoCodeGenerateRequest): PromoCodeGenerat
     bindRefId: request.bindRefId,
     customerId: request.customerId,
     merchantId: request.merchantId,
+    // T-RR-090. This transport's own wire convention already uses `null` for "absent"
+    // (`02-KAFKA-CONTRACTS.md` §3's own worked example) — passed straight through (bar the
+    // `?? null` normalizing the shared request type's `undefined` — never actually produced by
+    // this connector's own `buildRequestBody`, only possible for a caller-supplied fixture — to
+    // this transport's own single legitimate "absent" value), no other translation needed
+    // (contrast the gRPC client's own proto3-empty-string translation).
+    versionNo: request.versionNo ?? null,
     activityContext: {
       amount: request.activityContext.amount,
       currency: request.activityContext.currency,
@@ -289,6 +335,10 @@ function normalizeKafkaResultData(data: PromoCodeGenerateResultData): PromoCodeG
     expiresAt: data.expiresAt ?? '',
     errorCode: data.errorCode ?? '',
     errorMessage: data.errorMessage ?? '',
+    // T-RR-090. `versionNo` keeps `PromoCodeGenerateResponse`'s genuine `string | null` shape (this
+    // one field is documented nullable even though every other field on this response uses the
+    // always-present-empty-string convention — that file's own header note) — no `?? ''` here.
+    versionNo: data.versionNo ?? null,
   };
 }
 
@@ -425,7 +475,9 @@ export class PromoCodeServiceConnector implements RewardSystemConnector, OnModul
           'Content-Type': 'application/json',
           Authorization: `Bearer ${authToken}`,
         },
-        body: JSON.stringify(requestBody),
+        // T-RR-090: `toRestRequestBody` (this file's own header note) — never send a literal JSON
+        // `versionNo: null`, this endpoint's own schema rejects it with a 400.
+        body: JSON.stringify(toRestRequestBody(requestBody)),
         signal: controller.signal,
       });
     } catch (error) {

@@ -37,6 +37,17 @@ export interface MarkDispatchedExternalInput {
   entryId: string;
   externalSystemCode: string;
   externalReferenceId: string;
+  /**
+   * T-RR-063. The absolute UTC instant this redemption's reward stops being usable, computed by
+   * the caller (`RedemptionProcessingOrchestrator`, via `expiry-computation.ts`'s `computeExpiresAt`)
+   * from the resolved `BoundReward`'s expiry duration — `null` when the reward never expires.
+   *
+   * Optional (not just nullable) purely so every call site/test predating this task that never had
+   * an opinion on expiry keeps compiling unchanged — `undefined` and `null` are treated identically
+   * below (both persist as SQL `NULL`). A real caller (`RedemptionProcessingOrchestrator`) always
+   * supplies it explicitly, having just computed it.
+   */
+  expiresAt?: Date | null;
 }
 
 /** Input for `markRetrying` (`processing`/`retrying` -> `retrying`, §2/§5). */
@@ -127,10 +138,16 @@ export class RedemptionStateMachineService implements OnModuleDestroy {
                external_system_code = $2,
                external_reference_id = $3,
                redeemed_at = now(),
+               expires_at = $4,
                updated_at = now()
          WHERE id = $1
          RETURNING *`,
-        [input.entryId, input.externalSystemCode, input.externalReferenceId],
+        [
+          input.entryId,
+          input.externalSystemCode,
+          input.externalReferenceId,
+          input.expiresAt ?? null,
+        ],
       );
 
       return updated.rows[0];
@@ -142,8 +159,17 @@ export class RedemptionStateMachineService implements OnModuleDestroy {
    * connector for this entry at all. `redeemed_at` is stamped `now()`; `external_system_code`/
    * `external_reference_id` are left untouched (already `NULL`, per §2's own note); no
    * `external_system_call_log` row is written (there was no call to log).
+   *
+   * `expiresAt` (T-RR-063): optional, `Date | null` — same "caller already computed it from the
+   * resolved `BoundReward`'s expiry duration" contract as `MarkDispatchedExternalInput.expiresAt`
+   * above. A second parameter, not folded into an input object, since this method's only other
+   * parameter is already a bare `entryId` string (unlike `markDispatchedExternal`'s existing input
+   * object).
    */
-  async markCompletedDirect(entryId: string): Promise<RewardRedemptionEntryRow> {
+  async markCompletedDirect(
+    entryId: string,
+    expiresAt?: Date | null,
+  ): Promise<RewardRedemptionEntryRow> {
     return this.runInTransaction(async (client) => {
       await this.lockRow(client, entryId, 'flip directly to completed (no connector resolved)', [
         'processing',
@@ -151,10 +177,10 @@ export class RedemptionStateMachineService implements OnModuleDestroy {
 
       const updated = await client.query<RewardRedemptionEntryRow>(
         `UPDATE reward_redemption.reward_redemption_entry
-           SET status = 'completed', redeemed_at = now(), updated_at = now()
+           SET status = 'completed', redeemed_at = now(), expires_at = $2, updated_at = now()
          WHERE id = $1
          RETURNING *`,
-        [entryId],
+        [entryId, expiresAt ?? null],
       );
       return updated.rows[0];
     });

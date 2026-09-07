@@ -13,6 +13,15 @@
 // This client only ever calls `GenerateCode` (T-RR-080's own scope) — `ListActivePromoCodeConfigs`
 // is copied here too purely so this file stays a byte-for-byte mirror of the server's own contract,
 // not because anything in this service calls it.
+//
+// T-RR-090: `version_no` (field 8 on `GenerateCodeRequest`, field 10 on `GenerateCodeResponse`)
+// added to stay a byte-for-byte mirror of the real server-side
+// `promo-code-service/proto/promo_code.v1.proto` (confirmed by direct read — added there by that
+// service's own T-PC-061) — same field numbers, never renumbering 1-7/1-9 above. proto3 default
+// (empty string) is this transport's own "absent" representation, translated at
+// `promo-code-service-grpc.client.ts`'s own boundary to/from this connector's shared `string | null`
+// `versionNo` (`promo-code-service.connector.types.ts`) — never left as a bare empty string past
+// that one translation point.
 
 syntax = "proto3";
 
@@ -37,6 +46,9 @@ message GenerateCodeRequest {
   string customer_id     = 5;
   string merchant_id     = 6;   // optional — empty string if absent
   ActivityContext activity_context = 7;
+  // T-RR-090: optional explicit version pin, frozen at claim time upstream — empty string if
+  // absent, in which case resolution falls back to the binding's own currently-pinned version.
+  string version_no      = 8;
 }
 
 message ActivityContext {
@@ -55,6 +67,9 @@ message GenerateCodeResponse {
   string expires_at          = 7;   // ISO 8601, empty if none
   string error_code          = 8;
   string error_message       = 9;
+  // T-RR-090: the resolved version_no this code was actually generated under — populated only on
+  // SUCCESS, empty string on FAILED (same convention as `code`/`reward_value` above).
+  string version_no          = 10;
 }
 
 message ListActivePromoCodeConfigsRequest {

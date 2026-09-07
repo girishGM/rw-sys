@@ -83,6 +83,9 @@ describe('T-RR-022 — RewardSystemResolutionService', () => {
           level: 'campaign',
           refId: 0,
           status: 'active',
+          // T-RR-063: a real duration set on this BoundReward -- must thread through untouched.
+          expiryValue: 15,
+          expiryUnit: 'minutes',
         },
       ],
     });
@@ -107,7 +110,45 @@ describe('T-RR-022 — RewardSystemResolutionService', () => {
       refId: 0,
       versionNo: 1,
       status: 'active',
+      expiryValue: 15,
+      expiryUnit: 'minutes',
     });
+  });
+
+  // T-RR-063.
+  it("T-RR-063: BoundReward's proto 0/'' expiry sentinel resolves to null/null (never expires), not 0/''", async () => {
+    const config = buildConfig({
+      rewards: [
+        {
+          rewardId: 5,
+          rewardVersionId: 1,
+          versionNo: 1,
+          systemCode: 'CASHBACK_NO_EXPIRY',
+          rewardType: 'CASHBACK',
+          deliveryMode: 'API',
+          policiesJson: '{}',
+          unitType: 'currency',
+          unitCode: 'MYR',
+          level: 'campaign',
+          refId: 0,
+          status: 'active',
+          expiryValue: 0,
+          expiryUnit: '',
+        },
+      ],
+    });
+    const { service } = build(config);
+
+    const result = await service.resolve({
+      tenantId: 1,
+      campaignCode: 'CAMP1',
+      trackerCode: 'TRK1',
+      trackerComponentCode: 'COMP1',
+      rewardCode: 'CASHBACK_NO_EXPIRY',
+    });
+
+    expect(result.expiryValue).toBeNull();
+    expect(result.expiryUnit).toBeNull();
   });
 
   // TC-2.
@@ -127,6 +168,8 @@ describe('T-RR-022 — RewardSystemResolutionService', () => {
           level: 'tracker',
           refId: 100, // the feed's own numeric trackerId for TRK1 — NOT the string "TRK1"
           status: 'active',
+          expiryValue: 0,
+          expiryUnit: '',
         },
       ],
     });
@@ -160,6 +203,8 @@ describe('T-RR-022 — RewardSystemResolutionService', () => {
           level: 'component',
           refId: 1000,
           status: 'active',
+          expiryValue: 0,
+          expiryUnit: '',
         },
       ],
     });
@@ -213,6 +258,8 @@ describe('T-RR-022 — RewardSystemResolutionService', () => {
           level: 'tracker',
           refId: 200, // bound to TRK2, not TRK1
           status: 'active',
+          expiryValue: 0,
+          expiryUnit: '',
         },
       ],
     });
