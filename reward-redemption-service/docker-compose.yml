@@ -1,0 +1,77 @@
+# Local dev broker only (Redpanda, Kafka-API-compatible — ARCHITECTURE.md §4). This service's
+# own `reward_redemption` Postgres schema lives on the ALREADY-RUNNING Postgres 16 server
+# documented in root CLAUDE.md (/Library/PostgreSQL/16) — this file deliberately does NOT start
+# a second Postgres container (T-RR-001 implementation note 5; root CLAUDE.md warns this exact
+# mistake already happened once, accidentally, via Homebrew).
+# `postgres-connectivity-check` below is a one-shot `pg_isready` probe against that real server,
+# not a database of its own.
+#
+# Port collision with the two sibling services' own Redpanda instances, confirmed live on this
+# machine (02-KAFKA-CONTRACTS.md §3): `promo-code-service-redpanda` binds host ports 9092 (Kafka
+# API) / 9644 (Admin API) / 8082 (Pandaproxy); `realtime-activity-processing-service-redpanda`
+# binds 9093 / 9645 / 8083. This service's Redpanda uses the next free ports instead — 9094
+# (Kafka API), 9646 (Admin API, host side only — the container's own internal Admin port stays
+# the Redpanda default 9644), 8084 (Pandaproxy) — plus a distinct `container_name`, so all three
+# services' local dev loops can run at the same time without a bind failure.
+version: '3.8'
+
+services:
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.2.18
+    container_name: reward-redemption-service-redpanda
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp
+      - '1'
+      - --memory
+      - 1G
+      - --reserve-memory
+      - 0M
+      - --node-id
+      - '0'
+      - --check=false
+      - --kafka-addr
+      - PLAINTEXT://0.0.0.0:9094
+      - --advertise-kafka-addr
+      - PLAINTEXT://localhost:9094
+      - --pandaproxy-addr
+      - 0.0.0.0:8084
+      - --advertise-pandaproxy-addr
+      - localhost:8084
+      - --rpc-addr
+      - 0.0.0.0:33147
+      - --advertise-rpc-addr
+      - localhost:33147
+    ports:
+      - '9094:9094' # Kafka API — KAFKA_BROKERS=localhost:9094 in .env.development
+      - '9646:9644' # Admin API (container's own default port, 9644 — never overridden via a
+      # start flag; only the HOST-side mapping moves to 9646 to avoid colliding with the other
+      # two services' own Redpanda instances) — also this healthcheck's own target, from inside
+      # the container, where the real port is still 9644
+      - '8084:8084' # Pandaproxy (REST proxy) — unused by this service today, exposed only
+      # for local debugging with Redpanda's own CLI/UI tooling
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -sf http://localhost:9644/v1/status/ready || exit 1']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # One-shot connectivity probe against the EXISTING Postgres 16 server (root CLAUDE.md) — never
+  # a second Postgres instance. `host.docker.internal` is how Docker Desktop resolves the host
+  # machine from inside a container; override DB_HOST/DB_PORT for a non-default local setup.
+  # Exits 0/1 and stops — `docker compose ps` shows it as "Exited (0)" on success, not "Up",
+  # because it is a probe, not a long-running service.
+  postgres-connectivity-check:
+    image: postgres:16-alpine
+    container_name: reward-redemption-service-postgres-check
+    entrypoint:
+      - sh
+      - -c
+      - >
+        pg_isready -h "${DB_HOST:-host.docker.internal}" -p "${DB_PORT:-5432}" &&
+        echo "Postgres reachable at ${DB_HOST:-host.docker.internal}:${DB_PORT:-5432}" ||
+        (echo "Postgres NOT reachable at ${DB_HOST:-host.docker.internal}:${DB_PORT:-5432}" && exit 1)
+    restart: 'no'

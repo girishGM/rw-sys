@@ -35,6 +35,9 @@ test-app-plan/
 promo-code-service-plan/
 realtime-activity-processing-service-plan/
 scripts/
+reward-redemption-service-plan/
+reward-tracking-service-plan/
+
 
 
 # T-154 — anchored to the repo root: a bare `database/` (no leading slash) matches a directory of

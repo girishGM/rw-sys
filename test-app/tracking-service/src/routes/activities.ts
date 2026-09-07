@@ -29,6 +29,7 @@ import {
 } from '../data/activities';
 import type { RewardLedgerEntry } from '../data/rewards';
 import type { PortalCampaign, PortalCampaignJourney } from '../portal-client/types';
+import { toSubmitActivityRequest } from '../rap-client';
 
 interface ActivityRequestBody {
   readonly customerId?: unknown;
@@ -189,6 +190,43 @@ export function createActivitiesRouter(state: AppState): Router {
         rewards: newRewards,
       };
       state.activities.addEntry(historyEntry);
+
+      // Best-effort, fire-and-forget forward to realtime-activity-processing-service's real
+      // `SubmitActivity` gRPC endpoint — RAP runs its own independent, real rule-evaluation/
+      // reward-issuance pipeline against this same activity, purely additive to (never a
+      // replacement for) this service's own in-memory engine above. Deliberately NOT awaited
+      // before responding: this endpoint's own response/behaviour for its own caller must never
+      // depend on RAP being reachable (it usually won't be — RAP's own CLAUDE.md documents its
+      // gRPC server as not started anywhere by default, even locally). Every failure mode
+      // (unreachable, timed out, rejected) is caught right here and only logged — matches the
+      // same "an optional integration must never break the demo" contract this app's own
+      // promo-code-client integration already established (see engine/reward.ts's
+      // resolvePromoCode).
+      if (state.rap) {
+        const rapRequest = toSubmitActivityRequest({
+          activityId,
+          customerId,
+          activityType,
+          merchant,
+          amount,
+        });
+        state.rap
+          .submitActivity(rapRequest)
+          .then((response) => {
+            console.info(
+              `rap-client: SubmitActivity accepted for activity ${activityId} ` +
+                `(status=${response.status}, correlationId=${response.correlationId}, ` +
+                `matchedTrackerComponents=[${response.matchedTrackerComponents.join(', ')}])`,
+            );
+          })
+          .catch((error: unknown) => {
+            const message = error instanceof Error ? error.message : String(error);
+            console.warn(
+              `rap-client: SubmitActivity failed for activity ${activityId} (non-fatal, this ` +
+                `app's own response is unaffected): ${message}`,
+            );
+          });
+      }
 
       res.status(200).json({
         data: {
