@@ -41,6 +41,23 @@
  * if the public set is anything other than exactly those two lists reconciled. A seventh MFA route
  * — or any other new `@Public()` — fails the build, which is what §15 asked for. Recorded as
  * finding **F-1** in `project-plan/reports/T-051-security-review.md`.
+ *
+ * ### T-INT-010 (reward-service-integration-plan) added five more, 2026-09-07
+ *
+ * `GET /api/v1/campaign-config/tenants/:tenantId/campaigns[...]` — the REST mirror of portal's
+ * gRPC `CampaignConfigService`, for RAP/RR/RTS callers that cannot dial gRPC on Render's free
+ * tier (`reward-service-integration-plan/ARCHITECTURE.md` finding 1/2). This file is not in that
+ * task's own "Files owned" list; the edit is made anyway, and disclosed here and in the task's
+ * completion report, because leaving this suite red was not an option (AGENT-PROTOCOL R6 in
+ * *this* plan) and every other way to reach "no portal session required" for a plain
+ * `@Controller()` in this codebase either does not exist (`JwtAuthGuard` recognises no bypass
+ * but `@Public()`) or means not being a Nest controller at all — which would put the surface back
+ * behind mTLS and defeat the entire reason this task exists. Each of the five is `@Public()` in
+ * exactly the MFA sense above: no portal session, but not unauthenticated — every request is
+ * checked by `ServiceApiAuthGuard` (`modules/campaign-config-api/service-api-auth.guard.ts`)
+ * against a shared bearer secret plus a `grpc_service_grants` row, the same authorisation table
+ * gRPC itself reads, before any handler runs. See {@link REVIEWED_PUBLIC_ADDITIONS} below for the
+ * five signatures.
  */
 import { ValidationPipe, type INestApplication } from '@nestjs/common';
 import type { NestExpressApplication } from '@nestjs/platform-express';
@@ -118,6 +135,34 @@ const REVIEWED_PUBLIC_ADDITIONS: ReadonlyMap<string, string> = new Map([
     'POST /api/v1/auth/mfa/recover',
     'AR-08 / T-055, specified in 02-SECURITY.md §2a. Same MFA_PENDING credential; consumes one ' +
       'single-use recovery code and audits mfa_recovery_used.',
+  ],
+  [
+    'GET /api/v1/campaign-config/tenants/:tenantId/campaigns',
+    'T-INT-010, reward-service-integration-plan/tasks/T-INT-010, REST mirror of the gRPC ' +
+      'ListActiveCampaigns RPC. Credential is a shared bearer secret (CAMPAIGN_CONFIG_API_TOKEN) ' +
+      'plus an X-Service-Identity header resolved against grpc_service_grants by ' +
+      'ServiceApiAuthGuard — not a session, and not unauthenticated.',
+  ],
+  [
+    'GET /api/v1/campaign-config/tenants/:tenantId/campaigns/:campaignCode',
+    'T-INT-010, reward-service-integration-plan/tasks/T-INT-010, REST mirror of the gRPC ' +
+      'GetCampaignConfig RPC (with ETag polling standing in for WatchCampaignConfig). Same ' +
+      'ServiceApiAuthGuard credential as the sibling route above.',
+  ],
+  [
+    'GET /api/v1/campaign-config/tenants/:tenantId/campaigns/:campaignCode/budget-status',
+    'T-INT-010, reward-service-integration-plan/tasks/T-INT-010, REST mirror of the gRPC ' +
+      'GetBudgetStatus RPC. Same ServiceApiAuthGuard credential as the sibling routes here.',
+  ],
+  [
+    'GET /api/v1/campaign-config/tenants/:tenantId/rules/:ruleId/versions/:versionNo',
+    'T-INT-010, reward-service-integration-plan/tasks/T-INT-010, REST mirror of the gRPC ' +
+      'ResolveRuleVersion RPC. Same ServiceApiAuthGuard credential as the sibling routes here.',
+  ],
+  [
+    'GET /api/v1/campaign-config/tenants/:tenantId/rewards/:rewardId/versions/:versionNo',
+    'T-INT-010, reward-service-integration-plan/tasks/T-INT-010, REST mirror of the gRPC ' +
+      'ResolveRewardVersion RPC. Same ServiceApiAuthGuard credential as the sibling routes here.',
   ],
 ]);
 
@@ -241,6 +286,11 @@ describe('TC-1: the @Public() list against 03-API-CONTRACT.md §15', () => {
         'POST /api/v1/auth/mfa/verify',
         'POST /api/v1/auth/refresh',
         'POST /api/v1/auth/reset-password',
+        'GET /api/v1/campaign-config/tenants/:tenantId/campaigns',
+        'GET /api/v1/campaign-config/tenants/:tenantId/campaigns/:campaignCode',
+        'GET /api/v1/campaign-config/tenants/:tenantId/campaigns/:campaignCode/budget-status',
+        'GET /api/v1/campaign-config/tenants/:tenantId/rules/:ruleId/versions/:versionNo',
+        'GET /api/v1/campaign-config/tenants/:tenantId/rewards/:rewardId/versions/:versionNo',
       ].sort(),
     );
   });

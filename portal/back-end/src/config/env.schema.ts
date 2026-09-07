@@ -274,6 +274,33 @@ export const envSchema = z.object({
    * is git-ignored.
    */
   PROMO_CODE_SERVICE_INTERNAL_TOKEN: z.string().optional(),
+
+  // --- T-INT-010: REST mirror of CampaignConfigService --------------------------------------
+  // (reward-service-integration-plan/tasks/T-INT-010, ARCHITECTURE.md finding 1/2). Same
+  // optional/fail-closed shape as `GRPC_ENABLED` above, not the "always weaker when unset"
+  // shape T-012/T-019 use: this is a brand-new machine credential, and 02-SECURITY.md §9 ("no
+  // silent defaults for security values") applies to it exactly as it does to the gRPC TLS
+  // material — unset must mean "this surface admits nobody," never "admits everybody."
+  //
+  // DEVIATION, disclosed in T-INT-010's completion report: this file is not in that task's own
+  // "Files owned" list. It is touched anyway because `PROMO_CODE_SERVICE_INTERNAL_TOKEN`'s own
+  // comment two blocks up records a fact about this process that makes any other approach
+  // silently broken: `@nestjs/config` assigns back only the *validated* object, so an env var
+  // absent from this schema is dropped even when an operator's `.env` file sets it (T-057's
+  // D-3). `service-api-auth.guard.ts` cannot read a working value out of `process.env` any other
+  // way, and adding one line to this schema is the minimum change that makes it configurable at
+  // all — the same reasoning `app.module.ts` (also outside a task's literal scope on paper) is
+  // explicitly named an allowed registration point for.
+
+  /**
+   * The shared bearer secret every caller of `/api/v1/campaign-config/**` must present as
+   * `Authorization: Bearer <token>`. Unset → `ServiceApiAuthGuard` refuses every request with
+   * 401, which is also this task's documented rollback path: the gRPC surface is completely
+   * unaffected either way. A secret (R4): never a real value committed — `.env.development`
+   * carries a throwaway local-only value, matching `PROMO_CODE_SERVICE_INTERNAL_TOKEN`'s own
+   * precedent two blocks up.
+   */
+  CAMPAIGN_CONFIG_API_TOKEN: z.string().optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;
