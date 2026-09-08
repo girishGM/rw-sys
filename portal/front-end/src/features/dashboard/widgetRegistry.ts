@@ -17,6 +17,16 @@
  * `./widgets/api.ts` has called since this file was written, and enumerates the same 22 keys
  * independently (`dashboard.constants.ts#WIDGET_KEY`) so a typo on either side is a compile
  * error, not a silently-blank tile. Nothing in this file's mapping changed.
+ *
+ * **T-INT-031 (`reward-service-integration-plan`, 2026-09-08):** two new keys,
+ * `kpi_reward_tracking_alerts`/`list_campaign_reward_progress`, seeded for all six roles by
+ * `T174_001_seed_reward_tracking_dashboard_widgets.ts`. Unlike every key above, neither goes
+ * through `dashboard.constants.ts#WIDGET_KEY`/`GET /dashboard/widgets/:widgetKey` at all — both
+ * source from `reward-tracking-integration`'s own separate proxy
+ * (`GET /dashboard/reward-tracking/alerts`, T-INT-030) via a dedicated fetch in
+ * `./widgets/RewardTrackingSummaryWidget.tsx`, so neither component is built with
+ * `createKpiWidget`/`createListWidget` — see that file's own header for why `alerts` is the one
+ * endpoint of that proxy's five that every role can call identically.
  */
 import type { ComponentType } from 'react';
 import {
@@ -33,6 +43,8 @@ import {
 import { createChartWidget } from './widgets/ChartWidget';
 import { createKpiWidget } from './widgets/KpiWidget';
 import { createListWidget } from './widgets/ListWidget';
+import { CampaignProgressWidget } from './widgets/CampaignProgressWidget';
+import { RewardTrackingSummaryWidget } from './widgets/RewardTrackingSummaryWidget';
 import type { WidgetProps } from './widgets/types';
 
 export const WIDGET_REGISTRY: Record<string, ComponentType<WidgetProps>> = {
@@ -76,4 +88,8 @@ export const WIDGET_REGISTRY: Record<string, ComponentType<WidgetProps>> = {
   list_approval_queue: createListWidget('list_approval_queue', {
     emptyMessage: 'The approval queue is empty',
   }),
+
+  // --- T-INT-031 — reward-tracking-service admin rollups (leg 8) ----------------------------
+  kpi_reward_tracking_alerts: RewardTrackingSummaryWidget,
+  list_campaign_reward_progress: CampaignProgressWidget,
 };

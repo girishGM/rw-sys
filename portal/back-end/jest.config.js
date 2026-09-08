@@ -154,6 +154,15 @@ module.exports = {
     // this file's concern — `test/jest-e2e.json` has no `roots` restriction and picks up any
     // `*.e2e-spec.ts` under `test/` on its own).
     '<rootDir>/../test/modules/campaign-config-api',
+    // T-INT-030 (reward-service-integration-plan): same arrangement once more for
+    // `src/modules/reward-tracking-integration/**`, whose unit specs the task file places in
+    // `test/modules/reward-tracking-integration/`, the same `test/modules/` top-level directory
+    // T-INT-010 established immediately above (this plan's tasks are not scoped to a single
+    // `src/modules/*` subtree ahead of time). This file is not in T-INT-030's own "Files owned"
+    // list; the one-line append is made anyway, disclosed in the completion report, for the
+    // identical reason T-INT-010's own comment above gives: a new test directory is invisible to
+    // `npm test` until it is registered here.
+    '<rootDir>/../test/modules/reward-tracking-integration',
   ],
   testRegex: '.*\\.spec\\.ts$',
   transform: {

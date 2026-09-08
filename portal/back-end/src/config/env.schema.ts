@@ -301,6 +301,40 @@ export const envSchema = z.object({
    * precedent two blocks up.
    */
   CAMPAIGN_CONFIG_API_TOKEN: z.string().optional(),
+
+  // --- T-INT-030: portal-backend client for RTS's admin-rewards API (leg 8) -------------------
+  // (reward-service-integration-plan/tasks/T-INT-030-portal-rts-admin-client.md). Same disclosed
+  // deviation T-INT-010 already recorded two blocks up, for the identical structural reason:
+  // `@nestjs/config` assigns back only the *validated* object, and zod strips unknown keys, so a
+  // client reading `process.env` directly would see `undefined` for a value an operator did set.
+  // This file is not in T-INT-030's own "Files owned" list; edited anyway, disclosed here and in
+  // that task's completion report.
+
+  /**
+   * The shared HMAC secret both this portal (minting) and reward-tracking-service (verifying,
+   * `PORTAL_ADMIN_API_AUTH_SECRET` on that side — same env var name, deliberately, since it is one
+   * shared secret) use for the short-lived RTS-specific bearer token this leg mints per dashboard
+   * call. Base64-encoded, >= 32 bytes once decoded (`reward-tracking-admin-token.ts`'s own
+   * validation). Unset → `RewardTrackingAdminTokenService` refuses to construct, which fails this
+   * process's boot rather than its first dashboard request (R4: no default, no fallback — this is
+   * a machine credential, not a weaker-when-unset knob).
+   */
+  PORTAL_ADMIN_API_AUTH_SECRET: z.string().optional(),
+
+  /**
+   * Base URL of a locally- or remotely-running reward-tracking-service instance
+   * (`http://localhost:3040` locally, matching that service's own default `PORT`). No trailing
+   * slash required — `RewardTrackingRestClient` normalises. Unset → every dashboard call refuses
+   * with a 502 rather than dialing an empty string.
+   */
+  REWARD_TRACKING_SERVICE_BASE_URL: z.string().optional(),
+
+  /**
+   * How long a minted RTS token stays valid, in seconds. Optional — unset falls back to
+   * `RewardTrackingAdminTokenService`'s own default (60s), which comfortably covers one outbound
+   * dashboard call and nothing more; this token is never persisted or reused across requests.
+   */
+  REWARD_TRACKING_ADMIN_TOKEN_TTL_SECONDS: z.coerce.number().int().positive().optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;

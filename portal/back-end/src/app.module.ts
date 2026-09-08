@@ -33,6 +33,7 @@ import { CampaignAgentModule } from '@/modules/campaign-agent/agent.module';
 import { DashboardModule } from '@/modules/dashboard/dashboard.module';
 import { FieldValueSourcesModule } from '@/modules/field-value-sources/field-value-sources.module';
 import { CampaignConfigApiModule } from '@/modules/campaign-config-api/campaign-config-api.module';
+import { RewardTrackingIntegrationModule } from '@/modules/reward-tracking-integration/reward-tracking-integration.module';
 
 /**
  * Append-only registration point (05-EXECUTION-PLAN.md §3): each task adds its own module
@@ -241,6 +242,14 @@ import { CampaignConfigApiModule } from '@/modules/campaign-config-api/campaign-
   // `test/security/route-inventory.e2e-spec.ts`. No global guard, interceptor or filter of its
   // own, so its position here carries no ordering meaning; listed last, alongside every other
   // Wave-appended feature module above.
+  // T-INT-030 (reward-service-integration-plan) appended RewardTrackingIntegrationModule
+  // (`/dashboard/reward-tracking/**`) — leg 8's portal-backend client for RTS's real
+  // `AdminRewardsController`, minting the RTS-specific HMAC bearer token that guard's own header
+  // documented as portal-owned follow-up work. Unlike `CampaignConfigApiModule` above, every route
+  // here stays behind the already-global `JwtAuthGuard`/`RolesGuard` chain (no `@Public()`) — this
+  // is a browser-session-authenticated dashboard proxy, not a machine-to-machine surface — so it
+  // registers no global guard, interceptor or filter of its own; its position here carries no
+  // ordering meaning. Listed last, alongside every other Wave-appended module.
   imports: [
     LoggerModule,
     TracingModule,
@@ -276,6 +285,7 @@ import { CampaignConfigApiModule } from '@/modules/campaign-config-api/campaign-
     DashboardModule,
     FieldValueSourcesModule,
     CampaignConfigApiModule,
+    RewardTrackingIntegrationModule,
   ],
 })
 export class AppModule {}
