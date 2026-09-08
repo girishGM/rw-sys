@@ -3,6 +3,14 @@
  * `reward-redemption-entry.migration.spec.ts`'s header (T-RR-002) for this suite's own
  * conventions. `scope_ref_code` values here are randomized per run so parallel runs never
  * collide with each other or with the one real seeded `GLOBAL` row.
+ *
+ * TC-4 (below) originally asserted `primary_channel='KAFKA'`, migration `006`'s own seeded value.
+ * T-INT-001's migration `023` (`reward-service-integration-plan/ARCHITECTURE.md` §4 — every
+ * `GLOBAL` row defaults to REST now, per the user's explicit "Render can't run gRPC/Kafka today"
+ * instruction) flips that seeded row's `primary_channel` to `'REST'` as an appended migration, not
+ * a rewrite of `006` itself (append-only migration discipline, same as `019`/`020`/`021`'s own
+ * precedent) — so this suite's own assertion is updated to match the schema's real, current,
+ * fully-migrated state rather than pinned to `006`'s now-superseded seed value.
  */
 import 'reflect-metadata';
 import { randomUUID } from 'node:crypto';
@@ -27,9 +35,12 @@ describe('T-RR-003 — dispatch_channel_config migration', () => {
     await sequelize.close();
   });
 
-  // TC-4: exactly one GLOBAL row exists immediately after migration, KAFKA primary / REST
-  // fallback — the resolver's own last-resort fallback (T-RR-003 note 2).
-  it('TC-4: exactly one GLOBAL row exists, primary_channel=KAFKA, fallback_channel=REST', async () => {
+  // TC-4: exactly one GLOBAL row exists immediately after migration, REST primary / REST
+  // fallback (T-INT-001, migration `023`) — the resolver's own last-resort fallback (T-RR-003
+  // note 2) still resolves to a real, enabled channel either way; kafka_enabled stays `true`
+  // (Kafka remains fully available, just no longer the default primary — see this file's own
+  // header for why).
+  it('TC-4: exactly one GLOBAL row exists, primary_channel=REST, fallback_channel=REST, kafka still enabled', async () => {
     const rows = await sequelize.query<DispatchChannelConfigRow>(
       "SELECT * FROM reward_redemption.dispatch_channel_config WHERE scope_level = 'GLOBAL'",
       { type: QueryTypes.SELECT },
@@ -37,8 +48,9 @@ describe('T-RR-003 — dispatch_channel_config migration', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].scope_ref_code).toBeNull();
     expect(rows[0].tenant_id).toBeNull();
-    expect(rows[0].primary_channel).toBe('KAFKA');
+    expect(rows[0].primary_channel).toBe('REST');
     expect(rows[0].fallback_channel).toBe('REST');
+    expect(rows[0].kafka_enabled).toBe(true);
   });
 
   // T-RR-003 note 1's own documented, deliberately-not-fixed behavior: standard SQL/Postgres
