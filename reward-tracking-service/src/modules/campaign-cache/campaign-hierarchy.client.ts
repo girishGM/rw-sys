@@ -34,6 +34,40 @@
  * did not silently work around: the portal's wire contract carries no campaign-level display
  * `name`, and no owner-contact field yet (`BACKLOG.md` RS-01) — `campaignName`/`ownerContact` are
  * always persisted as `null` today; see `persistCampaign` below.
+ *
+ * **T-INT-013 amendment.** Adds the REST fallback + config-driven resolver
+ * `ARCHITECTURE.md` §4/`TRANSPORT-CONFIG.md` describe for this leg
+ * (`reward_tracking.portal_config_channel_config`, migration `009`) on top of everything above —
+ * per that task's own implementation note 2, **this class's public constructor and method
+ * signatures do not change**: `campaign-cache.module.ts`'s own factory provider (out of this
+ * task's "Files owned" scope) constructs this client via
+ * `new CampaignHierarchyClient(loadCampaignHierarchyClientOptions(), repository)` and nothing
+ * about that call site may need to change. `PortalConfigChannelResolverService` and
+ * `PortalConfigRestClient` are therefore constructed **internally**, from their own
+ * env-loaded/DB-loaded config, exactly the way this class's own gRPC client is already built
+ * internally from `options` — not constructor-injected.
+ *
+ * **What actually changed**: `listActiveCampaigns`/`getCampaignConfig` (this file's "low-level
+ * transport" section) are now resolver-aware orchestrators — they resolve the leg's configured
+ * primary/fallback channel (`resolveChannel`) and try each enabled channel in order
+ * (`callWithFallback`), REST via `PortalConfigRestClient`, gRPC via this class's own existing
+ * `@grpc/grpc-js` wrapper (unchanged, renamed `*ViaGrpc`). `watchCampaignConfig`/`startWatching`
+ * stay gRPC-only — REST has no streaming equivalent (`campaign-config-api.controller.ts`'s own
+ * header: its `GetCampaignConfig` mirror only offers etag-based polling, not a push stream), and
+ * this task's own TCs never test invalidation delivery over REST — gRPC remains the one live
+ * change-notification channel regardless of which transport is primary for the warm/refetch path;
+ * REST-primary deployments still get eventual consistency the same way every transport already
+ * did before this task, via the portal's own 5-minute cache TTL as a backstop
+ * (`loadCampaignHierarchyClientOptions`'s own header). Deliberate, disclosed interpretation of a
+ * genuine ambiguity — see this task's own completion report's "Deviations" section.
+ *
+ * **Resolver-failure and REST-misconfiguration are both treated as "never gates" conditions**,
+ * matching this class's own R1 contract above: a channel-resolution error (DB unreachable, table
+ * missing, no GLOBAL row) logs a warning and defaults to `{primary: GRPC, fallback: REST}` — this
+ * class's exact pre-T-INT-013 behavior — rather than throwing; a REST-client construction failure
+ * (missing `PORTAL_CAMPAIGN_CONFIG_API_TOKEN`/`PORTAL_SERVICE_IDENTITY`) is caught once in the
+ * constructor and simply makes every REST attempt fail closed (falls through to gRPC) rather than
+ * crashing the process.
  */
 import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
 import { join } from 'node:path';
@@ -41,6 +75,16 @@ import { readFileSync } from 'node:fs';
 import * as grpc from '@grpc/grpc-js';
 import * as protoLoader from '@grpc/proto-loader';
 import type { CampaignHierarchyCacheWriter } from './campaign-hierarchy-cache.repository';
+import {
+  PortalConfigChannelResolverService,
+  PortalConfigChannelResolutionError,
+  type PortalConfigChannel,
+  type ResolvedPortalConfigChannel,
+} from './portal-config-channel-resolver.service';
+import {
+  PortalConfigRestClient,
+  loadPortalConfigRestClientOptions,
+} from './portal-config-rest.client';
 
 export type ConfigSectionName = 'BASIC' | 'MERCHANTS' | 'TRACKERS' | 'RULES' | 'REWARDS' | 'CAPS';
 
@@ -300,6 +344,10 @@ export class CampaignHierarchyClient implements OnModuleInit, OnModuleDestroy {
   private readonly reconnectTimers = new Map<number, NodeJS.Timeout>();
   private destroyed = false;
 
+  // T-INT-013 — constructed internally, not constructor-injected (this file's own header).
+  private readonly channelResolver: PortalConfigChannelResolverService;
+  private readonly restClient: PortalConfigRestClient | null;
+
   constructor(
     options: CampaignHierarchyClientOptions,
     private readonly repository: CampaignHierarchyCacheWriter,
@@ -325,6 +373,19 @@ export class CampaignHierarchyClient implements OnModuleInit, OnModuleDestroy {
       `${options.host}:${options.port}`,
       credentials,
     ) as RawCampaignConfigServiceClient;
+
+    this.channelResolver = new PortalConfigChannelResolverService();
+    try {
+      this.restClient = new PortalConfigRestClient(loadPortalConfigRestClientOptions());
+    } catch (error) {
+      // R1 / this file's own header: a REST-misconfiguration never gates this class — every REST
+      // attempt below just fails closed (`restClient === null`) and falls through to gRPC.
+      this.logger.warn(
+        `portal-config REST transport unavailable (${describeError(error)}) — REST attempts will ` +
+          'fail closed and fall back to GRPC whenever REST is selected as primary or fallback.',
+      );
+      this.restClient = null;
+    }
   }
 
   private deadline(): grpc.CallOptions {
@@ -333,11 +394,46 @@ export class CampaignHierarchyClient implements OnModuleInit, OnModuleDestroy {
 
   // -------------------------------------------------------------------------------------------
   // Low-level transport (thin wrappers, no persistence).
+  //
+  // T-INT-013: `listActiveCampaigns`/`getCampaignConfig` are now resolver-aware orchestrators —
+  // see `resolveChannel`/`callWithFallback` below. The original gRPC-only bodies are unchanged,
+  // just renamed `*ViaGrpc`; `*ViaRest` are new. `watchCampaignConfig` stays gRPC-only (this
+  // file's own header amendment on why).
   // -------------------------------------------------------------------------------------------
 
   async listActiveCampaigns(
     tenantId: number,
     sections: readonly ConfigSectionName[] = DEFAULT_CONFIG_SECTIONS,
+  ): Promise<CampaignConfigListProto> {
+    const resolved = await this.resolveChannel({ tenantId });
+    return this.callWithFallback(
+      resolved,
+      () => this.listActiveCampaignsViaRest(tenantId, sections),
+      () => this.listActiveCampaignsViaGrpc(tenantId, sections),
+    );
+  }
+
+  async getCampaignConfig(
+    tenantId: number,
+    campaignCode: string,
+    sections: readonly ConfigSectionName[] = DEFAULT_CONFIG_SECTIONS,
+    etag = '',
+  ): Promise<CampaignConfigProto> {
+    const resolved = await this.resolveChannel({ tenantId, campaignCode });
+    return this.callWithFallback(
+      resolved,
+      () => this.getCampaignConfigViaRest(tenantId, campaignCode, sections, etag),
+      () => this.getCampaignConfigViaGrpc(tenantId, campaignCode, sections, etag),
+    );
+  }
+
+  watchCampaignConfig(tenantId: number): grpc.ClientReadableStream<ConfigChangeEventProto> {
+    return this.client.watchCampaignConfig({ tenantId }, new grpc.Metadata());
+  }
+
+  private async listActiveCampaignsViaGrpc(
+    tenantId: number,
+    sections: readonly ConfigSectionName[],
   ): Promise<CampaignConfigListProto> {
     return new Promise((resolve, reject) => {
       this.client.listActiveCampaigns(
@@ -355,11 +451,11 @@ export class CampaignHierarchyClient implements OnModuleInit, OnModuleDestroy {
     });
   }
 
-  async getCampaignConfig(
+  private async getCampaignConfigViaGrpc(
     tenantId: number,
     campaignCode: string,
-    sections: readonly ConfigSectionName[] = DEFAULT_CONFIG_SECTIONS,
-    etag = '',
+    sections: readonly ConfigSectionName[],
+    etag: string,
   ): Promise<CampaignConfigProto> {
     return new Promise((resolve, reject) => {
       this.client.getCampaignConfig(
@@ -377,8 +473,96 @@ export class CampaignHierarchyClient implements OnModuleInit, OnModuleDestroy {
     });
   }
 
-  watchCampaignConfig(tenantId: number): grpc.ClientReadableStream<ConfigChangeEventProto> {
-    return this.client.watchCampaignConfig({ tenantId }, new grpc.Metadata());
+  private async listActiveCampaignsViaRest(
+    tenantId: number,
+    sections: readonly ConfigSectionName[],
+  ): Promise<CampaignConfigListProto> {
+    if (!this.restClient) {
+      throw new Error('portal-config REST transport is not configured (see constructor warning)');
+    }
+    return this.restClient.listActiveCampaigns(tenantId, sections);
+  }
+
+  private async getCampaignConfigViaRest(
+    tenantId: number,
+    campaignCode: string,
+    sections: readonly ConfigSectionName[],
+    etag: string,
+  ): Promise<CampaignConfigProto> {
+    if (!this.restClient) {
+      throw new Error('portal-config REST transport is not configured (see constructor warning)');
+    }
+    return this.restClient.getCampaignConfig(tenantId, campaignCode, sections, etag);
+  }
+
+  /**
+   * Resolves which channel is primary/fallback for this call (`PortalConfigChannelResolverService`,
+   * migration `009`). Never throws (R1): a resolution failure — DB unreachable, table missing, no
+   * `GLOBAL` row — logs a warning and defaults to `{primary: GRPC, fallback: REST}`, this class's
+   * exact pre-T-INT-013 behavior, so a misconfigured/un-migrated environment degrades to "acts like
+   * this task never landed" rather than crashing.
+   */
+  private async resolveChannel(context: {
+    tenantId?: number;
+    campaignCode?: string;
+  }): Promise<ResolvedPortalConfigChannel> {
+    try {
+      return await this.channelResolver.resolve(context);
+    } catch (error) {
+      const reason =
+        error instanceof PortalConfigChannelResolutionError
+          ? 'no portal_config_channel_config row resolved, not even GLOBAL'
+          : describeError(error);
+      this.logger.warn(
+        `portal-config channel resolution failed (${reason}) — defaulting to GRPC primary / REST ` +
+          "fallback, this class's own pre-T-INT-013 behavior.",
+      );
+      return {
+        primaryChannel: 'GRPC',
+        fallbackChannel: 'REST',
+        restEnabled: true,
+        grpcEnabled: true,
+      };
+    }
+  }
+
+  /**
+   * Tries the resolved primary channel, then the resolved fallback (only if different and
+   * enabled) — TC-2 (REST primary succeeds → the gRPC closure is never invoked, since this loop
+   * only calls a channel's closure when that channel's own turn comes up), TC-3 (REST primary
+   * fails → gRPC fallback attempted and succeeds). A channel `enabled: false` in the resolved
+   * config is skipped with a warning rather than attempted.
+   */
+  private async callWithFallback<T>(
+    resolved: ResolvedPortalConfigChannel,
+    restCall: () => Promise<T>,
+    grpcCall: () => Promise<T>,
+  ): Promise<T> {
+    const callFor = (channel: PortalConfigChannel): (() => Promise<T>) =>
+      channel === 'REST' ? restCall : grpcCall;
+    const isEnabled = (channel: PortalConfigChannel): boolean =>
+      channel === 'REST' ? resolved.restEnabled : resolved.grpcEnabled;
+
+    const attempts: PortalConfigChannel[] = [resolved.primaryChannel];
+    if (resolved.fallbackChannel !== resolved.primaryChannel) {
+      attempts.push(resolved.fallbackChannel);
+    }
+
+    let lastError: unknown;
+    for (const channel of attempts) {
+      if (!isEnabled(channel)) {
+        this.logger.warn(`portal-config channel ${channel} is disabled by config — skipping.`);
+        continue;
+      }
+      try {
+        return await callFor(channel)();
+      } catch (error) {
+        lastError = error;
+        this.logger.warn(`portal-config ${channel} attempt failed: ${describeError(error)}`);
+      }
+    }
+
+    throw lastError ?? new Error('portal-config: no enabled transport available');
   }
 
   // -------------------------------------------------------------------------------------------
@@ -561,6 +745,16 @@ export class CampaignHierarchyClient implements OnModuleInit, OnModuleDestroy {
       clearTimeout(timer);
     }
     this.reconnectTimers.clear();
+    // T-INT-013: close the resolver's own `pg.Pool` too (this class's second real resource,
+    // alongside the gRPC channel closed below). Fire-and-forget, not awaited — this method's own
+    // signature stays synchronous (every existing call site, including the test spec, calls it
+    // without `await`); a pool-close error here is logged, never thrown, matching this whole
+    // class's "never gates" contract.
+    this.channelResolver
+      .close()
+      .catch((error: unknown) =>
+        this.logger.warn(`portal-config resolver pool close failed: ${describeError(error)}`),
+      );
     for (const stream of this.activeStreams.values()) {
       // Listeners deliberately stay attached (never `removeAllListeners()`): grpc-js's own
       // `ClientReadableStream` throws an unhandled-error exception if an `'error'` event fires
