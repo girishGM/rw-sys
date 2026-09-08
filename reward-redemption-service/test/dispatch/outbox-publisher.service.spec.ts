@@ -266,7 +266,7 @@ describe('T-RR-034/T-RR-035 — OutboxPublisherService', () => {
     expect(fakes.outboxRepository.markPublished).toHaveBeenCalledWith('outbox-row-1');
   });
 
-  it('T-RR-035 TC-3/TC-4: REST 200 {"status":"accepted"} is success; a REST failure is treated like a Kafka publish failure', async () => {
+  it('T-RR-035 TC-3/TC-4: REST 200 {"status":"applied"|"duplicate"} is success; a REST failure is treated like a Kafka publish failure', async () => {
     const successRow = fakePendingRow({
       id: 'row-s',
       rewardEntryId: 'entry-s',

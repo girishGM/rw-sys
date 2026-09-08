@@ -1,8 +1,13 @@
 /**
- * T-RR-062 — `RewardTrackingGrpcClient`: pure env-parsing unit tests (no network), plus a real
- * `@grpc/grpc-js` mock reward-tracking-service implementing `proto/reward_tracking_dispatch.proto`
- * field-for-field — same "mocked server" convention `promo-code-service-grpc.client.spec.ts`
- * (T-RR-080) already established for the identical situation (confirmed by direct read).
+ * T-RR-062, updated by T-INT-002 — `RewardTrackingGrpcClient`: pure env-parsing unit tests (no
+ * network), plus a real `@grpc/grpc-js` mock reward-tracking-service implementing
+ * `proto/reward_tracking_dispatch.proto` field-for-field — same "mocked server" convention
+ * `promo-code-service-grpc.client.spec.ts` (T-RR-080) already established for the identical
+ * situation (confirmed by direct read). The mock server below now speaks the corrected contract
+ * (`rewardtracking.ingest.v1.RewardTrackingIngestService/IngestRewardTrackingEvent`,
+ * `{status: 'applied'|'duplicate'}`) that matches RTS's real, shipped proto — see also
+ * `test/dispatch/reward-tracking-contract-parity.spec.ts` (T-INT-002) for the test that reads RTS's
+ * real source directly and fails if this ever drifts again.
  */
 import * as grpc from '@grpc/grpc-js';
 import * as protoLoader from '@grpc/proto-loader';
@@ -125,10 +130,10 @@ function loadServiceDefinition(): grpc.ServiceDefinition {
   });
   const proto = grpc.loadPackageDefinition(packageDefinition) as unknown as {
     rewardtracking: {
-      v1: { RewardTrackingDispatchService: { service: grpc.ServiceDefinition } };
+      ingest: { v1: { RewardTrackingIngestService: { service: grpc.ServiceDefinition } } };
     };
   };
-  return proto.rewardtracking.v1.RewardTrackingDispatchService.service;
+  return proto.rewardtracking.ingest.v1.RewardTrackingIngestService.service;
 }
 
 function sampleMessage(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -159,14 +164,14 @@ function sampleMessage(overrides: Record<string, unknown> = {}): Record<string, 
 }
 
 interface MockHandlers {
-  dispatchRedemptionCompleted: jest.Mock;
+  ingestRewardTrackingEvent: jest.Mock;
 }
 
 function buildHandlers(response: { status: string }): {
   impl: grpc.UntypedServiceImplementation;
   handlers: MockHandlers;
 } {
-  const dispatchRedemptionCompleted = jest.fn(
+  const ingestRewardTrackingEvent = jest.fn(
     (
       _call: grpc.ServerUnaryCall<unknown, { status: string }>,
       callback: grpc.sendUnaryData<{ status: string }>,
@@ -175,13 +180,13 @@ function buildHandlers(response: { status: string }): {
     },
   );
   const impl: grpc.UntypedServiceImplementation = {
-    dispatchRedemptionCompleted,
+    IngestRewardTrackingEvent: ingestRewardTrackingEvent,
   } as unknown as grpc.UntypedServiceImplementation;
-  return { impl, handlers: { dispatchRedemptionCompleted } };
+  return { impl, handlers: { ingestRewardTrackingEvent } };
 }
 
 function startMockServer(
-  response: { status: string } = { status: 'ACCEPTED' },
+  response: { status: string } = { status: 'applied' },
 ): Promise<{ server: grpc.Server; port: number; handlers: MockHandlers }> {
   return new Promise((resolve, reject) => {
     const server = new grpc.Server();
@@ -212,7 +217,7 @@ describe('T-RR-062 — RewardTrackingGrpcClient, real mock reward-tracking-servi
     }
   });
 
-  it('an ACCEPTED response resolves without throwing, carrying the exact toRewardTrackingMessage shape', async () => {
+  it('an "applied" response resolves without throwing, carrying the exact toRewardTrackingMessage shape', async () => {
     let port: number;
     let handlers: MockHandlers;
     ({ server, port, handlers } = await startMockServer());
@@ -220,11 +225,12 @@ describe('T-RR-062 — RewardTrackingGrpcClient, real mock reward-tracking-servi
 
     await expect(client.dispatch(sampleMessage())).resolves.toBeUndefined();
 
-    const sentRequest = handlers.dispatchRedemptionCompleted.mock.calls[0][0].request as Record<
+    const sentRequest = handlers.ingestRewardTrackingEvent.mock.calls[0][0].request as Record<
       string,
       unknown
     >;
     expect(sentRequest.rewardEntryId).toBe('reward-entry-1');
+    expect(sentRequest.correlationId).toBe('corr-1');
     expect(sentRequest.customerId).toBe('CUST-1');
     expect(sentRequest.trackerCode).toBe('TRK1');
     expect(sentRequest.trackerComponentCode).toBe('COMP1');
@@ -233,11 +239,21 @@ describe('T-RR-062 — RewardTrackingGrpcClient, real mock reward-tracking-servi
     expect(sentRequest.merchantCode).toBe('');
     expect(sentRequest.expiresAt).toBe('');
     expect(sentRequest.rewardKind).toBe('');
+    expect(sentRequest.unitType).toBe('');
+    expect(sentRequest.unitCode).toBe('');
     expect(sentRequest.promoCodeConfigId).toBe('');
     expect(sentRequest.promoCodeConfigVersionNo).toBe(0);
   });
 
-  it('an unexpected (non-ACCEPTED) response status is treated as a failure', async () => {
+  it('a "duplicate" response also resolves without throwing (RTS\'s own idempotent-replay outcome)', async () => {
+    let port: number;
+    ({ server, port } = await startMockServer({ status: 'duplicate' }));
+    client = new RewardTrackingGrpcClient({ host: '127.0.0.1', port, timeoutMs: 2_000 });
+
+    await expect(client.dispatch(sampleMessage())).resolves.toBeUndefined();
+  });
+
+  it('an unexpected (neither "applied" nor "duplicate") response status is treated as a failure', async () => {
     let port: number;
     ({ server, port } = await startMockServer({ status: 'REJECTED' }));
     client = new RewardTrackingGrpcClient({ host: '127.0.0.1', port, timeoutMs: 2_000 });
@@ -258,7 +274,7 @@ describe('T-RR-062 — RewardTrackingGrpcClient, real mock reward-tracking-servi
   it('a deadline-exceeded call (server never responds) rejects with RewardTrackingGrpcUnreachableError within the configured timeout, never hangs', async () => {
     const server2 = new grpc.Server();
     const impl: grpc.UntypedServiceImplementation = {
-      dispatchRedemptionCompleted: () => {
+      IngestRewardTrackingEvent: () => {
         // Never calls back — simulates a hung server.
       },
     } as unknown as grpc.UntypedServiceImplementation;

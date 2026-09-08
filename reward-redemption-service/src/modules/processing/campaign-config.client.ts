@@ -30,12 +30,47 @@
  * `agent-rr-foundation`'s), matching `config.schema.ts`'s own header, which explicitly calls out
  * "the `PORTAL_GRPC_*` client vars (T-RR-022)" as one of the vars deliberately left for this task
  * to read on its own — the identical precedent RAP's own client already set for the same reason.
+ *
+ * **T-INT-012**: `listActiveCampaigns`/`getCampaignConfig` are no longer gRPC-only. Both now
+ * resolve their transport at call time via `PortalConfigChannelResolverService`
+ * (`portal-config-channel-resolver.service.ts`, table `portal_config_channel_config`, migration
+ * `025`) and branch to either this file's own original gRPC call (renamed `*ViaGrpc`, unchanged,
+ * including its own `PortalGrantNotProvisionedError` classification) or `PortalConfigRestClient`
+ * (`portal-config-rest.client.ts`, T-INT-010's REST mirror). **Every public method signature is
+ * unchanged** (implementation note 3) — every existing caller (`CampaignConfigCache`/
+ * `resolution.service.ts`, and the tests listed in this file's own header history) keeps working
+ * with zero changes on their side. An explicit direct port of RAP's own identical
+ * `callWithTransportFallback` mechanism (T-INT-011, `campaign-config.client.ts` there — confirmed
+ * by direct read before diverging in shape), with one structural difference: this service has no
+ * `watchCampaignConfig` method to begin with (implementation note 4 — "RR has no
+ * `WatchCampaignConfig`-equivalent streaming consumer today"), so there is nothing analogous to
+ * port for that RPC.
+ *
+ * **Resilience contract, deliberately conservative**: if `PortalConfigChannelResolverService`
+ * itself fails to resolve (e.g. the DB is unreachable, or `portal_config_channel_config` doesn't
+ * exist yet in an environment that hasn't run migration `025`), this client logs a warning and
+ * falls straight through to the original, pre-T-INT-012 gRPC-only call — never a hard failure for a
+ * resolution problem this class didn't have before this task. Once a channel *is* resolved, a
+ * disabled channel (`restEnabled`/`grpcEnabled` false) is simply skipped, never attempted; if the
+ * enabled primary fails, the enabled fallback is tried next; if every attempted channel fails, the
+ * last error is rethrown — TC-5's own "raises/degrades exactly as it already does today on gRPC
+ * failure" contract, and `PortalGrantNotProvisionedError`'s own classification (TC-6, above) is
+ * preserved unchanged whichever transport attempt actually reaches it, since it is thrown from
+ * inside `getCampaignConfigViaGrpc`/`listActiveCampaignsViaGrpc` themselves, not from the
+ * transport-selection wrapper around them.
  */
 import { Injectable, Logger, OnModuleDestroy, Optional } from '@nestjs/common';
 import { join } from 'node:path';
 import { readFileSync } from 'node:fs';
 import * as grpc from '@grpc/grpc-js';
 import * as protoLoader from '@grpc/proto-loader';
+import {
+  PortalConfigChannelResolverService,
+  type PortalConfigChannel,
+  type PortalConfigChannelResolveContext,
+  type ResolvedPortalConfigChannel,
+} from './portal-config-channel-resolver.service';
+import { PortalConfigRestClient } from './portal-config-rest.client';
 
 /** The only five sections this service is ever allowed to ask for (`03-GRPC-CONTRACT.md` §3) —
  * `RULES` is deliberately absent, not merely unused. */
@@ -343,9 +378,27 @@ export class CampaignConfigClient implements OnModuleDestroy {
    * fully-formed argument, so none of them relies on — or changes behaviour around — this default
    * at all.
    */
+  /**
+   * T-INT-012. Both deliberately **not** given an eager default-parameter value (unlike `options`
+   * above) — `PortalConfigRestClient`'s own default construction throws synchronously
+   * (`MissingPortalRestTokenError`) when `PORTAL_REST_API_TOKEN` isn't set, and this constructor is
+   * still called with a single argument by every pre-existing caller (`ProcessingModule`'s own
+   * provider registration, and every existing test — none of which set that env var). Eagerly
+   * constructing either dependency here would make *constructing this class at all* fail in exactly
+   * those unmodified call sites. Instead: stay `undefined` until first actually needed, built
+   * lazily by `getRestClient()`/`getChannelResolver()` below — the identical "construct only when a
+   * caller actually reaches for it" discipline RAP's own T-INT-011 port already established.
+   */
+  private restClient?: PortalConfigRestClient;
+  private channelResolver?: PortalConfigChannelResolverService;
+
   constructor(
     @Optional() options: CampaignConfigClientOptions = loadCampaignConfigClientOptions(),
+    @Optional() restClient?: PortalConfigRestClient,
+    @Optional() channelResolver?: PortalConfigChannelResolverService,
   ) {
+    this.restClient = restClient;
+    this.channelResolver = channelResolver;
     this.timeoutMs = options.timeoutMs;
 
     const packageDefinition = protoLoader.loadSync(resolveProtoPath(), {
@@ -372,9 +425,93 @@ export class CampaignConfigClient implements OnModuleDestroy {
     return { deadline: Date.now() + this.timeoutMs };
   }
 
-  async listActiveCampaigns(
+  private getRestClient(): PortalConfigRestClient {
+    if (!this.restClient) {
+      this.restClient = new PortalConfigRestClient();
+    }
+    return this.restClient;
+  }
+
+  private getChannelResolver(): PortalConfigChannelResolverService {
+    if (!this.channelResolver) {
+      this.channelResolver = new PortalConfigChannelResolverService();
+    }
+    return this.channelResolver;
+  }
+
+  private isChannelEnabled(
+    resolved: ResolvedPortalConfigChannel,
+    channel: PortalConfigChannel,
+  ): boolean {
+    return channel === 'GRPC' ? resolved.grpcEnabled : resolved.restEnabled;
+  }
+
+  /**
+   * T-INT-012. Resolves which channel(s) to attempt for one call, then runs the matching thunk —
+   * `grpcCall`/`restCall` are never invoked speculatively; only the channel(s) this method actually
+   * decides to attempt ever run (TC-2's own "zero gRPC calls made" when REST resolves and succeeds
+   * depends on this — a naive `Promise.race`/always-call-both approach would violate it).
+   */
+  private async callWithTransportFallback<T>(
+    context: PortalConfigChannelResolveContext,
+    grpcCall: () => Promise<T>,
+    restCall: () => Promise<T>,
+  ): Promise<T> {
+    let resolved: ResolvedPortalConfigChannel | undefined;
+    try {
+      resolved = await this.getChannelResolver().resolve(context);
+    } catch (error) {
+      this.logger.warn(
+        'portal-config channel resolution failed — falling back to the pre-T-INT-012 gRPC-only ' +
+          `behaviour for this call: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    if (!resolved) {
+      return grpcCall();
+    }
+
+    const runners: Record<PortalConfigChannel, () => Promise<T>> = {
+      GRPC: grpcCall,
+      REST: restCall,
+    };
+
+    const attempts: PortalConfigChannel[] = [];
+    if (this.isChannelEnabled(resolved, resolved.primaryChannel)) {
+      attempts.push(resolved.primaryChannel);
+    }
+    if (
+      resolved.fallbackChannel !== resolved.primaryChannel &&
+      this.isChannelEnabled(resolved, resolved.fallbackChannel)
+    ) {
+      attempts.push(resolved.fallbackChannel);
+    }
+    if (attempts.length === 0) {
+      this.logger.warn(
+        'portal-config resolved with both primary and fallback channels disabled — falling back ' +
+          'to the pre-T-INT-012 gRPC-only behaviour for this call.',
+      );
+      return grpcCall();
+    }
+
+    let lastError: unknown;
+    for (const channel of attempts) {
+      try {
+        return await runners[channel]();
+      } catch (error) {
+        lastError = error;
+        this.logger.warn(
+          `portal-config channel ${channel} failed: ` +
+            `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    throw lastError;
+  }
+
+  private async listActiveCampaignsViaGrpc(
     tenantId: number,
-    sections: readonly ConfigSectionName[] = CAMPAIGN_CONFIG_SECTIONS,
+    sections: readonly ConfigSectionName[],
   ): Promise<CampaignConfigListProto> {
     return new Promise((resolve, reject) => {
       this.client.listActiveCampaigns(
@@ -392,11 +529,11 @@ export class CampaignConfigClient implements OnModuleDestroy {
     });
   }
 
-  async getCampaignConfig(
+  private async getCampaignConfigViaGrpc(
     tenantId: number,
     campaignCode: string,
-    sections: readonly ConfigSectionName[] = CAMPAIGN_CONFIG_SECTIONS,
-    etag = '',
+    sections: readonly ConfigSectionName[],
+    etag: string,
   ): Promise<CampaignConfigProto> {
     return new Promise((resolve, reject) => {
       this.client.getCampaignConfig(
@@ -414,10 +551,37 @@ export class CampaignConfigClient implements OnModuleDestroy {
     });
   }
 
+  async listActiveCampaigns(
+    tenantId: number,
+    sections: readonly ConfigSectionName[] = CAMPAIGN_CONFIG_SECTIONS,
+  ): Promise<CampaignConfigListProto> {
+    return this.callWithTransportFallback(
+      { tenantId },
+      () => this.listActiveCampaignsViaGrpc(tenantId, sections),
+      () => this.getRestClient().listActiveCampaigns(tenantId, sections),
+    );
+  }
+
+  async getCampaignConfig(
+    tenantId: number,
+    campaignCode: string,
+    sections: readonly ConfigSectionName[] = CAMPAIGN_CONFIG_SECTIONS,
+    etag = '',
+  ): Promise<CampaignConfigProto> {
+    return this.callWithTransportFallback(
+      { tenantId, campaignCode },
+      () => this.getCampaignConfigViaGrpc(tenantId, campaignCode, sections, etag),
+      () => this.getRestClient().getCampaignConfig(tenantId, campaignCode, sections, etag),
+    );
+  }
+
   /** Implementation note 6 / TC-6: reclassifies `PERMISSION_DENIED` into a distinct, named,
    * clearly-logged error — every other gRPC failure (transient network errors, `UNAVAILABLE`,
    * a deadline exceeded) propagates unchanged, since those genuinely are generic
-   * connection-shaped failures with no more specific diagnosis this client can add. */
+   * connection-shaped failures with no more specific diagnosis this client can add. Applied inside
+   * `*ViaGrpc` itself (not in `callWithTransportFallback`) so this classification survives
+   * T-INT-012's transport-fallback wrapping unchanged (this file's own header, "Resilience
+   * contract"). */
   private classifyError(rpcName: string, tenantId: number, error: grpc.ServiceError): Error {
     if (error.code === grpc.status.PERMISSION_DENIED) {
       const classified = new PortalGrantNotProvisionedError(rpcName, tenantId, error);
@@ -427,7 +591,12 @@ export class CampaignConfigClient implements OnModuleDestroy {
     return error;
   }
 
-  onModuleDestroy(): void {
+  async onModuleDestroy(): Promise<void> {
     this.client.close();
+    // T-INT-012: only tear down `channelResolver`'s own `pg.Pool` if this instance actually built
+    // one lazily — never close a resolver a caller injected and may still own elsewhere.
+    if (this.channelResolver) {
+      await this.channelResolver.onModuleDestroy();
+    }
   }
 }

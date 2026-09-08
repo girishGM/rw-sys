@@ -1,13 +1,25 @@
 /**
- * T-RR-035. Tier 2 (REST fallback) of this service's outbound dispatch to
- * reward-tracking-service (`04-REST-CONTRACT.md` §3, `ARCHITECTURE.md` §9) — the "practical
- * default" transport once this service is deployed to Render (no managed Kafka broker there,
- * that section's own framing). Same non-existence caveat every stub outbound client in this repo
- * carries (`04-REST-CONTRACT.md` §3's own header: "the service does not exist"): in every
- * environment this client's own test suite runs in, it either talks to a local test double or
- * fails closed — never blocks or reverts the redemption itself, which already durably succeeded
- * (`05-PROCESSING-PIPELINE.md` §7's own "never roll back a committed reward for a delivery
- * failure").
+ * T-RR-035, corrected by T-INT-002. Tier 2 (REST fallback) of this service's outbound dispatch to
+ * reward-tracking-service (`ARCHITECTURE.md` §9) — the "practical default" transport once this
+ * service is deployed to Render (no managed Kafka broker there, that section's own framing).
+ *
+ * **T-INT-002 correction**: T-RR-035 posted to `/api/v1/redemptions/completed`, its own pre-RTS
+ * guess at `04-REST-CONTRACT.md` §3's path, written before reward-tracking-service (RTS) existed.
+ * RTS has since shipped its real controller —
+ * `reward-tracking-service/src/modules/ingestion/reward-tracking-ingest.controller.ts` — serving
+ * `POST /internal/reward-tracking-events`, guarded by a bearer token read from
+ * `REWARD_TRACKING_INGEST_TOKEN` on RTS's own side (this client's own `REWARD_TRACKING_REST_TOKEN`
+ * env var still names the value RR sends — the two services' env var *names* differ, same as every
+ * other two-sided secret pair in this system; RR and RTS still need the identical secret *value*
+ * configured operationally on both sides). RTS's real response body is `{"status": "applied" |
+ * "duplicate"}` (`reward-tracking-ingest.controller.ts`'s own `RewardTrackingIngestResponseDto`) —
+ * never `{"status": "accepted"}`, T-RR-035's own pre-RTS guess. Confirmed by direct read that RTS's
+ * request-body field set (`reward-tracking-ingest.dto.ts`'s own `parseRewardTrackingIngestRequest`)
+ * is otherwise compatible with the body this client already sends
+ * (`toRewardTrackingMessage`/`RewardTrackingDispatchPayload`) — every field RTS requires is present
+ * under the same camelCase name; RTS's own `unitType`/`unitCode` fields are optional and this
+ * client sends neither, which RTS accepts as "absent" the same way it does for any other omitted
+ * optional field.
  *
  * No business logic lives here (R10) — `OutboxPublisherService`/`RewardTrackingDispatchRetryWorker`
  * own every retry/backoff/tier-fallthrough decision; this class only knows how to make one HTTP
@@ -15,17 +27,15 @@
  * establishes for its own sibling transport.
  *
  * **`REWARD_TRACKING_REST_BASE_URL`/`REWARD_TRACKING_REST_TIMEOUT_MS`** are not named by any
- * design doc — `04-REST-CONTRACT.md` §3 only specifies the path
- * (`/api/v1/redemptions/completed`) and the bearer-token env var (`REWARD_TRACKING_REST_TOKEN`),
- * not how this service locates reward-tracking-service's own host. Introduced here following this
- * project's existing `<PREFIX>_GRPC_HOST`/`_PORT`/`_TIMEOUT_MS` naming shape (`PORTAL_GRPC_*`,
- * RAP's own `REWARD_REDEMPTION_GRPC_*`) collapsed to a single `_BASE_URL` since this is a REST
- * call, not gRPC — flagged in this task's own completion report as an assumption for the
- * architect to confirm/rename if a different convention is preferred later.
+ * design doc — introduced here following this project's existing
+ * `<PREFIX>_GRPC_HOST`/`_PORT`/`_TIMEOUT_MS` naming shape (`PORTAL_GRPC_*`, RAP's own
+ * `REWARD_REDEMPTION_GRPC_*`) collapsed to a single `_BASE_URL` since this is a REST call, not
+ * gRPC — flagged in this task's own completion report as an assumption for the architect to
+ * confirm/rename if a different convention is preferred later.
  */
 import { Injectable, Logger, Optional } from '@nestjs/common';
 
-export const REWARD_TRACKING_COMPLETED_PATH = '/api/v1/redemptions/completed';
+export const REWARD_TRACKING_COMPLETED_PATH = '/internal/reward-tracking-events';
 export const DEFAULT_REWARD_TRACKING_REST_BASE_URL = 'http://localhost:4040';
 export const DEFAULT_REWARD_TRACKING_REST_TIMEOUT_MS = 5_000;
 
@@ -131,10 +141,11 @@ export class RewardTrackingRestClient implements RewardTrackingRestClientPort {
   ) {}
 
   /**
-   * TC-3/TC-4: `200 { "status": "accepted" }` is success (`04-REST-CONTRACT.md` §3); any
-   * non-`2xx` response, an unexpected body shape, a timeout, or a connection failure throws —
-   * "treated identically to a Kafka publish failure," per that same section. The caller decides
-   * what a failure means (attempts/backoff/tier-fallthrough), never this method (R10).
+   * TC-3/TC-4: `200 { "status": "applied" | "duplicate" }` is success (RTS's real
+   * `RewardTrackingIngestController.submit()`); any non-`2xx` response, an unexpected body shape, a
+   * timeout, or a connection failure throws — treated identically to a Kafka publish failure. The
+   * caller decides what a failure means (attempts/backoff/tier-fallthrough), never this method
+   * (R10).
    */
   async dispatch(message: Record<string, unknown>): Promise<void> {
     const controller = new AbortController();
@@ -157,10 +168,10 @@ export class RewardTrackingRestClient implements RewardTrackingRestClientPort {
       const body = (await response
         .json()
         .catch(() => ({}) as RewardTrackingRestResponseBody)) as RewardTrackingRestResponseBody;
-      if (body.status !== 'accepted') {
+      if (body.status !== 'applied' && body.status !== 'duplicate') {
         throw new Error(
           `reward-tracking-service REST call returned an unexpected body (expected ` +
-            `{"status":"accepted"}, got status=${JSON.stringify(body.status)})`,
+            `{"status":"applied"} or {"status":"duplicate"}, got status=${JSON.stringify(body.status)})`,
         );
       }
     } catch (error) {

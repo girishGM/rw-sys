@@ -397,6 +397,16 @@ describe('T-RR-040 pass 2 — full ingest-through-completion flow (real Postgres
   let encryption: EncryptionService;
   const entryIdsToClean: string[] = [];
   const serviceConfigScopesToClean: Array<{ scopeLevel: string; scopeRef: string | null }> = [];
+  // T-INT-001: `dispatch_channel_config`'s seeded `GLOBAL` row's own `primary_channel` no longer
+  // defaults to `'KAFKA'` (migration `023`, `reward-service-integration-plan/ARCHITECTURE.md` §4 —
+  // every `GLOBAL` row defaults to REST now, per the user's explicit "Render can't run gRPC/Kafka
+  // today" instruction). TC-4 below specifically means to exercise the Kafka-dispatch tier, so it
+  // pins its own fixture's `campaignCode` to `primary_channel='KAFKA'` via a CAMPAIGN-scoped row
+  // (`DispatchChannelResolverService`'s own precedence walk resolves CAMPAIGN before GLOBAL) rather
+  // than relying on whatever the ambient GLOBAL default happens to be this week — the same
+  // "pin the transport actually under test" idiom `reconciliation-poller-safety-net.spec.ts`
+  // already uses for the identical reason.
+  const dispatchChannelScopesToClean: string[] = [];
 
   function realDbConfigService(overrides: Partial<Config> = {}): ConfigService<Config, true> {
     const values: Partial<Config> = {
@@ -550,6 +560,20 @@ describe('T-RR-040 pass 2 — full ingest-through-completion flow (real Postgres
       },
     );
     serviceConfigScopesToClean.push({ scopeLevel: 'CAMPAIGN', scopeRef: campaignCode });
+  }
+
+  /** See the `dispatchChannelScopesToClean` declaration above for why this exists post-T-INT-001. */
+  async function setDispatchChannelPrimary(
+    campaignCode: string,
+    primaryChannel: string,
+  ): Promise<void> {
+    await migrationDb.query(
+      `INSERT INTO reward_redemption.dispatch_channel_config
+         (scope_level, scope_ref_code, tenant_id, kafka_enabled, rest_enabled, primary_channel, fallback_channel)
+       VALUES ('CAMPAIGN', :campaignCode, NULL, true, true, :primaryChannel, 'REST')`,
+      { type: QueryTypes.RAW, replacements: { campaignCode, primaryChannel } },
+    );
+    dispatchChannelScopesToClean.push(campaignCode);
   }
 
   const CORE_BANKING_SYSTEM_CODE = 'CORE_BANKING';
@@ -772,6 +796,13 @@ describe('T-RR-040 pass 2 — full ingest-through-completion flow (real Postgres
         },
       );
     }
+    for (const campaignCode of dispatchChannelScopesToClean) {
+      await migrationDb.query(
+        `DELETE FROM reward_redemption.dispatch_channel_config
+           WHERE scope_level = 'CAMPAIGN' AND scope_ref_code = :campaignCode`,
+        { type: QueryTypes.RAW, replacements: { campaignCode } },
+      );
+    }
 
     // Deliberately never calls `onModuleDestroy()` on `ingestionRepo`/`claimRepository`/
     // `serviceConfigRepository`/`outboxRepository`/`retryRepository` (or on any per-test
@@ -792,6 +823,9 @@ describe('T-RR-040 pass 2 — full ingest-through-completion flow (real Postgres
   it('TC-4: a full ingest -> claim -> connector -> dispatch flow (REST channel) increments reward_entries_ingested_total{channel:"rest"}, reward_redemptions_completed_total{system_code}, external_system_call_total{system_code, result:"success"}, reward_tracking_dispatch_tier_total{tier} exactly once each', async () => {
     const tenantId = nextTenantId();
     const dto = buildIngestDto(tenantId);
+    // T-INT-001: pin this fixture's own campaign to KAFKA before anything reads
+    // `dispatch_channel_config` — see `dispatchChannelScopesToClean`'s own declaration for why.
+    await setDispatchChannelPrimary(dto.campaignCode, 'KAFKA');
     const {
       metrics,
       dispatchMetrics,
@@ -874,17 +908,20 @@ describe('T-RR-040 pass 2 — full ingest-through-completion flow (real Postgres
       );
       expect(outboxRows).toHaveLength(1);
       expect(outboxRows[0].status).toBe('PUBLISHED');
-      // `006_create_dispatch_channel_config.ts`'s own seeded GLOBAL row defaults
-      // `primary_channel = 'KAFKA'` — the fake Kafka client above succeeds on the first attempt, so
-      // *every* row this cycle's batch drains (this test's own, and any ambient backlog row sharing
-      // the same GLOBAL scope) is attributed to the `'kafka'` tier, never `'rest'`/`'retry_table'` —
-      // `rest`/`retry_table` staying exactly `0` is still a safe, exact assertion; `kafka` can only
-      // be asserted as "at least this row's own", not "exactly this row's own".
+      // T-INT-001 note: before migration `023`, `dispatch_channel_config`'s seeded `GLOBAL` row
+      // defaulted `primary_channel='KAFKA'`, so *every* ambient backlog row this cycle's batch also
+      // drained (not just this test's own) resolved to the `'kafka'` tier too, making an exact-zero
+      // `rest`/`retry_table` assertion safe on top of T-RR-071's own "only row-scoped assertions
+      // are safe against the shared ambient backlog" finding (comment above). Now that GLOBAL
+      // defaults to REST (T-INT-001, `reward-service-integration-plan/ARCHITECTURE.md` §4), an
+      // ambient backlog row with no override of its own resolves to `rest` instead — so `rest`/
+      // `retry_table` staying exactly `0` is no longer something this test can promise. Only this
+      // row's own tier is knowable: it was pinned to `KAFKA` via `setDispatchChannelPrimary` above
+      // (a CAMPAIGN-scoped override, resolved before GLOBAL), so `kafka >= 1` still safely proves
+      // dispatch actually went through the tier this test means to exercise.
       expect(dispatchMetrics.getDispatchTierCount('kafka' as DispatchTier)).toBeGreaterThanOrEqual(
         1,
       );
-      expect(dispatchMetrics.getDispatchTierCount('rest' as DispatchTier)).toBe(0);
-      expect(dispatchMetrics.getDispatchTierCount('retry_table' as DispatchTier)).toBe(0);
     } finally {
       // No `stateMachine.onModuleDestroy()`/`completionSweep.onModuleDestroy()` here — both were
       // built by `buildFreshPipeline` against `sharedPool`, and `afterAll` ends that shared pool

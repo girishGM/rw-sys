@@ -78,10 +78,10 @@ function loadServiceDefinition(): grpc.ServiceDefinition {
   });
   const proto = grpc.loadPackageDefinition(packageDefinition) as unknown as {
     rewardtracking: {
-      v1: { RewardTrackingDispatchService: { service: grpc.ServiceDefinition } };
+      ingest: { v1: { RewardTrackingIngestService: { service: grpc.ServiceDefinition } } };
     };
   };
-  return proto.rewardtracking.v1.RewardTrackingDispatchService.service;
+  return proto.rewardtracking.ingest.v1.RewardTrackingIngestService.service;
 }
 
 interface MockServer {
@@ -95,12 +95,12 @@ function startMockServer(): Promise<MockServer> {
     const received: Record<string, unknown>[] = [];
     const server = new grpc.Server();
     server.addService(loadServiceDefinition(), {
-      dispatchRedemptionCompleted: (
+      IngestRewardTrackingEvent: (
         call: grpc.ServerUnaryCall<Record<string, unknown>, { status: string }>,
         callback: grpc.sendUnaryData<{ status: string }>,
       ) => {
         received.push(call.request);
-        callback(null, { status: 'ACCEPTED' });
+        callback(null, { status: 'applied' });
       },
     } as unknown as grpc.UntypedServiceImplementation);
     server.bindAsync('127.0.0.1:0', grpc.ServerCredentials.createInsecure(), (error, port) => {

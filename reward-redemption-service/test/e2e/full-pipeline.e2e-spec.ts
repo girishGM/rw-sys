@@ -55,6 +55,7 @@ import {
   cleanupEntry,
   claimSpecificEntry,
   clearCoreBankingStubOutcome,
+  clearDispatchChannelPrimary,
   countEntryRows,
   countRelatedRows,
   createMigrationDb,
@@ -65,6 +66,7 @@ import {
   promoCodeSuccessBody,
   realDbConfigService,
   setCoreBankingStubOutcome,
+  setDispatchChannelPrimary,
   sleep,
   toGrpcRewardEntry,
   toKafkaMessageValue,
@@ -97,6 +99,13 @@ describe('T-RR-041 — full pipeline (real gRPC + real Kafka + real REST + real 
   let restApp: INestApplication;
   const entryIdsToClean: string[] = [];
   const campaignsToClean: string[] = [];
+  // T-INT-001: `dispatch_channel_config`'s seeded `GLOBAL` row no longer defaults
+  // `primary_channel='KAFKA'` (migration `023` — every GLOBAL row defaults to REST now, per
+  // `reward-service-integration-plan/ARCHITECTURE.md` §4). TC-1/2/3 and TC-9 below each mean to
+  // exercise a *specific* dispatch tier (their own titles say so), so each pins its own fixture's
+  // `campaignCode` via `setDispatchChannelPrimary` rather than relying on the ambient GLOBAL
+  // default — see that function's own header in `reward-entry.fixtures.ts`.
+  const dispatchChannelScopesToClean: string[] = [];
 
   beforeAll(async () => {
     if (!REST_TOKEN) {
@@ -161,6 +170,9 @@ describe('T-RR-041 — full pipeline (real gRPC + real Kafka + real REST + real 
     }
     for (const campaignCode of campaignsToClean) {
       await clearCoreBankingStubOutcome(migrationDb, campaignCode);
+    }
+    for (const campaignCode of dispatchChannelScopesToClean) {
+      await clearDispatchChannelPrimary(migrationDb, campaignCode);
     }
     const steps: Array<() => Promise<void> | void> = [
       () => grpcClient?.close(),
@@ -325,6 +337,11 @@ describe('T-RR-041 — full pipeline (real gRPC + real Kafka + real REST + real 
     ): Promise<void> {
       const fixture = buildCanonicalFixtureEntry(TENANT_ID);
       entryIdsToClean.push(fixture.id);
+      // T-INT-001: this describe block means to prove "-> Kafka dispatch" (its own title) — pin
+      // it explicitly rather than relying on the ambient GLOBAL default (see
+      // `dispatchChannelScopesToClean`'s own declaration above).
+      await setDispatchChannelPrimary(migrationDb, fixture.campaignCode, 'KAFKA');
+      dispatchChannelScopesToClean.push(fixture.campaignCode);
       fetchSpy.mockResolvedValue(
         jsonResponse(200, promoCodeSuccessBody({ promoCodeId: `promo-${fixture.id}` })),
       );
@@ -569,6 +586,15 @@ describe('T-RR-041 — full pipeline (real gRPC + real Kafka + real REST + real 
     const fixture = buildCanonicalFixtureEntry(TENANT_ID);
     entryIdsToClean.push(fixture.id);
     campaignsToClean.push(fixture.campaignCode);
+    // T-INT-001: this test means to prove the real Kafka-primary-fails -> REST-fallback
+    // mechanism (`OutboxPublisherService`'s own tiered-fallback logic), not merely "REST ends up
+    // used" — which would trivially and vacuously hold if REST were already primary (the ambient
+    // GLOBAL default post-migration-`023`). Pinning `primary_channel='KAFKA'` here is what makes
+    // `unreachableKafkaProducer` actually get attempted first, so the fallback path this test
+    // asserts against is the one genuinely exercised. See `dispatchChannelScopesToClean`'s own
+    // declaration above.
+    await setDispatchChannelPrimary(migrationDb, fixture.campaignCode, 'KAFKA');
+    dispatchChannelScopesToClean.push(fixture.campaignCode);
     await sendViaChannel('REST', fixture);
     await stampTenantCountryEnrichment(migrationDb, fixture.id);
     await setCoreBankingStubOutcome(migrationDb, fixture.campaignCode, 'SUCCESS');
@@ -590,7 +616,7 @@ describe('T-RR-041 — full pipeline (real gRPC + real Kafka + real REST + real 
 
     const fetchSpy = jest
       .spyOn(global, 'fetch')
-      .mockResolvedValue(jsonResponse(200, { status: 'accepted' }));
+      .mockResolvedValue(jsonResponse(200, { status: 'applied' }));
     const pipeline = buildRealPipeline({
       systemCode: 'CORE_BANKING',
       connectorConfig: buildCoreBankingConnectorConfig(),
@@ -628,7 +654,7 @@ describe('T-RR-041 — full pipeline (real gRPC + real Kafka + real REST + real 
 
       expect(fetchSpy).toHaveBeenCalledTimes(1);
       const [url, requestInit] = fetchSpy.mock.calls[0] as [string, RequestInit];
-      expect(url).toBe('http://reward-tracking-service.test/api/v1/redemptions/completed');
+      expect(url).toBe('http://reward-tracking-service.test/internal/reward-tracking-events');
       expect((requestInit.headers as Record<string, string>).Authorization).toBe(
         'Bearer test-token',
       );

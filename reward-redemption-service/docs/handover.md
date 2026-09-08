@@ -116,14 +116,20 @@ across the claim itself, never across the external call — this is what lets an
 instances of this service claim from the same table concurrently without double-processing a row,
 and is the mechanism this task's own load test exists to validate (§7).
 
-## 6. Outbound contracts (to reward-tracking-service, which does not exist yet)
+## 6. Outbound contracts (to reward-tracking-service)
+
+> **T-INT-002 correction (see `reward-service-integration-plan/tasks/T-INT-002-*.md`)**: this
+> section originally described reward-tracking-service (RTS) as not existing yet, and its own REST
+> path/gRPC contract as this service's own pre-RTS guess. RTS has since shipped; the REST path
+> below and the gRPC package/service/method in `proto/reward_tracking_dispatch.proto` now match its
+> real, shipped contract.
 
 Two dispatch tiers, resolved per campaign/tracker/reward via `dispatch_channel_config`
 (`01-DATABASE.md` §5), both delivering the identical logical event:
 
 - **Kafka — `reward.redemption.completed.v1`** (this service as producer). Partition key:
   `correlationId`.
-- **REST fallback — `POST /api/v1/redemptions/completed`** (`REWARD_TRACKING_REST_TOKEN`, a fourth
+- **REST fallback — `POST /internal/reward-tracking-events`** (`REWARD_TRACKING_REST_TOKEN`, a fourth
   distinct bearer secret alongside ingest/generation/cache-admin tokens — R9: never merge
   distinct-trust-domain credentials). Used when `dispatch_channel_config` resolves REST as primary
   or fallback for a given scope, or when Kafka is simply unreachable at publish time.

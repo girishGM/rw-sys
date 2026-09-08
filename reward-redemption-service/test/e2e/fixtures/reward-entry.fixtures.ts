@@ -577,6 +577,41 @@ export async function clearCoreBankingStubOutcome(
   );
 }
 
+/**
+ * T-INT-001. `dispatch_channel_config`'s seeded `GLOBAL` row's own `primary_channel` no longer
+ * defaults to `'KAFKA'` (migration `023`, `reward-service-integration-plan/ARCHITECTURE.md` §4 —
+ * every `GLOBAL` row defaults to REST now). Any e2e test that means to exercise a *specific*
+ * dispatch tier (its own title says so, e.g. "-> Kafka dispatch") must pin its own fixture's
+ * `campaignCode` explicitly, the same "pin the transport actually under test" idiom
+ * `reconciliation-poller-safety-net.spec.ts` already established — never rely on whatever the
+ * ambient `GLOBAL` default happens to be. `DispatchChannelResolverService`'s own precedence walk
+ * resolves CAMPAIGN before GLOBAL (`dispatch-channel-resolver.service.ts`), so a CAMPAIGN-scoped
+ * row here always wins regardless of the GLOBAL row's own value.
+ */
+export async function setDispatchChannelPrimary(
+  db: Sequelize,
+  campaignCode: string,
+  primaryChannel: 'REST' | 'GRPC' | 'KAFKA',
+): Promise<void> {
+  await db.query(
+    `INSERT INTO reward_redemption.dispatch_channel_config
+       (scope_level, scope_ref_code, tenant_id, kafka_enabled, rest_enabled, grpc_enabled, primary_channel, fallback_channel)
+     VALUES ('CAMPAIGN', :campaignCode, NULL, true, true, true, :primaryChannel, 'REST')`,
+    { type: QueryTypes.RAW, replacements: { campaignCode, primaryChannel } },
+  );
+}
+
+export async function clearDispatchChannelPrimary(
+  db: Sequelize,
+  campaignCode: string,
+): Promise<void> {
+  await db.query(
+    `DELETE FROM reward_redemption.dispatch_channel_config
+       WHERE scope_level = 'CAMPAIGN' AND scope_ref_code = :campaignCode`,
+    { type: QueryTypes.RAW, replacements: { campaignCode } },
+  );
+}
+
 /** `test/processing/fixtures/concurrent-workers.harness.ts`'s own shared mutex key, read (not
  * imported — that file is `agent-rr-processing`'s own file scope, R3) so every real-claim spec
  * file in this repo, this task's own included, serializes claim activity against the same

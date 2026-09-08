@@ -1,11 +1,14 @@
 /**
- * T-RR-035 — `RewardTrackingRestClient` against a mocked global `fetch` (Node 20's own built-in
- * `undici`-backed implementation, no extra HTTP-client dependency added, this file's own header
- * for why) — deterministic, no real network I/O needed. `04-REST-CONTRACT.md` §3's own contract
- * (`POST /api/v1/redemptions/completed`, `Authorization: Bearer <REWARD_TRACKING_REST_TOKEN>`,
- * `200 {"status":"accepted"}` on success) is asserted against the *outgoing request* this client
- * actually builds, not just against a change-detector on an internal constant — `AGENT-PROTOCOL.md`
- * §3's own "assert the observable property" discipline.
+ * T-RR-035, updated by T-INT-002 — `RewardTrackingRestClient` against a mocked global `fetch`
+ * (Node 20's own built-in `undici`-backed implementation, no extra HTTP-client dependency added,
+ * this file's own header for why) — deterministic, no real network I/O needed. RTS's real, shipped
+ * contract (`POST /internal/reward-tracking-events`, `Authorization: Bearer
+ * <REWARD_TRACKING_REST_TOKEN>`, `200 {"status":"applied"|"duplicate"}` on success — confirmed by
+ * direct read of `reward-tracking-service/src/modules/ingestion/reward-tracking-ingest.controller.ts`)
+ * is asserted against the *outgoing request* this client actually builds, not just against a
+ * change-detector on an internal constant — `AGENT-PROTOCOL.md` §3's own "assert the observable
+ * property" discipline. See also `test/dispatch/reward-tracking-contract-parity.spec.ts` (T-INT-002)
+ * for the test that reads RTS's real source directly and fails if this path ever drifts again.
  */
 import 'reflect-metadata';
 import { Logger } from '@nestjs/common';
@@ -106,8 +109,8 @@ describe('T-RR-035 — RewardTrackingRestClient', () => {
   });
 
   describe('dispatch', () => {
-    it('04-REST-CONTRACT.md §3: POSTs the exact path with a bearer token and JSON content-type', async () => {
-      fetchSpy.mockResolvedValue(jsonResponse(200, { status: 'accepted' }));
+    it("posts to RTS's real ingest path with a bearer token and JSON content-type", async () => {
+      fetchSpy.mockResolvedValue(jsonResponse(200, { status: 'applied' }));
       const client = buildClient('super-secret-token');
 
       await client.dispatch({ rewardEntryId: 'entry-1', customerId: 'CUST-1' });
@@ -126,8 +129,15 @@ describe('T-RR-035 — RewardTrackingRestClient', () => {
       });
     });
 
-    it('TC-3: 200 {"status":"accepted"} resolves without throwing', async () => {
-      fetchSpy.mockResolvedValue(jsonResponse(200, { status: 'accepted' }));
+    it('TC-3: 200 {"status":"applied"} resolves without throwing', async () => {
+      fetchSpy.mockResolvedValue(jsonResponse(200, { status: 'applied' }));
+      const client = buildClient();
+
+      await expect(client.dispatch({ rewardEntryId: 'entry-1' })).resolves.toBeUndefined();
+    });
+
+    it('TC-3: 200 {"status":"duplicate"} also resolves without throwing (RTS\'s own idempotent-replay outcome)', async () => {
+      fetchSpy.mockResolvedValue(jsonResponse(200, { status: 'duplicate' }));
       const client = buildClient();
 
       await expect(client.dispatch({ rewardEntryId: 'entry-1' })).resolves.toBeUndefined();
@@ -203,7 +213,7 @@ describe('T-RR-035 — RewardTrackingRestClient', () => {
       const client = moduleRef.get(RewardTrackingRestClient);
       expect(client).toBeInstanceOf(RewardTrackingRestClient);
 
-      fetchSpy.mockResolvedValue(jsonResponse(200, { status: 'accepted' }));
+      fetchSpy.mockResolvedValue(jsonResponse(200, { status: 'applied' }));
       await client.dispatch({ rewardEntryId: 'entry-1' });
 
       const [url, init] = fetchSpy.mock.calls[0];

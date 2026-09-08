@@ -142,7 +142,7 @@ export interface RewardTrackingGrpcClientPort {
 }
 
 interface RawRewardTrackingDispatchClient extends grpc.Client {
-  dispatchRedemptionCompleted(
+  ingestRewardTrackingEvent(
     request: unknown,
     metadata: grpc.Metadata,
     options: grpc.CallOptions,
@@ -178,26 +178,31 @@ function toWireMessage(message: Record<string, unknown>): Record<string, unknown
     value === null || value === undefined ? 0 : Number(value);
   return {
     rewardEntryId: asString(message.rewardEntryId),
+    correlationId: asString(message.correlationId),
     tenantId: asInt(message.tenantId),
     tenantCode: asString(message.tenantCode),
     countryCode: asString(message.countryCode),
     customerId: asString(message.customerId),
     campaignCode: asString(message.campaignCode),
+    trackerCode: asString(message.trackerCode),
+    trackerComponentCode: asString(message.trackerComponentCode),
+    merchantCode: asString(message.merchantCode),
     rewardCode: asString(message.rewardCode),
     rewardCategory: asString(message.rewardCategory),
+    rewardKind: asString(message.rewardKind),
+    // RTS's real request message declares `unit_type`/`unit_code` at wire positions 14/15 — RR has
+    // no data to populate them yet (T-INT-002's own proto header note), so they're always sent
+    // absent ("").
+    unitType: '',
+    unitCode: '',
     rewardValue: asString(message.rewardValue),
     rewardValueUnit: asString(message.rewardValueUnit),
     externalSystemCode: asString(message.externalSystemCode),
     externalReferenceId: asString(message.externalReferenceId),
-    redeemedAt: asString(message.redeemedAt),
-    correlationId: asString(message.correlationId),
-    trackerCode: asString(message.trackerCode),
-    trackerComponentCode: asString(message.trackerComponentCode),
-    merchantCode: asString(message.merchantCode),
-    expiresAt: asString(message.expiresAt),
-    rewardKind: asString(message.rewardKind),
     promoCodeConfigId: asString(message.promoCodeConfigId),
     promoCodeConfigVersionNo: asInt(message.promoCodeConfigVersionNo),
+    redeemedAt: asString(message.redeemedAt),
+    expiresAt: asString(message.expiresAt),
   };
 }
 
@@ -241,10 +246,10 @@ export class RewardTrackingGrpcClient implements RewardTrackingGrpcClientPort, O
     });
     const proto = grpc.loadPackageDefinition(packageDefinition) as unknown as {
       rewardtracking: {
-        v1: { RewardTrackingDispatchService: new (...args: unknown[]) => grpc.Client };
+        ingest: { v1: { RewardTrackingIngestService: new (...args: unknown[]) => grpc.Client } };
       };
     };
-    const ServiceCtor = proto.rewardtracking.v1.RewardTrackingDispatchService;
+    const ServiceCtor = proto.rewardtracking.ingest.v1.RewardTrackingIngestService;
     this.client = new ServiceCtor(
       `${this.options.host}:${this.options.port}`,
       buildCredentials(this.options),
@@ -263,7 +268,7 @@ export class RewardTrackingGrpcClient implements RewardTrackingGrpcClientPort, O
   async dispatch(message: Record<string, unknown>): Promise<void> {
     const client = this.connect();
     await new Promise<void>((resolve, reject) => {
-      client.dispatchRedemptionCompleted(
+      client.ingestRewardTrackingEvent(
         toWireMessage(message),
         new grpc.Metadata(),
         { deadline: Date.now() + this.timeoutMs },
@@ -280,11 +285,14 @@ export class RewardTrackingGrpcClient implements RewardTrackingGrpcClientPort, O
             reject(error);
             return;
           }
-          if (response?.status !== 'ACCEPTED') {
+          // RTS's real response is exactly `{status: 'applied' | 'duplicate'}`
+          // (`reward_tracking_ingest.proto`'s own `IngestRewardTrackingEventResponse` comment) —
+          // never `"ACCEPTED"`, which was T-RR-062's own pre-RTS guess.
+          if (response?.status !== 'applied' && response?.status !== 'duplicate') {
             reject(
               new Error(
                 `reward-tracking-service gRPC call returned an unexpected status ` +
-                  `(expected "ACCEPTED", got ${JSON.stringify(response?.status)})`,
+                  `(expected "applied" or "duplicate", got ${JSON.stringify(response?.status)})`,
               ),
             );
             return;
