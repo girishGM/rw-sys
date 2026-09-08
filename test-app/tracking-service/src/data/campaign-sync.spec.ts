@@ -140,7 +140,11 @@ describe('ensureEnrolled', () => {
   });
 
   it('adds only the campaigns actually missing, once a customer has some but not all', async () => {
-    const secondActive: PortalCampaign = { ...ACTIVE_CAMPAIGN, id: 3, campaignCode: 'NEWLY_ACTIVE' };
+    const secondActive: PortalCampaign = {
+      ...ACTIVE_CAMPAIGN,
+      id: 3,
+      campaignCode: 'NEWLY_ACTIVE',
+    };
     const portal = fakePortal([ACTIVE_CAMPAIGN, secondActive], { 1: JOURNEY, 3: JOURNEY });
     const progress = new ProgressStore();
     progress.setForCustomer('priya-shah', [

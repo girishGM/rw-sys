@@ -29,3 +29,7 @@ export type {
   ActivityHistoryEntry,
 } from './activity';
 export type { ProgressUpdatedPayload, RewardEarnedPayload } from './sse';
+export type {
+  ConfirmedRewardsResult,
+  ConfirmedRewardsSummaryComponent,
+} from './confirmed-reward-summary';

@@ -7,8 +7,14 @@
  * `useCampaign(campaignCode, customerId)` call (already exposed by `lib/queries.ts`) to read the
  * matching `CampaignDetailTracker.rewards` — React Query dedupes/caches this by
  * `(campaignCode, customerId)`, so multiple trackers on the same campaign share one request.
+ *
+ * T-INT-021 — a third, distinct render state: `tracker.progressUnknown`. `completedCount`/
+ * `completed` are real, RAP-sourced data now, not an invented flag, and RAP can genuinely be
+ * unreachable — this must never be conflated with "0 progress" (a customer who has genuinely not
+ * started yet would otherwise look identical to one whose real progress just couldn't be fetched
+ * this request). Checked first, before either of the other two fields.
  */
-import { CheckCircleIcon } from '../../components/icons';
+import { AlertTriangleIcon, CheckCircleIcon } from '../../components/icons';
 import { ProgressBar } from '../../components/ProgressBar';
 import { useCampaign } from '../../lib/queries';
 import type { DashboardTrackerProgress } from '../../types';
@@ -31,8 +37,9 @@ export function TrackerRow({ tracker, customerId }: TrackerRowProps) {
   // tracker has none of its own — either way it's a real `RewardAssignment`, never invented copy.
   const reward = detailTracker?.rewards[0] ?? campaignQuery.data?.campaignRewards[0] ?? null;
 
-  const percent = tracker.threshold > 0 ? (tracker.completedCount / tracker.threshold) * 100 : 0;
-  const remaining = Math.max(0, tracker.threshold - tracker.completedCount);
+  const completedCount = tracker.progressUnknown ? 0 : (tracker.completedCount ?? 0);
+  const percent = tracker.threshold > 0 ? (completedCount / tracker.threshold) * 100 : 0;
+  const remaining = Math.max(0, tracker.threshold - completedCount);
 
   return (
     <div className="flex items-center gap-4">
@@ -48,11 +55,18 @@ export function TrackerRow({ tracker, customerId }: TrackerRowProps) {
             {tracker.trackerName}
           </span>
           <span className="shrink-0 font-body text-xs font-semibold text-ink-muted">
-            {tracker.completedCount}/{tracker.threshold}
+            {tracker.progressUnknown ? '?' : tracker.completedCount}/{tracker.threshold}
           </span>
         </div>
 
-        {tracker.completed ? (
+        {tracker.progressUnknown ? (
+          <div className="flex items-center gap-1.5 text-ink-muted">
+            <AlertTriangleIcon className="h-4 w-4" />
+            <span className="font-body text-xs font-semibold">
+              Progress unavailable right now — check back soon.
+            </span>
+          </div>
+        ) : tracker.completed ? (
           <div className="flex items-center gap-1.5 text-accent-strong">
             <CheckCircleIcon className="h-4 w-4" />
             <span className="font-body text-xs font-semibold">Reward unlocked!</span>

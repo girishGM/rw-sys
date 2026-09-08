@@ -21,9 +21,10 @@ import { useState } from 'react';
 import * as Tabs from '@radix-ui/react-tabs';
 import type { ReactNode } from 'react';
 import { useCustomer } from '../../app/useCustomer';
-import { useCampaigns, useDashboard, useRewards } from '../../lib/queries';
+import { useCampaigns, useConfirmedRewards, useDashboard, useRewards } from '../../lib/queries';
 import { Card } from '../../components/Card';
 import { REWARD_TYPES, type RewardType } from '../../types';
+import { ConfirmedRewardsSummaryCard } from './ConfirmedRewardsSummaryCard';
 import { groupRewardsByType } from './groupRewardsByType';
 import { RewardTypeGroup } from './RewardTypeGroup';
 
@@ -63,6 +64,10 @@ export function RewardsPage() {
   const rewardsQuery = useRewards(customerId);
   const dashboardQuery = useDashboard(customerId);
   const campaignsQuery = useCampaigns(customerId);
+  // T-INT-022 — best-effort enrichment, same treatment as dashboardQuery/campaignsQuery above:
+  // never gates this page's own loading state (rewardsQuery alone does), never conflated with the
+  // optimistic ledger it renders alongside.
+  const confirmedRewardsQuery = useConfirmedRewards(customerId);
   const [activeFilter, setActiveFilter] = useState<FilterKey>('all');
 
   if (customerLoading || rewardsQuery.isLoading || !rewardsQuery.data) {
@@ -99,6 +104,9 @@ export function RewardsPage() {
 
   return (
     <RewardsPageShell totalCount={rewards.length}>
+      {confirmedRewardsQuery.data && (
+        <ConfirmedRewardsSummaryCard result={confirmedRewardsQuery.data} />
+      )}
       {rewards.length === 0 ? (
         <Card className="p-6">
           <p className="font-body text-sm text-ink-muted">

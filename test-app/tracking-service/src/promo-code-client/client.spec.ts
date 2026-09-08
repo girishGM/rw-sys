@@ -90,9 +90,7 @@ describe('PromoCodeClient', () => {
     const fetchImpl = jest.fn().mockResolvedValue(jsonResponse(401, { message: 'bad token' }));
     const client = buildClient(fetchImpl);
 
-    await expect(client.generateCode(REQUEST)).rejects.toBeInstanceOf(
-      PromoCodeServiceRequestError,
-    );
+    await expect(client.generateCode(REQUEST)).rejects.toBeInstanceOf(PromoCodeServiceRequestError);
   });
 
   it('a network failure throws PromoCodeServiceUnreachableError, never an unhandled rejection', async () => {

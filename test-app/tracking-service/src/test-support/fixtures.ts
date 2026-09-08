@@ -273,6 +273,16 @@ export interface FixtureStores {
    * `routes/activities.ts` skips the forwarding call entirely, same as a real, unconfigured
    * `RAP_GRPC_ENABLED=false` environment. */
   readonly rap: null;
+  /** `null` — route tests exercise `GET /api/rewards/confirmed`'s own degrade-gracefully behaviour
+   * against an explicit fake `RewardTrackingClient` where that matters (`routes/rewards.spec.ts`,
+   * T-INT-022), not a real HTTP call; `null` here is the same "unconfigured" fallback
+   * `createRewardTrackingClientFromEnv` produces for real when `CUSTOMER_API_AUTH_SECRET` is unset. */
+  readonly rewardTracking: null;
+  /** `null` — route tests exercise `GET /api/dashboard`'s own degrade-gracefully behaviour against
+   * an explicit fake `RapProgressReader` where that matters (`routes/dashboard.spec.ts`,
+   * T-INT-021), not a real HTTP/gRPC call; `null` here is the same "unconfigured" fallback
+   * `createRapProgressClientFromEnv` produces for real when `PROGRESS_API_AUTH_SECRET` is unset. */
+  readonly rapProgress: null;
 }
 
 /** Every demo customer enrolled, zero progress, no rewards yet — the same starting shape
@@ -291,5 +301,7 @@ export function buildFixtureStores(): FixtureStores {
     portal: new FakePortalDataSource(),
     promoCode: null,
     rap: null,
+    rewardTracking: null,
+    rapProgress: null,
   };
 }
