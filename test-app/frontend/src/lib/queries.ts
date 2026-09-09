@@ -12,6 +12,7 @@ import type {
   ActivityResult,
   CampaignDetail,
   CampaignSummary,
+  ConfirmedRewardsResult,
   Customer,
   DashboardSummary,
   RewardLedgerEntry,
@@ -61,6 +62,22 @@ export function useRewards(
   return useQuery({
     queryKey: queryKeys.rewards(customerId ?? ''),
     queryFn: () => apiClient.getRewards(customerId as string),
+    enabled: customerId !== null,
+  });
+}
+
+/** T-INT-022 — this customer's confirmed reward-tracking-service summary (leg 7), kept as its own
+ * query (distinct key, distinct data shape) from {@link useRewards}'s optimistic ledger above — see
+ * `tracking-service/src/routes/rewards.ts`'s own header for the full source-of-truth decision this
+ * task made. A slower/failed fetch degrades to `status: 'unavailable'` inside the resolved data
+ * (never a thrown query error), so callers only need to branch on `data.status`, not on
+ * `isError`/`isLoading` for this one. */
+export function useConfirmedRewards(
+  customerId: string | null,
+): UseQueryResult<ConfirmedRewardsResult> {
+  return useQuery({
+    queryKey: queryKeys.confirmedRewards(customerId ?? ''),
+    queryFn: () => apiClient.getConfirmedRewards(customerId as string),
     enabled: customerId !== null,
   });
 }

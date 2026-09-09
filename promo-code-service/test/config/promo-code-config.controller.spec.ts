@@ -70,6 +70,10 @@ describe('T-PC-011 — PromoCodeConfigController (REST)', () => {
   });
 
   afterAll(async () => {
+    // T-PC-058: see `promo-code-config.service.spec.ts`'s own afterAll comment — a config created
+    // through this controller always opens (and often publishes) a `promo_code_config_version`
+    // row, which blocks deleting its parent `promo_code_config` row (FK, plus the undeletable
+    // trigger once published) — so this cleanup no longer deletes `promo_code_config` rows.
     for (const tenantId of tenantIds) {
       await sequelize.query(
         `DELETE FROM promo_code.promo_code_config_audit
@@ -78,11 +82,15 @@ describe('T-PC-011 — PromoCodeConfigController (REST)', () => {
            )`,
         { replacements: { tenantId } },
       );
+      // Childless-only cleanup — see `promo-code-config-version.spec.ts`'s own afterAll comment.
       await sequelize.query(
-        'DELETE FROM promo_code.promo_code_config WHERE tenant_id = :tenantId',
-        {
-          replacements: { tenantId },
-        },
+        `DELETE FROM promo_code.promo_code_config c
+           WHERE c.tenant_id = :tenantId
+             AND NOT EXISTS (
+               SELECT 1 FROM promo_code.promo_code_config_version v
+                WHERE v.promo_code_config_id = c.id
+             )`,
+        { replacements: { tenantId } },
       );
     }
     await sequelize.close();
@@ -99,7 +107,7 @@ describe('T-PC-011 — PromoCodeConfigController (REST)', () => {
     tenantId: string,
     actorId: string,
     overrides: Record<string, unknown> = {},
-  ): Promise<{ id: string; [key: string]: unknown }> {
+  ): Promise<{ id: string; draftVersion: { id: string }; [key: string]: unknown }> {
     const response = await request(app.getHttpServer())
       .post('/api/v1/promo-code-configs')
       .set(...authHeader(VALID_TOKEN()))
@@ -108,11 +116,28 @@ describe('T-PC-011 — PromoCodeConfigController (REST)', () => {
     return response.body;
   }
 
+  // T-PC-058: `POST` alone only opens a `draft` version (implementation note 3) — a config isn't
+  // list-visible/bindable until its own first version is explicitly published. Every pre-existing
+  // TC that asserts list visibility now goes through this helper instead of `createConfig` alone.
+  async function createAndPublishConfig(
+    tenantId: string,
+    actorId: string,
+    overrides: Record<string, unknown> = {},
+  ): Promise<{ id: string; [key: string]: unknown }> {
+    const created = await createConfig(tenantId, actorId, overrides);
+    const published = await request(app.getHttpServer())
+      .post(`/api/v1/promo-code-configs/${created.id}/versions/${created.draftVersion.id}/publish`)
+      .set(...authHeader(VALID_TOKEN()))
+      .send({ tenantId, actorId });
+    expect(published.status).toBe(200);
+    return published.body;
+  }
+
   // TC-1
   it('TC-1: GET with valid token returns 200, thin summary shape, only ACTIVE configs', async () => {
     const tenantId = freshTenant();
     const actorId = randomUUID();
-    const created = await createConfig(tenantId, actorId);
+    const created = await createAndPublishConfig(tenantId, actorId);
 
     const response = await request(app.getHttpServer())
       .get('/api/v1/promo-code-configs')
@@ -139,7 +164,7 @@ describe('T-PC-011 — PromoCodeConfigController (REST)', () => {
   // (`FieldValueSourceLookupService.apiLookup()`) requires `Array.isArray(body)`.
   it('T-PC-049 TC-1/TC-2: GET returns a bare array, not an object with a configs key', async () => {
     const tenantId = freshTenant();
-    await createConfig(tenantId, randomUUID());
+    await createAndPublishConfig(tenantId, randomUUID());
 
     const response = await request(app.getHttpServer())
       .get('/api/v1/promo-code-configs')
@@ -154,7 +179,7 @@ describe('T-PC-011 — PromoCodeConfigController (REST)', () => {
   // T-PC-049 TC-3: each array item still carries exactly the thin summary fields, nothing else.
   it('T-PC-049 TC-3: array items carry exactly id/name/rewardValueType/rewardValue/rewardUnit', async () => {
     const tenantId = freshTenant();
-    await createConfig(tenantId, randomUUID());
+    await createAndPublishConfig(tenantId, randomUUID());
 
     const response = await request(app.getHttpServer())
       .get('/api/v1/promo-code-configs')
@@ -187,7 +212,7 @@ describe('T-PC-011 — PromoCodeConfigController (REST)', () => {
   // TC-2
   it('TC-2: list response body never carries codePrefix/codeLength/characterSet', async () => {
     const tenantId = freshTenant();
-    await createConfig(tenantId, randomUUID());
+    await createAndPublishConfig(tenantId, randomUUID());
 
     const response = await request(app.getHttpServer())
       .get('/api/v1/promo-code-configs')
@@ -211,8 +236,8 @@ describe('T-PC-011 — PromoCodeConfigController (REST)', () => {
   it('TC-4: GET with tenantId + merchantId returns both tenant-wide and merchant-specific configs', async () => {
     const tenantId = freshTenant();
     const merchantId = randomUUID();
-    const tenantWide = await createConfig(tenantId, randomUUID());
-    const merchantScoped = await createConfig(tenantId, randomUUID(), { merchantId });
+    const tenantWide = await createAndPublishConfig(tenantId, randomUUID());
+    const merchantScoped = await createAndPublishConfig(tenantId, randomUUID(), { merchantId });
 
     const response = await request(app.getHttpServer())
       .get('/api/v1/promo-code-configs')
@@ -228,8 +253,8 @@ describe('T-PC-011 — PromoCodeConfigController (REST)', () => {
   it('TC-5: GET with status=ARCHIVED returns only archived configs', async () => {
     const tenantId = freshTenant();
     const actorId = randomUUID();
-    const active = await createConfig(tenantId, actorId);
-    const toArchive = await createConfig(tenantId, actorId);
+    const active = await createAndPublishConfig(tenantId, actorId);
+    const toArchive = await createAndPublishConfig(tenantId, actorId);
     await request(app.getHttpServer())
       .delete(`/api/v1/promo-code-configs/${toArchive.id}`)
       .query({ tenantId, actorId })
@@ -412,5 +437,91 @@ describe('T-PC-011 — PromoCodeConfigController (REST)', () => {
 
     const auditRows = await auditRepository.listForConfig(created.id);
     expect(auditRows.map((r) => r.action)).toEqual(['CREATE', 'ARCHIVE']);
+  });
+
+  // --- T-PC-058: version endpoints ----------------------------------------------------------
+
+  it('T-PC-058: POST /:id/versions/:versionId/publish returns 200 with versionStatus published', async () => {
+    const tenantId = freshTenant();
+    const actorId = randomUUID();
+    const created = await createConfig(tenantId, actorId);
+
+    const response = await request(app.getHttpServer())
+      .post(`/api/v1/promo-code-configs/${created.id}/versions/${created.draftVersion.id}/publish`)
+      .set(...authHeader(VALID_TOKEN()))
+      .send({ tenantId, actorId });
+
+    expect(response.status).toBe(200);
+    expect(response.body.versionStatus).toBe('published');
+    expect(response.body.draftVersion).toBeNull();
+  });
+
+  it('T-PC-058: publish with a versionId that does not exist returns 404', async () => {
+    const tenantId = freshTenant();
+    const actorId = randomUUID();
+    const created = await createConfig(tenantId, actorId);
+
+    const response = await request(app.getHttpServer())
+      .post(`/api/v1/promo-code-configs/${created.id}/versions/${randomUUID()}/publish`)
+      .set(...authHeader(VALID_TOKEN()))
+      .send({ tenantId, actorId });
+
+    expect(response.status).toBe(404);
+  });
+
+  it('T-PC-058: PATCH a payout field with no open draft (already published) returns 409', async () => {
+    const tenantId = freshTenant();
+    const actorId = randomUUID();
+    const created = await createAndPublishConfig(tenantId, actorId);
+
+    const response = await request(app.getHttpServer())
+      .patch(`/api/v1/promo-code-configs/${created.id}`)
+      .set(...authHeader(VALID_TOKEN()))
+      .send({ tenantId, actorId, rewardValue: 42 });
+
+    expect(response.status).toBe(409);
+  });
+
+  it('T-PC-058: POST /:id/versions opens a new draft once the prior one is published', async () => {
+    const tenantId = freshTenant();
+    const actorId = randomUUID();
+    const created = await createAndPublishConfig(tenantId, actorId);
+
+    const response = await request(app.getHttpServer())
+      .post(`/api/v1/promo-code-configs/${created.id}/versions`)
+      .set(...authHeader(VALID_TOKEN()))
+      .send({
+        tenantId,
+        actorId,
+        codeLength: 8,
+        characterSet: 'ALPHANUMERIC',
+        rewardValueType: 'FIXED_AMOUNT',
+        rewardValue: 30,
+        rewardUnit: 'USD',
+      });
+
+    expect(response.status).toBe(201);
+    expect(response.body.draftVersion.versionNo).toBe(2);
+  });
+
+  it('T-PC-058: POST /:id/versions while a draft is already open returns 409', async () => {
+    const tenantId = freshTenant();
+    const actorId = randomUUID();
+    const created = await createConfig(tenantId, actorId);
+
+    const response = await request(app.getHttpServer())
+      .post(`/api/v1/promo-code-configs/${created.id}/versions`)
+      .set(...authHeader(VALID_TOKEN()))
+      .send({
+        tenantId,
+        actorId,
+        codeLength: 8,
+        characterSet: 'ALPHANUMERIC',
+        rewardValueType: 'FIXED_AMOUNT',
+        rewardValue: 30,
+        rewardUnit: 'USD',
+      });
+
+    expect(response.status).toBe(409);
   });
 });

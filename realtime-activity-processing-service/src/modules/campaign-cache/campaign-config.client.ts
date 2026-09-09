@@ -16,12 +16,43 @@
  * that shared schema is outside this task's file scope (`src/config/**` is
  * `agent-rap-foundation`'s), matching the exact precedent
  * `promo-code-service/src/grpc/grpc-server.config.ts` already set for the same reason.
+ *
+ * **T-INT-011**: `listActiveCampaigns`/`getCampaignConfig` are no longer gRPC-only. Both now
+ * resolve their transport at call time via `PortalConfigChannelResolverService`
+ * (`portal-config-channel-resolver.service.ts`, table `portal_config_channel_config`, migration
+ * `016`) and branch to either this file's own original gRPC call (renamed
+ * `*ViaGrpc`, unchanged) or `PortalConfigRestClient` (`portal-config-rest.client.ts`, T-INT-010's
+ * new REST mirror). **Every public method signature is unchanged** (implementation note 2) — every
+ * existing caller (`CampaignConfigCacheModule`/`CampaignConfigCacheService`, and the tests listed
+ * in this file's own header history) keeps working with zero changes on their side. `watchCampaignConfig`
+ * itself is untouched (implementation note 3: no REST equivalent exists for the server-streaming
+ * push; `WatchStreamConsumer`'s caller-side fallback to `ReconciliationPollerService`'s existing
+ * 5-minute poll — which itself goes through the now-transport-resolved `listActiveCampaigns` above
+ * — is what actually degrades gracefully when the resolved primary is REST, per that note's own
+ * "confirm this is already sufficient" instruction; see this task's own completion report).
+ *
+ * **Resilience contract, deliberately conservative**: if `PortalConfigChannelResolverService`
+ * itself fails to resolve (e.g. the DB is unreachable, or `portal_config_channel_config` doesn't
+ * exist yet in an environment that hasn't run migration `016`), this client logs a warning and
+ * falls straight through to the original, pre-T-INT-011 gRPC-only call — never a hard failure for
+ * a resolution problem this class didn't have before this task. Once a channel *is* resolved, a
+ * disabled channel (`restEnabled`/`grpcEnabled` false) is simply skipped, never attempted; if the
+ * enabled primary fails, the enabled fallback is tried next; if every attempted channel fails, the
+ * last error is rethrown — TC-5's own "raises/degrades exactly as it already does today on gRPC
+ * failure" contract.
  */
-import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, Logger, OnModuleDestroy, Optional } from '@nestjs/common';
 import { join } from 'node:path';
 import { readFileSync } from 'node:fs';
 import * as grpc from '@grpc/grpc-js';
 import * as protoLoader from '@grpc/proto-loader';
+import {
+  PortalConfigChannelResolverService,
+  type PortalConfigChannel,
+  type PortalConfigChannelResolveContext,
+  type ResolvedPortalConfigChannel,
+} from './portal-config-channel-resolver.service';
+import { PortalConfigRestClient } from './portal-config-rest.client';
 
 export type ConfigSectionName = 'BASIC' | 'MERCHANTS' | 'TRACKERS' | 'RULES' | 'REWARDS' | 'CAPS';
 
@@ -268,7 +299,28 @@ export class CampaignConfigClient implements OnModuleDestroy {
   private readonly client: RawCampaignConfigServiceClient;
   private readonly timeoutMs: number;
 
-  constructor(options: CampaignConfigClientOptions = loadCampaignConfigClientOptions()) {
+  /**
+   * T-INT-011. Both deliberately **not** given an eager default-parameter value (unlike `options`
+   * above) — `PortalConfigRestClient`'s own default construction throws synchronously
+   * (`MissingPortalRestTokenError`) when `PORTAL_REST_API_TOKEN` isn't set, and this constructor is
+   * still called with a single argument by every pre-existing caller (`campaign-config-cache.module.ts`'s
+   * own factory, and every existing test — none of which set that env var). Eagerly constructing
+   * either dependency here would make *constructing this class at all* fail in exactly those
+   * unmodified call sites. Instead: stay `undefined` until first actually needed, built lazily by
+   * `getRestClient()`/`getChannelResolver()` below, the same "construct only when a caller actually
+   * reaches for it" discipline `grpc-server.main.ts`'s own optional-transport gating already uses
+   * elsewhere in this service.
+   */
+  private restClient?: PortalConfigRestClient;
+  private channelResolver?: PortalConfigChannelResolverService;
+
+  constructor(
+    options: CampaignConfigClientOptions = loadCampaignConfigClientOptions(),
+    @Optional() restClient?: PortalConfigRestClient,
+    @Optional() channelResolver?: PortalConfigChannelResolverService,
+  ) {
+    this.restClient = restClient;
+    this.channelResolver = channelResolver;
     this.timeoutMs = options.timeoutMs;
 
     const packageDefinition = protoLoader.loadSync(resolveProtoPath(), {
@@ -295,9 +347,93 @@ export class CampaignConfigClient implements OnModuleDestroy {
     return { deadline: Date.now() + this.timeoutMs };
   }
 
-  async listActiveCampaigns(
+  private getRestClient(): PortalConfigRestClient {
+    if (!this.restClient) {
+      this.restClient = new PortalConfigRestClient();
+    }
+    return this.restClient;
+  }
+
+  private getChannelResolver(): PortalConfigChannelResolverService {
+    if (!this.channelResolver) {
+      this.channelResolver = new PortalConfigChannelResolverService();
+    }
+    return this.channelResolver;
+  }
+
+  private isChannelEnabled(
+    resolved: ResolvedPortalConfigChannel,
+    channel: PortalConfigChannel,
+  ): boolean {
+    return channel === 'GRPC' ? resolved.grpcEnabled : resolved.restEnabled;
+  }
+
+  /**
+   * T-INT-011. Resolves which channel(s) to attempt for one call, then runs the matching thunk —
+   * `grpcCall`/`restCall` are never invoked speculatively; only the channel(s) this method actually
+   * decides to attempt ever run (TC-2's own "zero gRPC calls made" when REST resolves and succeeds
+   * depends on this — a naive `Promise.race`/always-call-both approach would violate it).
+   */
+  private async callWithTransportFallback<T>(
+    context: PortalConfigChannelResolveContext,
+    grpcCall: () => Promise<T>,
+    restCall: () => Promise<T>,
+  ): Promise<T> {
+    let resolved: ResolvedPortalConfigChannel | undefined;
+    try {
+      resolved = await this.getChannelResolver().resolve(context);
+    } catch (error) {
+      this.logger.warn(
+        'portal-config channel resolution failed — falling back to the pre-T-INT-011 gRPC-only ' +
+          `behaviour for this call: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    if (!resolved) {
+      return grpcCall();
+    }
+
+    const runners: Record<PortalConfigChannel, () => Promise<T>> = {
+      GRPC: grpcCall,
+      REST: restCall,
+    };
+
+    const attempts: PortalConfigChannel[] = [];
+    if (this.isChannelEnabled(resolved, resolved.primaryChannel)) {
+      attempts.push(resolved.primaryChannel);
+    }
+    if (
+      resolved.fallbackChannel !== resolved.primaryChannel &&
+      this.isChannelEnabled(resolved, resolved.fallbackChannel)
+    ) {
+      attempts.push(resolved.fallbackChannel);
+    }
+    if (attempts.length === 0) {
+      this.logger.warn(
+        'portal-config resolved with both primary and fallback channels disabled — falling back ' +
+          'to the pre-T-INT-011 gRPC-only behaviour for this call.',
+      );
+      return grpcCall();
+    }
+
+    let lastError: unknown;
+    for (const channel of attempts) {
+      try {
+        return await runners[channel]();
+      } catch (error) {
+        lastError = error;
+        this.logger.warn(
+          `portal-config channel ${channel} failed: ` +
+            `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    throw lastError;
+  }
+
+  private async listActiveCampaignsViaGrpc(
     tenantId: number,
-    sections: readonly ConfigSectionName[] = ALL_CONFIG_SECTIONS,
+    sections: readonly ConfigSectionName[],
   ): Promise<CampaignConfigListProto> {
     return new Promise((resolve, reject) => {
       this.client.listActiveCampaigns(
@@ -315,11 +451,11 @@ export class CampaignConfigClient implements OnModuleDestroy {
     });
   }
 
-  async getCampaignConfig(
+  private async getCampaignConfigViaGrpc(
     tenantId: number,
     campaignCode: string,
-    sections: readonly ConfigSectionName[] = ALL_CONFIG_SECTIONS,
-    etag = '',
+    sections: readonly ConfigSectionName[],
+    etag: string,
   ): Promise<CampaignConfigProto> {
     return new Promise((resolve, reject) => {
       this.client.getCampaignConfig(
@@ -337,6 +473,30 @@ export class CampaignConfigClient implements OnModuleDestroy {
     });
   }
 
+  async listActiveCampaigns(
+    tenantId: number,
+    sections: readonly ConfigSectionName[] = ALL_CONFIG_SECTIONS,
+  ): Promise<CampaignConfigListProto> {
+    return this.callWithTransportFallback(
+      { tenantId },
+      () => this.listActiveCampaignsViaGrpc(tenantId, sections),
+      () => this.getRestClient().listActiveCampaigns(tenantId, sections),
+    );
+  }
+
+  async getCampaignConfig(
+    tenantId: number,
+    campaignCode: string,
+    sections: readonly ConfigSectionName[] = ALL_CONFIG_SECTIONS,
+    etag = '',
+  ): Promise<CampaignConfigProto> {
+    return this.callWithTransportFallback(
+      { tenantId, campaignCode },
+      () => this.getCampaignConfigViaGrpc(tenantId, campaignCode, sections, etag),
+      () => this.getRestClient().getCampaignConfig(tenantId, campaignCode, sections, etag),
+    );
+  }
+
   /**
    * Server-streaming — T-RAP-011's own concern to consume (Objective/Scope "Out": this task only
    * builds the stub). Exposed here, not there, because the underlying grpc-js client instance
@@ -346,7 +506,12 @@ export class CampaignConfigClient implements OnModuleDestroy {
     return this.client.watchCampaignConfig({ tenantId }, new grpc.Metadata());
   }
 
-  onModuleDestroy(): void {
+  async onModuleDestroy(): Promise<void> {
     this.client.close();
+    // T-INT-011: only tear down `channelResolver`'s own `pg.Pool` if this instance actually built
+    // one lazily — never close a resolver a caller injected and may still own elsewhere.
+    if (this.channelResolver) {
+      await this.channelResolver.onModuleDestroy();
+    }
   }
 }

@@ -135,6 +135,18 @@ describe('T-PC-040 — cross-transport parity (gate G3) (e2e)', () => {
         rewardUnit: 'pts',
       });
     expect(createResponse.status).toBe(201);
+    // T-PC-063: `listSummaries()` (both `GET /api/v1/promo-code-configs` and
+    // `ListActivePromoCodeConfigs` below) only ever returns a config with a currently-`published`
+    // version (`promo-code-config.repository.ts`'s own header) — a freshly-created, `draft`-only
+    // config is otherwise invisible to both surfaces, which would make this parity test vacuously
+    // pass on an empty set rather than actually comparing anything.
+    await request(harness.app.getHttpServer())
+      .post(
+        `/api/v1/promo-code-configs/${createResponse.body.id}/versions/${createResponse.body.draftVersion.id}/publish`,
+      )
+      .set(...authHeader)
+      .send({ tenantId, actorId })
+      .expect(200);
 
     const restResponse = await request(harness.app.getHttpServer())
       .get('/api/v1/promo-code-configs')
@@ -193,6 +205,15 @@ describe('T-PC-040 — cross-transport parity (gate G3) (e2e)', () => {
         rewardUnit: 'pts',
       });
     expect(createResponse.status).toBe(201);
+    // T-PC-063: see TC-9's own comment above — publish before listing, or this config is
+    // invisible to `GET /api/v1/promo-code-configs` and the assertion below is vacuous.
+    await request(harness.app.getHttpServer())
+      .post(
+        `/api/v1/promo-code-configs/${createResponse.body.id}/versions/${createResponse.body.draftVersion.id}/publish`,
+      )
+      .set(...authHeader)
+      .send({ tenantId, actorId })
+      .expect(200);
 
     const restResponse = await request(harness.app.getHttpServer())
       .get('/api/v1/promo-code-configs')

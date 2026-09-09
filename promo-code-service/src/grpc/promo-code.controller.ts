@@ -8,10 +8,11 @@
  * response shape. No collision retry, no idempotency check, no binding resolution happens here —
  * TC-12 is a grep-based code-inspection check for exactly this.
  *
- * `ListActivePromoCodeConfigs` is a thin read against `PromoCodeConfigRepository.list()`
- * (T-PC-010) — the same method `GET /api/v1/promo-code-configs` (T-PC-011) calls — so the two
- * surfaces can never drift on which configs count as "active" or how tenant/merchant scoping
- * applies (implementation note 8).
+ * `ListActivePromoCodeConfigs` is a thin read against `PromoCodeConfigRepository.listSummaries()`
+ * (T-PC-010, updated by T-PC-058/T-PC-062) — the same method `GET /api/v1/promo-code-configs`
+ * (T-PC-011) calls — so the two surfaces can never drift on which configs count as "active," how
+ * tenant/merchant scoping applies (implementation note 8), or which `promo_code_config_version`
+ * (the currently-`published` one) a listed config's payout is read from.
  *
  * Guarded by `MtlsGuard` at the class level — every RPC on this controller requires an
  * allowlisted client certificate (implementation note 5); there is no per-method opt-out.
@@ -117,6 +118,11 @@ export class PromoCodeController {
       customerId: data.customerId ?? '',
       merchantId: emptyToUndefined(data.merchantId) ?? null,
       transport: 'GRPC',
+      // T-PC-061: passed through untouched — `generateCode()` accepts `unknown` and its own
+      // `generation-request.types.ts` schema (agent-promo-generation's scope) doesn't declare
+      // `versionNo` yet, so this is presently a harmless no-op stripped at that boundary, not a
+      // resolved pin (T-PC-060 adds real acceptance/resolution).
+      versionNo: emptyToUndefined(data.versionNo) ?? null,
       activityContext:
         activityContextInput === undefined
           ? null
@@ -147,7 +153,12 @@ export class PromoCodeController {
     }
     const merchantId = emptyToUndefined(data.merchantId);
 
-    const configs = await this.promoCodeConfigRepository.list(tenantId, {
+    // T-PC-062: `list()` returns the trimmed identity shape only (T-PC-058 moved every
+    // payout column off `promo_code_config` onto `promo_code_config_version`) — `listSummaries()`
+    // joins each identity row to its currently-`published` version, the same method
+    // `GET /api/v1/promo-code-configs` (`promo-code-config.controller.ts`) already calls, so the
+    // two surfaces can never drift on which configs count as "active" or what their payout is.
+    const configs = await this.promoCodeConfigRepository.listSummaries(tenantId, {
       merchantId,
       status: 'ACTIVE',
     });
@@ -177,6 +188,12 @@ export class PromoCodeController {
       expiresAt: result.expiresAt ? result.expiresAt.toISOString() : '',
       errorCode: nullToEmpty(result.errorCode),
       errorMessage: nullToEmpty(result.errorMessage),
+      // T-PC-062: `GenerationResult.versionNo` now exists (T-PC-060) — echoes the resolved
+      // `promo_code_config_version.version_no` back to the caller (`03-GRPC-CONTRACT.md` §1,
+      // T-PC-058 implementation note 6). Still `''` on a `FAILED` result (never populated there,
+      // `generation-result.types.ts`'s own note) via the same `nullToEmpty` convention as every
+      // other not-always-present field on this response.
+      versionNo: nullToEmpty(result.versionNo),
     };
   }
 
@@ -191,6 +208,7 @@ export class PromoCodeController {
       expiresAt: '',
       errorCode,
       errorMessage,
+      versionNo: '',
     };
   }
 }

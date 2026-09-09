@@ -10,11 +10,38 @@
  *  - Concurrency-safety tests (TC-1/TC-2/TC-4) against the real local Postgres 16 server (root
  *    `CLAUDE.md`), connected as the real least-privilege `rap_app` role — `FOR UPDATE SKIP
  *    LOCKED`'s own no-double-claim guarantee is exactly the kind of thing a mock cannot prove.
+ *
+ * **T-INT-044 update.** This file's own real-Postgres section is exactly the "genuinely global
+ * scan, no give-back budget can fully rule out cross-suite contention" caller the task's own
+ * evidence names as still flaking under real full-suite `npm test` contention. Every real-Postgres
+ * test here now claims through `OWN_TENANT_SCOPE`/`activity-log-claim.repository.ts`'s new,
+ * additive, test-only `ClaimScope` parameter (the one exception is TC-1, rewritten to call the
+ * repository directly instead of through a real `ActivityLogClaimWorker` — see that test's own
+ * doc comment for why), so this file's own claims can no longer observe, lock, or claim a row
+ * belonging to a different, concurrently-running suite in the same real, shared table. See the two
+ * new `T-INT-044 regression` tests at the end of this file for the deterministic proof that a
+ * disjoint tenant range is a hard SQL-layer boundary, not merely an unlikely-to-cross convention.
+ *
+ * **T-INT-044 second finding (independent re-verification of this task).** The two regression
+ * tests above were themselves observed to fail once under real, extreme full-suite `npm test`
+ * contention (`claimedByRangeB` came back `null`) — root-caused to a DIFFERENT, real,
+ * globally-scoped `ActivityLogClaimWorker` in a concurrently-running worker-bundle file
+ * (`processing-worker.e2e-spec.ts`/`full-pipeline(-multi-instance).e2e-spec.ts`/
+ * `mixed-transport-load.e2e-spec.ts`) claiming that test's own deliberately-global-minimum row
+ * before its own later, scoped claim call ran — the exact "this fix only protects a caller that
+ * itself participates in the lock" gap this task's own Evidence section already named. Both
+ * regression tests now also acquire `acquireIngestConsumerGroupReaderLease()` (the same
+ * cross-process lock every worker-bundle file already takes before starting a real global claim
+ * worker — see each test's own doc comment) for their own real-`pending`-row exposure window,
+ * closing this specific residual gap without touching production semantics.
  */
 import 'reflect-metadata';
 import { Sequelize } from 'sequelize-typescript';
 import { QueryTypes } from 'sequelize';
-import { ActivityLogClaimRepository } from '@/modules/processing/activity-log-claim.repository';
+import {
+  ActivityLogClaimRepository,
+  type ClaimScope,
+} from '@/modules/processing/activity-log-claim.repository';
 import {
   ActivityLogClaimWorker,
   NoopActivityLogRowHandler,
@@ -32,8 +59,25 @@ import type { ActivityLogRow } from '@/database/models/activity-log.model';
 import { MetricsService } from '@/observability/metrics.service';
 import { StructuredLoggerFactory } from '@/observability/structured-logger';
 import type { LogRedactorService } from '@/modules/encryption/log-redactor.service';
+import {
+  acquireIngestConsumerGroupReaderLease,
+  type IngestConsumerGroupReaderLease,
+} from '../../e2e/kafka-shared-consumer-group-lock';
+import { READER_LEASE_ACQUIRE_TIMEOUT_MS } from '../../e2e/full-pipeline-test-helpers';
 
 const TENANT_ID = 930_000 + Math.floor(Math.random() * 69_999);
+
+/**
+ * T-INT-044. Every real-Postgres test in this file below that doesn't specifically need to
+ * exercise the genuinely-global, unscoped claim query (i.e. everything except TC-1's own
+ * `drainOwnTenantRows`, which is deliberately unscoped — see its own doc comment) passes this
+ * scope to `claimNextPendingRow()`/`claimUntil()`, so it can never observe, lock, or claim a row
+ * belonging to a concurrently-running, unrelated suite (a different Jest worker process hitting
+ * the same real, shared `activity_logs` table) — closing the residual cross-suite claim-query
+ * contamination this task's own task file documents, at its source, for every call site in this
+ * file that can adopt it.
+ */
+const OWN_TENANT_SCOPE: ClaimScope = { tenantIdRangeStart: TENANT_ID, tenantIdRangeEnd: TENANT_ID };
 
 /** Same hand-rolled fake `structured-logger.spec.ts` itself uses for this exact collaborator — a
  * real `StructuredLoggerFactory`/`StructuredLogger`, not a mock, over a no-op redactor. */
@@ -553,87 +597,42 @@ describe('ActivityLogClaimRepository / claim mechanism (real Postgres, rap_app r
     });
   }
 
-  // TC-1: two independent "workers" draining the same 10-row queue concurrently never double-claim.
+  // TC-1: two independent claimers draining the same 10-row queue concurrently never double-claim.
+  //
+  // T-INT-044: rewritten to claim directly through the scoped repository call
+  // (`OWN_TENANT_SCOPE`) instead of through a real `ActivityLogClaimWorker.claimAndHandleOne()`
+  // loop. `claimAndHandleOne()` always calls `claimNextPendingRow()` with no scope — production
+  // code (`activity-log-claim.worker.ts`) is outside this task's own file scope, and its own
+  // genuinely-global production behavior must not change — so a worker-mediated loop here could
+  // still observe, lock, and claim a concurrently-running unrelated suite's own row in the same
+  // real, shared table: exactly the residual cross-suite contamination hazard this task exists to
+  // close, and the previous version of this test's own give-back loop below (kept in history, not
+  // in this file) is what that contamination looked like in practice. What TC-1 actually needs to
+  // prove — `FOR UPDATE SKIP LOCKED` never lets two concurrent claimers win the same row — is
+  // fully exercised by calling the repository directly; `ActivityLogClaimWorker`'s own lane-
+  // scheduling/handler-invocation/metrics glue around that call is already covered by the "fakes"
+  // tests above in this same file (no real DB involved there, so no scoping concern either).
   it('TC-1: two workers claim concurrently against 10 pending rows — every row claimed exactly once', async () => {
     await insertPendingRows(10);
 
     const handlerA = new RecordingHandler();
     const handlerB = new RecordingHandler();
-    const resolver = new FakeConfigResolver();
-    const workerA = new ActivityLogClaimWorker(
-      claimRepository,
-      resolver,
-      new MetricsService(),
-      fakeLoggerFactory(),
-      handlerA,
-      false,
-    );
-    const workerB = new ActivityLogClaimWorker(
-      claimRepository,
-      resolver,
-      new MetricsService(),
-      fakeLoggerFactory(),
-      handlerB,
-      false,
-    );
 
-    async function drainOwnTenantRows(worker: ActivityLogClaimWorker): Promise<void> {
-      // Real-Postgres claim is global (not scoped to this test's tenant) — drain until this
-      // worker has claimed 5 of *our* rows or the whole table (shared CI DB) is empty.
-      //
-      // T-RAP-051 retry 1/3: raised from 30 to 300 (matching `claimUntil`'s own T-RAP-047
-      // precedent below, same file) after this exact loop was reproduced failing under real full
-      // `npm test` parallelism (allIds length 9, not 10 — one of this worker's own rows never
-      // claimed within the old 30-attempt budget). Each foreign row this loop claims-and-gives-
-      // back consumes one attempt without making progress toward our own 10 rows; give-back
-      // already bumps `activity_reached_date` (so it is not a livelock, T-RAP-047's own fixed
-      // class of bug), but under real 9-way contention with several *other* suites' own pending
-      // rows genuinely interleaved in the same global queue at once, 30 attempts is provably too
-      // thin a margin, not merely unlucky. 300 matches the budget `claimUntil` already uses for
-      // the identical shape of problem (25-noise-row worst case, T-RAP-047's own regression test)
-      // — still bounded, still nowhere near an unbounded drain, and the loop below still exits
-      // early via `break` the moment the shared queue reports empty.
-      let ourClaims = 0;
-      for (let attempts = 0; attempts < 300 && ourClaims < 5; attempts += 1) {
-        const claimedSomething = await worker.claimAndHandleOne();
-        if (!claimedSomething) {
+    async function drainOwnTenantRows(handler: RecordingHandler): Promise<void> {
+      for (let claimedCount = 0; claimedCount < 5; claimedCount += 1) {
+        const row = await claimRepository.claimNextPendingRow(OWN_TENANT_SCOPE);
+        if (row === null) {
           break;
         }
-        const handled = worker === workerA ? handlerA.handled : handlerB.handled;
-        const last = handled[handled.length - 1];
-        if (last.tenant_id !== TENANT_ID) {
-          // Claimed a row belonging to another suite's own tenant (the shared, unfiltered
-          // global claim query — 05-PROCESSING-PIPELINE.md §4 — makes this possible whenever
-          // another Postgres-backed spec runs concurrently in a different Jest worker, T-RAP-033's
-          // own completion report flags this). `RecordingHandler` never transitions this row's own
-          // status, so left alone it would sit `processing` forever, starving whichever suite
-          // actually owns it (their own bounded retry loop would eventually see "failed to claim
-          // the row this test just inserted"). Giving it back immediately is the minimal fix: the
-          // rightful owner's own next poll picks it straight back up.
-          //
-          // T-RAP-047: also bump `activity_reached_date` to `now()` on give-back, not just
-          // `status`. Without this, a foreign row that happens to be the current global minimum
-          // stays the global minimum after being handed back (its ordering column never moved),
-          // so this loop would re-claim and re-release *the exact same row* forever instead of
-          // making progress — a genuine livelock, reproduced deterministically in this file's own
-          // regression test below. Bumping the timestamp moves a given-back row to the back of
-          // the queue, guaranteeing each distinct foreign row can block us at most once.
-          await sequelize.query(
-            `UPDATE realtime_activity_processing.activity_logs
-                SET status = 'pending', activity_reached_date = now()
-              WHERE id = :id`,
-            { type: QueryTypes.RAW, replacements: { id: last.id } },
-          );
-        }
-        ourClaims = handled.filter((r) => r.tenant_id === TENANT_ID).length;
+        await handler.handle(row);
       }
     }
 
-    await Promise.all([drainOwnTenantRows(workerA), drainOwnTenantRows(workerB)]);
+    await Promise.all([drainOwnTenantRows(handlerA), drainOwnTenantRows(handlerB)]);
 
-    const ourClaimsA = handlerA.handled.filter((r) => r.tenant_id === TENANT_ID);
-    const ourClaimsB = handlerB.handled.filter((r) => r.tenant_id === TENANT_ID);
-    const allIds = [...ourClaimsA, ...ourClaimsB].map((r) => r.id);
+    // Every claimed row is guaranteed (by `OWN_TENANT_SCOPE`, enforced at the SQL layer, not just
+    // asserted after the fact) to belong to `TENANT_ID` — no `.filter()` needed here any more.
+    const allIds = [...handlerA.handled, ...handlerB.handled].map((r) => r.id);
 
     expect(allIds).toHaveLength(10);
     expect(new Set(allIds).size).toBe(10); // no id claimed by both workers
@@ -684,7 +683,9 @@ describe('ActivityLogClaimRepository / claim mechanism (real Postgres, rap_app r
     const [insertedRow] = await insertPendingRows(1);
 
     const attempts = await Promise.all(
-      Array.from({ length: 20 }, () => claimUntil((r) => r.id === insertedRow.id)),
+      Array.from({ length: 20 }, () =>
+        claimUntil((r) => r.id === insertedRow.id, OWN_TENANT_SCOPE),
+      ),
     );
 
     const ownWins = attempts.filter(
@@ -715,13 +716,25 @@ describe('ActivityLogClaimRepository / claim mechanism (real Postgres, rap_app r
    * queue — fixed it, draining every foreign row exactly once before reaching ours. `maxAttempts`
    * is bumped from 20 to 300 alongside this as a generous, no-longer-load-bearing safety margin
    * (every suite in this codebase inserts at most ~20 rows of its own).
+   *
+   * **T-INT-044 update:** every call site in this file now passes `OWN_TENANT_SCOPE` (the one
+   * exception being TC-1's own deliberately-unscoped `drainOwnTenantRows`, see its own doc
+   * comment). With a scope given, `claimNextPendingRow(scope)` itself guarantees — at the SQL
+   * layer, not via this function's own app-level `predicate` — that a foreign suite's row can
+   * never be returned here in the first place, so the give-back branch below is no longer
+   * load-bearing for cross-suite contamination the way it used to be; it is kept as-is (rather
+   * than removed) so this function still behaves correctly for a hypothetical future caller that
+   * omits `scope` on purpose (e.g. to keep testing the give-back path itself), and so a regression
+   * back to an unscoped call site anywhere in this file would still degrade gracefully instead of
+   * failing outright.
    */
   async function claimUntil(
     predicate: (row: ActivityLogRow) => boolean,
+    scope?: ClaimScope,
     maxAttempts = 300,
   ): Promise<ActivityLogRow | null> {
     for (let i = 0; i < maxAttempts; i += 1) {
-      const next = await claimRepository.claimNextPendingRow();
+      const next = await claimRepository.claimNextPendingRow(scope);
       if (next === null) {
         return null;
       }
@@ -743,7 +756,7 @@ describe('ActivityLogClaimRepository / claim mechanism (real Postgres, rap_app r
   // re-claimable.
   it('TC-2: a stale processing row is swept back to pending and is re-claimable', async () => {
     await insertPendingRows(1);
-    const claimed = await claimUntil((r) => r.tenant_id === TENANT_ID);
+    const claimed = await claimUntil((r) => r.tenant_id === TENANT_ID, OWN_TENANT_SCOPE);
     expect(claimed).not.toBeNull();
     if (claimed === null) {
       return;
@@ -779,13 +792,13 @@ describe('ActivityLogClaimRepository / claim mechanism (real Postgres, rap_app r
     // between — if the sweep genuinely hadn't reset it, this row would still be stuck `processing`
     // and out of the global claim query's `WHERE status = 'pending'` entirely, so `claimUntil`
     // would exhaust its attempts and return `null`, still failing the assertion below.
-    const reclaimedRow = await claimUntil((r) => r.id === claimed.id);
+    const reclaimedRow = await claimUntil((r) => r.id === claimed.id, OWN_TENANT_SCOPE);
     expect(reclaimedRow?.id).toBe(claimed.id);
   });
 
   it('a row within the stale timeout is left alone (sweep is not over-eager)', async () => {
     await insertPendingRows(1);
-    const claimed = await claimUntil((r) => r.tenant_id === TENANT_ID);
+    const claimed = await claimUntil((r) => r.tenant_id === TENANT_ID, OWN_TENANT_SCOPE);
     expect(claimed).not.toBeNull();
     if (claimed === null) {
       return;
@@ -903,6 +916,18 @@ describe('ActivityLogClaimRepository / claim mechanism (real Postgres, rap_app r
   // this test's own job is narrower — proving noise-tolerance, not ordering — so it only needs
   // "was our own row found at all despite the noise", which no external legitimate claimant can
   // make false (at worst it delays which attempt finds it, still well inside `maxAttempts`).
+  //
+  // **T-INT-044 update:** this exact test ("claimed" came back `undefined`) is the one concrete
+  // reproduction this task's own task file cites as still flaking under real full-suite `npm test`
+  // contention even at the 300-attempt budget — the 25 synthetic noise rows below stand in for a
+  // *different* concurrently-running suite's own real pending rows, and under enough genuine
+  // external contention the give-back loop's fixed budget was provably exhaustible (a question of
+  // how much contention, not whether, per this function's own header). Passing `OWN_TENANT_SCOPE`
+  // now excludes every foreign-tenant row — synthetic noise below AND any real external suite's own
+  // rows alike — at the SQL layer itself, so this test's own success no longer depends on draining
+  // noise within a fixed budget at all; the 25 rows below now exist purely to prove that scoping,
+  // not the give-back loop, is what makes them irrelevant (see the assertion after the noise-tenant
+  // cleanup below).
   it('T-RAP-047 regression: claimUntil finds our own row despite many other-tenant pending rows ahead of it', async () => {
     const noiseTenantId = TENANT_ID + 111_111;
     const noiseRows = Array.from({ length: 25 }, (_unused, index) =>
@@ -920,6 +945,7 @@ describe('ActivityLogClaimRepository / claim mechanism (real Postgres, rap_app r
 
       const claimed = await claimUntil(
         (r) => r.tenant_id === TENANT_ID && r.tracker_component_code === 'COMP-TARGET',
+        OWN_TENANT_SCOPE,
       );
 
       expect(claimed?.tracker_component_code).toBe('COMP-TARGET');
@@ -936,6 +962,12 @@ describe('ActivityLogClaimRepository / claim mechanism (real Postgres, rap_app r
   // `tenant_id` half of the predicate fix above — without it, a same-named foreign row claimed
   // first (it has the earlier `activity_reached_date` here) would be accepted as a match and
   // never given back, silently starving its rightful owner.
+  //
+  // **T-INT-044 update:** now passes `OWN_TENANT_SCOPE`, so the impostor row is excluded at the
+  // SQL layer before this test's own `predicate` ever runs — a stronger guarantee than the
+  // original app-level-only discrimination this test was written to prove, and one that also
+  // protects this test from any *real* concurrently-running suite's own same-named row, not just
+  // the single synthetic impostor it creates itself.
   it('T-RAP-047 regression: a same-named other-tenant row is never mistaken for our own', async () => {
     const impostorTenantId = TENANT_ID + 222_222;
 
@@ -956,6 +988,7 @@ describe('ActivityLogClaimRepository / claim mechanism (real Postgres, rap_app r
 
       const claimed = await claimUntil(
         (r) => r.tenant_id === TENANT_ID && r.tracker_component_code === 'COMP-FIRST-3',
+        OWN_TENANT_SCOPE,
       );
 
       expect(claimed?.tenant_id).toBe(TENANT_ID);
@@ -967,4 +1000,180 @@ describe('ActivityLogClaimRepository / claim mechanism (real Postgres, rap_app r
       );
     }
   });
+
+  // T-INT-044 TC-2 (this task's own required regression): proves `claimNextPendingRow(scope)` is
+  // a hard SQL-layer boundary, not merely an unlikely-to-cross app-level convention — the property
+  // every other test above now relies on via `OWN_TENANT_SCOPE`. Two disjoint, single-tenant
+  // "ranges" (`rangeATenantId`/`rangeBTenantId`, both distinct from every other tenant id already
+  // in play elsewhere in this file) each get exactly one real pending row; range B's row is
+  // inserted FIRST (so it has the earlier, globally-smallest `activity_reached_date`) specifically
+  // so that a naive, merely-advisory implementation of `scope` (e.g. one that ran the plain
+  // unscoped global scan and only filtered the *result* afterward) would still be able to return
+  // it to a range-A-scoped caller — a real SQL `WHERE`/inner-subquery predicate, which is what this
+  // repository method actually implements, cannot. Deterministic: no reliance on real external
+  // contention or timing luck of any kind, unlike the give-back-loop tests above — EXCEPT for one
+  // residual, independently reproduced hazard: row B sits genuinely `pending` (and, by this test's
+  // own deliberate design, the table's global minimum by `activity_reached_date`) across several
+  // real round trips, so a DIFFERENT, real, globally-scoped `ActivityLogClaimWorker` in a
+  // concurrently-running "worker bundle" file (`processing-worker.e2e-spec.ts`,
+  // `full-pipeline(-multi-instance).e2e-spec.ts`, `mixed-transport-load.e2e-spec.ts`) can claim it
+  // first — reproduced for real during this task's own re-verification (`claimedByRangeB` came back
+  // `null` while a worker bundle's own `ActivityLogClaimWorker` was observed starting in the same
+  // second, in a full, unfiltered `npm test` run). This is exactly the same class of hazard
+  // `processing-worker.e2e-spec.ts`'s own header already documents fixing FOR ITSELF by acquiring
+  // `acquireIngestConsumerGroupReaderLease()` before starting its own worker bundle; every real
+  // worker-bundle file in this codebase already takes that same lease/lock before running a
+  // globally-scoped claim worker, but that only protects a caller that ALSO participates in it —
+  // this test's own row was not, and is now brought into that same discipline, for the two tests in
+  // this file (this one and its concurrent-variant sibling below) that hold a genuinely-global-
+  // minimum, real `pending` row open across more than one real claim round trip. No other test in
+  // this file needs this: every one of them either targets its own already-claimed row by exact id
+  // in the same transaction as its own insert (`insertAndClaim`, `insertAndPinActivityReachedDate`)
+  // or is bounded by `OWN_TENANT_SCOPE`'s own tenant-id predicate with no cross-round-trip exposure
+  // window of its own.
+  it(
+    'T-INT-044 regression: claimNextPendingRow(scope) never returns a row outside its own tenant range, even when a disjoint-range row is the queue global minimum',
+    async () => {
+      const readerLease: IngestConsumerGroupReaderLease =
+        await acquireIngestConsumerGroupReaderLease(READER_LEASE_ACQUIRE_TIMEOUT_MS);
+      const rangeATenantId = TENANT_ID + 444_444;
+      const rangeBTenantId = TENANT_ID + 555_555;
+      const rangeAScope: ClaimScope = {
+        tenantIdRangeStart: rangeATenantId,
+        tenantIdRangeEnd: rangeATenantId,
+      };
+      const rangeBScope: ClaimScope = {
+        tenantIdRangeStart: rangeBTenantId,
+        tenantIdRangeEnd: rangeBTenantId,
+      };
+
+      try {
+        // Inserted first, so it holds the earliest `activity_reached_date` — the current global
+        // minimum — at the moment the range-A-scoped claim below runs.
+        const [rowB] = await sequelize.transaction((t) =>
+          fanOutRepository.insertFanOutRows(
+            [pendingRowInput({ tenantId: rangeBTenantId, trackerComponentCode: 'COMP-RANGE-B' })],
+            t,
+          ),
+        );
+        const [rowA] = await sequelize.transaction((t) =>
+          fanOutRepository.insertFanOutRows(
+            [pendingRowInput({ tenantId: rangeATenantId, trackerComponentCode: 'COMP-RANGE-A' })],
+            t,
+          ),
+        );
+
+        // Scoped to range A: must return row A — never row B, despite row B being the global
+        // minimum by `activity_reached_date` at this exact moment.
+        const claimedByRangeA = await claimRepository.claimNextPendingRow(rangeAScope);
+        expect(claimedByRangeA?.id).toBe(rowA.id);
+        expect(claimedByRangeA?.tenant_id).toBe(rangeATenantId);
+
+        // Range A is now empty — a second range-A-scoped call must find nothing. Row B, still
+        // genuinely `pending`, must never leak across the boundary just because range A ran dry.
+        const secondClaimByRangeA = await claimRepository.claimNextPendingRow(rangeAScope);
+        expect(secondClaimByRangeA).toBeNull();
+
+        // Scoped to range B: must still find row B, completely unaffected by everything range A did.
+        const claimedByRangeB = await claimRepository.claimNextPendingRow(rangeBScope);
+        expect(claimedByRangeB?.id).toBe(rowB.id);
+        expect(claimedByRangeB?.tenant_id).toBe(rangeBTenantId);
+      } finally {
+        try {
+          await sequelize.query(
+            'DELETE FROM realtime_activity_processing.activity_logs WHERE tenant_id IN (:rangeA, :rangeB)',
+            {
+              type: QueryTypes.RAW,
+              replacements: { rangeA: rangeATenantId, rangeB: rangeBTenantId },
+            },
+          );
+        } finally {
+          readerLease.release();
+        }
+      }
+    },
+    READER_LEASE_ACQUIRE_TIMEOUT_MS + 30_000,
+  );
+
+  // T-INT-044 TC-2 (concurrent variant): the same disjoint-range guarantee under real concurrency
+  // — two independent claim loops, each scoped to its own disjoint tenant range, draining a shared
+  // pool of rows from BOTH ranges at once. If scoping were anything less than a hard SQL-layer
+  // boundary, running both loops concurrently against the SAME table would be exactly the
+  // condition under which a foreign claim would surface (the loops race each other for real,
+  // rather than running one after the other). Deterministic regardless of scheduling: each loop
+  // can only ever end up with rows from its own range, and every row from both ranges is claimed
+  // by exactly one of them. Also acquires the reader lease — see the sibling test above's own doc
+  // comment for why: these 10 rows sit genuinely `pending` across the whole `Promise.all` drain,
+  // the same real cross-suite exposure window, just spread across more rows.
+  it(
+    'T-INT-044 regression: two claim loops scoped to disjoint tenant ranges, running concurrently, never claim across the boundary',
+    async () => {
+      const readerLease: IngestConsumerGroupReaderLease =
+        await acquireIngestConsumerGroupReaderLease(READER_LEASE_ACQUIRE_TIMEOUT_MS);
+      const rangeATenantId = TENANT_ID + 666_666;
+      const rangeBTenantId = TENANT_ID + 777_777;
+      const rangeAScope: ClaimScope = {
+        tenantIdRangeStart: rangeATenantId,
+        tenantIdRangeEnd: rangeATenantId,
+      };
+      const rangeBScope: ClaimScope = {
+        tenantIdRangeStart: rangeBTenantId,
+        tenantIdRangeEnd: rangeBTenantId,
+      };
+
+      try {
+        const rangeARows = Array.from({ length: 5 }, (_unused, index) =>
+          pendingRowInput({
+            tenantId: rangeATenantId,
+            trackerComponentCode: `COMP-RANGE-A-${index}`,
+          }),
+        );
+        const rangeBRows = Array.from({ length: 5 }, (_unused, index) =>
+          pendingRowInput({
+            tenantId: rangeBTenantId,
+            trackerComponentCode: `COMP-RANGE-B-${index}`,
+          }),
+        );
+        await sequelize.transaction((t) => fanOutRepository.insertFanOutRows(rangeARows, t));
+        await sequelize.transaction((t) => fanOutRepository.insertFanOutRows(rangeBRows, t));
+
+        async function drainRange(scope: ClaimScope): Promise<ActivityLogRow[]> {
+          const claimed: ActivityLogRow[] = [];
+          for (let i = 0; i < 5; i += 1) {
+            const row = await claimRepository.claimNextPendingRow(scope);
+            if (row === null) {
+              break;
+            }
+            claimed.push(row);
+          }
+          return claimed;
+        }
+
+        const [claimedA, claimedB] = await Promise.all([
+          drainRange(rangeAScope),
+          drainRange(rangeBScope),
+        ]);
+
+        expect(claimedA).toHaveLength(5);
+        expect(claimedB).toHaveLength(5);
+        expect(claimedA.every((row) => row.tenant_id === rangeATenantId)).toBe(true);
+        expect(claimedB.every((row) => row.tenant_id === rangeBTenantId)).toBe(true);
+        const allClaimedIds = [...claimedA, ...claimedB].map((row) => row.id);
+        expect(new Set(allClaimedIds).size).toBe(10); // no id claimed by both loops
+      } finally {
+        try {
+          await sequelize.query(
+            'DELETE FROM realtime_activity_processing.activity_logs WHERE tenant_id IN (:rangeA, :rangeB)',
+            {
+              type: QueryTypes.RAW,
+              replacements: { rangeA: rangeATenantId, rangeB: rangeBTenantId },
+            },
+          );
+        } finally {
+          readerLease.release();
+        }
+      }
+    },
+    READER_LEASE_ACQUIRE_TIMEOUT_MS + 30_000,
+  );
 });

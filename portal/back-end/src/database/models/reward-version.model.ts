@@ -43,6 +43,17 @@ export const REWARD_VERSION_KINDS = [
 
 export type RewardVersionKind = (typeof REWARD_VERSION_KINDS)[number];
 
+/**
+ * T-173 — `reward_versions.expiry_unit`'s vocabulary (`ck_rewv_expiry_unit`, `T173_001`). Declared
+ * as a literal tuple here for the same reason `REWARD_VERSION_KINDS` above is: nothing under
+ * `src/database/` imports the wire package. The list is the CHECK constraint's list; the database
+ * is the authority and `test/database/reward-expiry-duration.migration.e2e-spec.ts` asserts the two
+ * agree against a live Postgres rather than against this file.
+ */
+export const REWARD_EXPIRY_UNITS = ['minutes', 'hours', 'days'] as const;
+
+export type RewardExpiryUnit = (typeof REWARD_EXPIRY_UNITS)[number];
+
 @Table({
   schema: 'reward_config',
   tableName: 'reward_versions',
@@ -118,6 +129,18 @@ export class RewardVersion extends Model<RewardVersion> {
       stringifyJsonColumn(value) as unknown as Record<string, unknown> | null,
     );
   }
+
+  /** T-173 — how long a reward stays usable **after it is given**, as a value + unit pair
+   * (`T173_001`). Both halves are set together or neither is (`ck_rewv_expiry_pair`), and a
+   * `null` pair reads as "this reward never expires", not "not yet configured" — see the
+   * migration header. reward-redemption-service computes the actual `expires_at` from this
+   * (`T-RR-063`); the portal stores the duration and never a date. */
+  @Column({ type: DataType.INTEGER, allowNull: true, field: 'expiry_value' })
+  declare expiryValue: number | null;
+
+  /** T-173 — the unit of {@link expiryValue} (`ck_rewv_expiry_unit`, `T173_001`). */
+  @Column({ type: DataType.STRING(10), allowNull: true, field: 'expiry_unit' })
+  declare expiryUnit: RewardExpiryUnit | null;
 
   @Column({ type: DataType.STRING(500), allowNull: true, field: 'change_summary' })
   declare changeSummary: string | null;

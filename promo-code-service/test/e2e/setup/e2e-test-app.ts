@@ -422,6 +422,42 @@ export class E2ETestHarness {
       );
     }
     const configId = createResponse.body.id as string;
+    const draftVersionId = createResponse.body.draftVersion?.id as string | undefined;
+    if (!draftVersionId) {
+      // Defensive only (R3) — `POST /api/v1/promo-code-configs` always creates the identity row
+      // plus its first `draft` version in one call (T-PC-058), so the response always carries one.
+      throw new Error(
+        `E2ETestHarness.createBoundConfig: expected a draftVersion on the create response for "${configId}"`,
+      );
+    }
+
+    // T-PC-064: publish the just-created draft *before* binding — `POST /api/v1/campaign-promo-
+    // configs` (below) only ever pins a config's currently-`published` version
+    // (`campaign-binding.service.ts`'s own `assertConfigActiveAndPublished`), so an
+    // unpublished, `draft`-only config can never be bound. Missing here until this task: every
+    // other e2e spec sharing this harness (`cross-transport-parity`/`grpc-round-trip`/
+    // `kafka-round-trip`/`observability`/`outbox-broker-outage`, plus
+    // `test/security/{kafka-poison-message,input-validation-boundary,cross-tenant-isolation}.spec.ts`)
+    // started failing with a `409` ("has no published version for tenant ... — publish one before
+    // binding") the moment T-PC-058's migrations landed — reproduced directly via `npx jest
+    // test/e2e/observability.e2e-spec.ts` before this fix (see `reports/T-PC-064.md`). This exact
+    // gap and its fix were also independently discovered and applied, mid-flight, by T-PC-063
+    // (a different, concurrently in-progress task in this same agent's own queue) while this task
+    // was still `pending` — the two efforts converged on the identical diff; this comment and
+    // `reports/T-PC-064.md` are the authoritative record for *this* file, since `test/e2e/setup/
+    // e2e-test-app.ts` is this task's own owned file (T-PC-064's task file), not T-PC-063's
+    // (T-PC-063 owns `test/e2e/load/support/load-test-harness.ts` and
+    // `test/security/grpc-negative-auth.spec.ts` — see that task's own report for those two).
+    const publishResponse = await request(this.app.getHttpServer())
+      .post(`/api/v1/promo-code-configs/${configId}/versions/${draftVersionId}/publish`)
+      .set(...this.authHeader())
+      .send({ tenantId, actorId });
+    if (publishResponse.status !== 200) {
+      throw new Error(
+        `E2ETestHarness.createBoundConfig: publish failed (${publishResponse.status}): ` +
+          JSON.stringify(publishResponse.body),
+      );
+    }
 
     const bindRefId = randomUUID();
     const bindResponse = await request(this.app.getHttpServer())
@@ -510,10 +546,20 @@ export class E2ETestHarness {
            )`,
         { replacements: { tenantId } },
       );
-      await this.sequelize.query(
-        'DELETE FROM promo_code.promo_code_config WHERE tenant_id = :tenantId',
-        { replacements: { tenantId } },
-      );
+      // T-PC-064: deliberately does **not** delete `promo_code_config`/`promo_code_config_version`
+      // rows any more. Since T-PC-058's split, every config `createBoundConfig()` creates is now
+      // published (this task added the missing publish step, above), and
+      // `trg_promo_code_config_version_undeletable` (migration `T-PC-058_002`) rejects a `DELETE`
+      // on any non-`draft` version — so the previous `DELETE FROM promo_code_config` here would
+      // fail on the ordinary (undeclared-`ON DELETE`, so `NO ACTION`) FK from that child row
+      // before the trigger is even reached. Same "immutable history, not a leak this test can or
+      // should work around" reasoning `test/e2e/load/support/load-test-harness.ts`'s own
+      // `teardown()` (T-PC-063) and `promo-code-generation-version.spec.ts`'s own `afterAll`
+      // (T-PC-060) already established for this exact table pair. Reproduced directly: this
+      // method's own unmodified `DELETE FROM promo_code_config` failed every `*.e2e-spec.ts` run
+      // sharing this harness with `Test suite failed to run` once `createBoundConfig()` started
+      // publishing a version (this task's own fix, above) — confirmed via `npx jest
+      // test/e2e/observability.e2e-spec.ts` before this fix.
     }
     if (this.serviceIdentityIds.length > 0) {
       await this.sequelize.query(

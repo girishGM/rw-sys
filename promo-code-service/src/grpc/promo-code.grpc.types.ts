@@ -8,6 +8,12 @@
  * are kept hand-in-sync with their own migration (`promo-code-config.entity.ts`'s own
  * convention) — small, stable message set, reviewed together with the `.proto` file on any
  * change.
+ *
+ * T-PC-061: `versionNo` added to both `GenerateCodeRequestProto` (optional — an explicit version
+ * pin, empty/absent when the caller has none) and `GenerateCodeResponseProto` (required like its
+ * siblings — the resolved version, `''` when not yet populated). See `promo_code.v1.proto`'s own
+ * header for why `GenerateCodeResponseProto.versionNo` is only wired to a literal `''` placeholder
+ * in `promo-code.controller.ts` today, not yet a real resolved value (T-PC-060's scope).
  */
 
 export interface ActivityContextProto {
@@ -24,6 +30,7 @@ export interface GenerateCodeRequestProto {
   customerId?: string;
   merchantId?: string;
   activityContext?: ActivityContextProto;
+  versionNo?: string;
 }
 
 export interface GenerateCodeResponseProto {
@@ -36,6 +43,7 @@ export interface GenerateCodeResponseProto {
   expiresAt: string;
   errorCode: string;
   errorMessage: string;
+  versionNo: string;
 }
 
 export interface ListActivePromoCodeConfigsRequestProto {

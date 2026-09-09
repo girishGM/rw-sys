@@ -29,6 +29,9 @@ const SEEDED_WIDGET_KEYS = [
   'list_my_campaigns',
   'list_returned_for_rework',
   'list_approval_queue',
+  // T-INT-031 (`reward-service-integration-plan`) — see `widgetRegistry.ts`'s own header.
+  'kpi_reward_tracking_alerts',
+  'list_campaign_reward_progress',
 ];
 
 describe('WIDGET_REGISTRY', () => {

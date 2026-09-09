@@ -26,6 +26,7 @@ import { CampaignBindingService } from '@/modules/campaign-binding/campaign-bind
 import type { CampaignPromoConfig } from '@/modules/campaign-binding/campaign-promo-config.entity';
 import { BindingConflictError } from '@/modules/campaign-binding/campaign-binding.errors';
 import type { PromoCodeConfigService } from '@/modules/promo-code-config/promo-code-config.service';
+import type { PromoCodeConfigVersionRepository } from '@/modules/promo-code-config/promo-code-config-version.repository';
 
 function uniqueViolationError(): Error {
   const error = new Error(
@@ -48,12 +49,23 @@ function buildService(createImpl: jest.Mock): {
   const promoCodeConfigService = {
     findById: jest.fn().mockResolvedValue({ id: randomUUID(), status: 'ACTIVE' }),
   } as unknown as PromoCodeConfigService;
+  // T-PC-058: `bind` now also resolves the config's currently-published version to pin —
+  // stubbed to always resolve one, since this file's own retry branch is unrelated to that
+  // resolution and shouldn't need a real DB round trip to exercise it.
+  const versionRepository = {
+    findPublishedForConfig: jest.fn().mockResolvedValue({ id: randomUUID() }),
+  } as unknown as PromoCodeConfigVersionRepository;
   // Real `Sequelize.transaction` invokes the callback and rejects with whatever it throws —
   // this stand-in reproduces exactly that contract without a real connection/BEGIN/COMMIT.
   const sequelize = {
     transaction: (cb: (t: unknown) => Promise<unknown>) => cb({}),
   } as unknown as Sequelize;
-  const service = new CampaignBindingService(repository, promoCodeConfigService, sequelize);
+  const service = new CampaignBindingService(
+    repository,
+    promoCodeConfigService,
+    sequelize,
+    versionRepository,
+  );
   return { service, deactivateActive };
 }
 

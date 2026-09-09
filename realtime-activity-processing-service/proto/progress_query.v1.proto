@@ -1,0 +1,90 @@
+// T-INT-020 — gRPC equivalent of this service's own REST customer progress API
+// (`src/modules/progress-api/progress.controller.ts`, T-RAP-040). This file is the authoritative
+// source for `ProgressQueryService`'s wire contract; field names are copied 1:1 (snake_case on the
+// wire, camelCase once `@grpc/proto-loader` hands them to a handler — same convention
+// `activity_ingest.proto`'s own header documents) from `progress.types.ts`'s
+// `CampaignProgressResponse`/`TrackerProgressResponse` so a caller (T-INT-021) can build its own
+// client without translating field names.
+//
+// Registered on the **same** gRPC server/port `ActivityIngestService` already runs on
+// (`grpc-server.bootstrap.ts`'s own `buildGrpcMicroserviceOptions()` — this task's own
+// Implementation note 4), never a second listener — hence its own package
+// (`rewardrap.progress.v1`, distinct from `rewardrap.ingest.v1`) so both proto files can be loaded
+// side by side onto the one server without a message/service name collision.
+//
+// This RPC is a pure read — no field on either request message is ever written back, and every
+// response field mirrors already-materialized state (`progress.service.ts`'s own "no aggregation
+// logic of its own" scope, unchanged by this task).
+//
+// proto3 has no `null` — every optional string field below (`completion_logic`, `completed_at`)
+// uses the empty string as "no value", the same zero-value convention every other `.proto` file in
+// this service already relies on (no `google.protobuf.StringValue` wrapper anywhere in this
+// codebase, `activity_ingest.proto`'s own optional fields being the precedent) — not a new
+// decision introduced by this task.
+
+syntax = "proto3";
+
+package rewardrap.progress.v1;
+
+service ProgressQueryService {
+  // Every tracker/component this customer has any materialized progress on, for one campaign —
+  // mirrors `GET /progress/customers/:customerId/campaigns/:campaignCode`. Empty `trackers` is a
+  // normal response (a customer who legitimately hasn't started yet), never an error.
+  rpc GetCampaignProgress (GetCampaignProgressRequest) returns (CampaignProgressResponse);
+
+  // One tracker's own progress, unwrapped — mirrors
+  // `GET /progress/customers/:customerId/campaigns/:campaignCode/trackers/:trackerCode`.
+  rpc GetTrackerProgress (GetTrackerProgressRequest) returns (TrackerProgressResponse);
+}
+
+message GetCampaignProgressRequest {
+  string customer_id = 1;
+  string campaign_code = 2;
+}
+
+message GetTrackerProgressRequest {
+  string customer_id = 1;
+  string campaign_code = 2;
+  string tracker_code = 3;
+}
+
+message ComponentProgressView {
+  string component_code = 1;
+  int32 current_count = 2;
+  int32 required_count = 3;
+  bool is_completed = 4;
+}
+
+message TrackerProgressView {
+  string tracker_code = 1;
+  // Empty string when this tracker's own campaign config snapshot is missing/stale locally —
+  // mirrors `progress.types.ts`'s `completionLogic: string | null` (`null` -> `""` on the wire).
+  string completion_logic = 2;
+  bool is_completed = 3;
+  // ISO-8601 timestamp, or empty string when not yet completed (`completedAt: string | null`).
+  string completed_at = 4;
+  int32 components_required_count = 5;
+  int32 components_completed_count = 6;
+  repeated ComponentProgressView components = 7;
+}
+
+message CampaignProgressResponse {
+  string customer_id = 1;
+  string campaign_code = 2;
+  repeated TrackerProgressView trackers = 3;
+}
+
+// Same per-tracker shape as `TrackerProgressView`, unwrapped, with `customer_id`/`campaign_code`
+// added — mirrors `progress.types.ts`'s `TrackerProgressResponse = TrackerProgressView & {
+// customerId, campaignCode }`.
+message TrackerProgressResponse {
+  string customer_id = 1;
+  string campaign_code = 2;
+  string tracker_code = 3;
+  string completion_logic = 4;
+  bool is_completed = 5;
+  string completed_at = 6;
+  int32 components_required_count = 7;
+  int32 components_completed_count = 8;
+  repeated ComponentProgressView components = 9;
+}

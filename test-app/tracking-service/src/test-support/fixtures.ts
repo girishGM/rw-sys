@@ -267,6 +267,22 @@ export interface FixtureStores {
    * against a fake `PromoCodeClient`); `null` here is the same "unconfigured" fallback path
    * `createPromoCodeClientFromEnv` produces for real when the env vars are unset. */
   readonly promoCode: null;
+  /** `null` — route tests exercise `POST /api/activities`'s own response/progress/reward
+   * behaviour, not the best-effort RAP side call (that's `rap-client/client.spec.ts` and
+   * `rap-client/mapping.spec.ts` against a fake raw gRPC client); `null` here means
+   * `routes/activities.ts` skips the forwarding call entirely, same as a real, unconfigured
+   * `RAP_GRPC_ENABLED=false` environment. */
+  readonly rap: null;
+  /** `null` — route tests exercise `GET /api/rewards/confirmed`'s own degrade-gracefully behaviour
+   * against an explicit fake `RewardTrackingClient` where that matters (`routes/rewards.spec.ts`,
+   * T-INT-022), not a real HTTP call; `null` here is the same "unconfigured" fallback
+   * `createRewardTrackingClientFromEnv` produces for real when `CUSTOMER_API_AUTH_SECRET` is unset. */
+  readonly rewardTracking: null;
+  /** `null` — route tests exercise `GET /api/dashboard`'s own degrade-gracefully behaviour against
+   * an explicit fake `RapProgressReader` where that matters (`routes/dashboard.spec.ts`,
+   * T-INT-021), not a real HTTP/gRPC call; `null` here is the same "unconfigured" fallback
+   * `createRapProgressClientFromEnv` produces for real when `PROGRESS_API_AUTH_SECRET` is unset. */
+  readonly rapProgress: null;
 }
 
 /** Every demo customer enrolled, zero progress, no rewards yet — the same starting shape
@@ -278,5 +294,14 @@ export function buildFixtureStores(): FixtureStores {
   for (const customer of CUSTOMERS) {
     progress.setForCustomer(customer.id, buildInitialCampaignProgress());
   }
-  return { progress, rewards, activities, portal: new FakePortalDataSource(), promoCode: null };
+  return {
+    progress,
+    rewards,
+    activities,
+    portal: new FakePortalDataSource(),
+    promoCode: null,
+    rap: null,
+    rewardTracking: null,
+    rapProgress: null,
+  };
 }

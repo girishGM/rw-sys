@@ -109,6 +109,13 @@ export const BoundRewardMessage: MessageDescriptor = {
     { name: 'level', no: 10, type: 'string' },
     { name: 'ref_id', no: 11, type: 'int32' },
     { name: 'status', no: 12, type: 'string' },
+    // T-173 — transcribed from the `.proto`, which is the contract. Appended at the next free
+    // numbers; 1-12 above are untouched.
+    { name: 'expiry_value', no: 13, type: 'int32' },
+    { name: 'expiry_unit', no: 14, type: 'string' },
+    { name: 'reward_kind', no: 15, type: 'string' },
+    { name: 'promo_code_config_id', no: 16, type: 'string' },
+    { name: 'promo_code_config_version_no', no: 17, type: 'int32' },
   ],
 };
 

@@ -26,6 +26,8 @@ import { QueryTypes } from 'sequelize';
 import { PROMO_CODE_SEQUELIZE } from '../promo-code-config/promo-code-config.constants';
 import type { PromoCode, PromoCodeRow } from './promo-code.entity';
 import { toDomain } from './promo-code.entity';
+import type { BindLevel } from './generation-request.types';
+import type { CharacterSet, RewardValueType } from '../promo-code-config/promo-code-config.entity';
 
 /** Postgres error code for a unique-violation (23505) — checked, not string-matched. */
 export const PG_UNIQUE_VIOLATION = '23505';
@@ -34,6 +36,14 @@ export const UC_PROMO_CODE_CORRELATION = 'uc_promo_code_correlation';
 
 export interface CreatePromoCodeData {
   promoCodeConfigId: string;
+  /**
+   * T-PC-060 (defect fix filed against T-PC-058). The `promo_code_config_version` actually
+   * resolved (pinned or explicit) for this generation — always populated for every new row
+   * (migration `T-PC-058_004_promo_code_version_column.ts`'s own note: "nullable at the DB level
+   * for pre-existing rows, always populated for every new one"). `PromoCodeGenerationService` is
+   * responsible for having already resolved this before calling `create`.
+   */
+  promoCodeConfigVersionId: string;
   /**
    * `campaign_promo_config_id` FK — left `null` on every insert. `CampaignBindingService.
    * resolveActiveBinding` (T-PC-012) returns only the resolved `promoCodeConfigId`, never the
@@ -62,6 +72,66 @@ export interface CreatePromoCodeData {
    * clock-skew risk a JS-side `new Date()` computed moments earlier/later could introduce.
    */
   codeExpiryDays: number | null;
+}
+
+/**
+ * T-PC-060 (defect fix filed against T-PC-058). Raw `promo_code.promo_code_config_version` row
+ * shape (migration `T-PC-058_001_split_promo_code_config_version.ts`) — the code-generation and
+ * payout columns that used to live directly on `promo_code_config` before that split. Declared
+ * here, not in `promo-code-config.entity.ts`, because that file (and the rest of
+ * `src/modules/promo-code-config/**`) is `agent-promo-config`'s exclusive scope (R8); this
+ * service's own generation logic needs to read this table regardless of whether that module's own
+ * version-aware model has landed yet (T-PC-058, still blocked on this task).
+ */
+export interface PromoCodeConfigVersionRow {
+  id: string;
+  promo_code_config_id: string;
+  version_no: number;
+  code_prefix: string | null;
+  code_postfix: string | null;
+  code_length: number;
+  character_set: CharacterSet;
+  exclude_ambiguous_chars: boolean;
+  reward_value_type: RewardValueType;
+  reward_value: string;
+  reward_unit: string;
+  code_expiry_days: number | null;
+  status: 'draft' | 'published' | 'deprecated' | 'retired';
+}
+
+/** Domain shape — camelCase, the only shape `PromoCodeGenerationService` itself works with. */
+export interface PromoCodeConfigVersion {
+  id: string;
+  promoCodeConfigId: string;
+  versionNo: number;
+  codePrefix: string | null;
+  codePostfix: string | null;
+  codeLength: number;
+  characterSet: CharacterSet;
+  excludeAmbiguousChars: boolean;
+  rewardValueType: RewardValueType;
+  rewardValue: string;
+  rewardUnit: string;
+  codeExpiryDays: number | null;
+  status: 'draft' | 'published' | 'deprecated' | 'retired';
+}
+
+function toVersionDomain(row: PromoCodeConfigVersionRow): PromoCodeConfigVersion {
+  return {
+    id: row.id,
+    promoCodeConfigId: row.promo_code_config_id,
+    versionNo: row.version_no,
+    codePrefix: row.code_prefix,
+    codePostfix: row.code_postfix,
+    codeLength: row.code_length,
+    characterSet: row.character_set,
+    excludeAmbiguousChars: row.exclude_ambiguous_chars,
+    rewardValueType: row.reward_value_type,
+    rewardValue: row.reward_value,
+    rewardUnit: row.reward_unit,
+    codeExpiryDays: row.code_expiry_days,
+    status: row.status,
+  };
 }
 
 export interface CreateOutboxRowData {
@@ -107,12 +177,13 @@ export class PromoCodeRepository {
   async create(data: CreatePromoCodeData, options: RepositoryOptions = {}): Promise<PromoCode> {
     const [row] = await this.sequelize.query<PromoCodeRow>(
       `INSERT INTO promo_code.promo_code
-         (promo_code_config_id, campaign_promo_config_id, code, customer_id, tenant_id,
-          merchant_id, reward_value_type, reward_value, reward_unit, correlation_id, transport,
-          expires_at)
+         (promo_code_config_id, promo_code_config_version_id, campaign_promo_config_id, code,
+          customer_id, tenant_id, merchant_id, reward_value_type, reward_value, reward_unit,
+          correlation_id, transport, expires_at)
        VALUES
-         (:promoCodeConfigId, :campaignPromoConfigId, :code, :customerId, :tenantId,
-          :merchantId, :rewardValueType, :rewardValue, :rewardUnit, :correlationId, :transport,
+         (:promoCodeConfigId, :promoCodeConfigVersionId, :campaignPromoConfigId, :code,
+          :customerId, :tenantId, :merchantId, :rewardValueType, :rewardValue, :rewardUnit,
+          :correlationId, :transport,
           CASE WHEN :codeExpiryDays::int IS NULL THEN NULL
                ELSE now() + (:codeExpiryDays::text || ' days')::interval END)
        RETURNING *`,
@@ -144,6 +215,74 @@ export class PromoCodeRepository {
         transaction: options.transaction,
       },
     );
+  }
+
+  /**
+   * T-PC-060 (defect fix filed against T-PC-058). The `promo_code_config_version_id` a
+   * `campaign_promo_config` binding is currently pinned to — `campaign_promo_config`'s own bind-
+   * write path (`src/modules/campaign-binding/**`) is `agent-promo-config`'s exclusive scope
+   * (R8), so this read lives here instead, scoped the same way
+   * `CampaignBindingRepository.findActiveBinding` already scopes its own read of the same table
+   * (`tenant_id`/`bind_level`/`bind_ref_id`/`status = 'ACTIVE'`) — deliberately duplicated rather
+   * than widening `CampaignBindingService.resolveActiveBinding`'s own return shape, exactly the
+   * precedent `CreatePromoCodeData.campaignPromoConfigId`'s own comment above already established
+   * for this same cross-module boundary.
+   */
+  async findActiveBindingVersionId(
+    tenantId: string,
+    bindLevel: BindLevel,
+    bindRefId: string,
+  ): Promise<string | null> {
+    const rows = await this.sequelize.query<{ promo_code_config_version_id: string | null }>(
+      `SELECT promo_code_config_version_id FROM promo_code.campaign_promo_config
+         WHERE tenant_id = :tenantId AND bind_level = :bindLevel AND bind_ref_id = :bindRefId
+           AND status = 'ACTIVE'`,
+      { type: QueryTypes.SELECT, replacements: { tenantId, bindLevel, bindRefId } },
+    );
+    return rows[0]?.promo_code_config_version_id ?? null;
+  }
+
+  /**
+   * T-PC-060. Resolves a `promo_code_config_version` by its own `id`, scoped by `tenantId` via a
+   * join back to the identity table (R2 — every read scoped, never a bare `id` lookup) — used to
+   * hydrate the binding's currently-pinned version (`findActiveBindingVersionId` above) into the
+   * full payout-bearing row `generateWithRetry` needs, and to resolve the `version_no` an
+   * already-issued `promo_code.promo_code_config_version_id` FK points at (idempotent replay /
+   * correlation-conflict read-back — neither has the resolved version at hand directly).
+   */
+  async findVersionById(
+    tenantId: string,
+    versionId: string,
+  ): Promise<PromoCodeConfigVersion | null> {
+    const rows = await this.sequelize.query<PromoCodeConfigVersionRow>(
+      `SELECT v.* FROM promo_code.promo_code_config_version v
+         JOIN promo_code.promo_code_config c ON c.id = v.promo_code_config_id
+        WHERE v.id = :versionId AND c.tenant_id = :tenantId`,
+      { type: QueryTypes.SELECT, replacements: { tenantId, versionId } },
+    );
+    return rows[0] ? toVersionDomain(rows[0]) : null;
+  }
+
+  /**
+   * T-PC-060. Resolves an explicit, caller-supplied `versionNo` against a specific
+   * `promoCodeConfigId` (`tenantId`-scoped) — the "validate it belongs to the resolved config"
+   * half of implementation note 4. Returns `null` both when `versionNo` doesn't exist at all *and*
+   * when it exists but belongs to a different config — `PromoCodeGenerationService` doesn't need
+   * to distinguish the two (TC-8: either way, `VERSION_NOT_FOUND`, never a silent substitution).
+   */
+  async findVersionByConfigAndVersionNo(
+    tenantId: string,
+    promoCodeConfigId: string,
+    versionNo: number,
+  ): Promise<PromoCodeConfigVersion | null> {
+    const rows = await this.sequelize.query<PromoCodeConfigVersionRow>(
+      `SELECT v.* FROM promo_code.promo_code_config_version v
+         JOIN promo_code.promo_code_config c ON c.id = v.promo_code_config_id
+        WHERE v.promo_code_config_id = :promoCodeConfigId AND v.version_no = :versionNo
+          AND c.tenant_id = :tenantId`,
+      { type: QueryTypes.SELECT, replacements: { tenantId, promoCodeConfigId, versionNo } },
+    );
+    return rows[0] ? toVersionDomain(rows[0]) : null;
   }
 
   /** `true` when `error` is a `23505` on `uc_promo_code_code` — a genuine random-code collision. */

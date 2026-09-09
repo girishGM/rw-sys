@@ -12,6 +12,12 @@
  * `promo_code_config` at generation time (implementation note 6) — this entity has no join back to
  * that table, deliberately, so a later config edit can never retroactively change what an
  * already-issued code pays out.
+ *
+ * `promoCodeConfigVersionId` (T-PC-060, defect fix filed against T-PC-058, schema added by
+ * migration `T-PC-058_004_promo_code_version_column.ts`) records *which* `promo_code_config_version`
+ * this code was actually generated under — the pinned/explicit version `PromoCodeGenerationService`
+ * resolved, alongside (not instead of) the existing value snapshot above. `null` only for a row
+ * issued before this column existed; always populated on every new row this service creates.
  */
 
 export type PromoCodeStatus = 'ISSUED' | 'REDEEMED' | 'EXPIRED' | 'CANCELLED';
@@ -20,6 +26,7 @@ export type PromoCodeStatus = 'ISSUED' | 'REDEEMED' | 'EXPIRED' | 'CANCELLED';
 export interface PromoCodeRow {
   id: string;
   promo_code_config_id: string;
+  promo_code_config_version_id: string | null;
   campaign_promo_config_id: string | null;
   code: string;
   customer_id: string;
@@ -44,6 +51,7 @@ export interface PromoCodeRow {
 export interface PromoCode {
   id: string;
   promoCodeConfigId: string;
+  promoCodeConfigVersionId: string | null;
   campaignPromoConfigId: string | null;
   code: string;
   customerId: string;
@@ -68,6 +76,7 @@ export function toDomain(row: PromoCodeRow): PromoCode {
   return {
     id: row.id,
     promoCodeConfigId: row.promo_code_config_id,
+    promoCodeConfigVersionId: row.promo_code_config_version_id,
     campaignPromoConfigId: row.campaign_promo_config_id,
     code: row.code,
     customerId: row.customer_id,

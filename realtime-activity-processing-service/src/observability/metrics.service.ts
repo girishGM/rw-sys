@@ -27,8 +27,18 @@ import { Injectable } from '@nestjs/common';
 /** `03-GRPC-CONTRACT.md`/`02-KAFKA-CONTRACTS.md`'s two inbound transports. */
 export type IngestTransport = 'grpc' | 'kafka';
 
-/** `05-PROCESSING-PIPELINE.md` §7's three dispatch tiers, in the exact casing the design doc uses. */
-export type RewardDispatchTier = 'kafka' | 'grpc' | 'retry_table';
+/**
+ * `05-PROCESSING-PIPELINE.md` §7's three dispatch tiers, in the exact casing the design doc uses,
+ * plus `'rest'` — added by T-INT-006 (`reward-service-integration-plan`), additive only: no existing
+ * call site names `'rest'`, so no pre-existing `reward_dispatch_tier_total{tier}` series changes
+ * meaning because of this widening. `OutboxPublisherService`'s own tier-1/tier-2 dispatch is now
+ * config-resolved (`RewardDispatchChannelResolverService`) rather than hardcoded Kafka-then-gRPC,
+ * and REST is a legal resolved channel for either tier — this metric needs a matching label so a
+ * REST-primary dispatch is still counted, not silently dropped from observability. Not in this
+ * task's own "Files owned" list (`src/observability/**` is a different task's file scope) — a
+ * necessary, minimal, additive edit disclosed in this task's own completion report.
+ */
+export type RewardDispatchTier = 'kafka' | 'grpc' | 'rest' | 'retry_table';
 
 export interface HistogramSnapshot {
   count: number;

@@ -206,6 +206,39 @@ message BoundReward {
   string level   = 10;  // 'campaign' | 'tracker' | 'component'
   int32  ref_id  = 11;  // tracker id or component id; 0 at campaign level
   string status  = 12;
+
+  // Added by T-173, appended at the next free numbers — 1-12 above are untouched (rule 1).
+  //
+  // How long the reward stays usable AFTER IT IS GIVEN, as a duration rather than a date: the
+  // clock starts at redemption, an event this portal never observes. reward-redemption-service
+  // computes the real `expires_at` from this pair.
+  //
+  // **0/absent means the reward never expires** — it does not mean "not configured yet", and it
+  // must never be read as "expires immediately". Most rewards in this system (cashback, most
+  // voucher types) legitimately carry no expiry at all.
+  int32  expiry_value = 13;
+  string expiry_unit  = 14;  // 'minutes' | 'hours' | 'days'; empty when expiry_value is 0/absent
+
+  // The reward's Kind, as frozen on this version. Distinct from `reward_type` (field 5), which is
+  // the human-facing category such as "CASHBACK": a PERCENTAGE reward's value is a *rate* and is
+  // never meaningfully summable across rewards, while FIXED_AMOUNT/POINTS values are real additive
+  // amounts. A consumer that aggregates without this distinction aggregates wrongly.
+  //
+  // Empty when the version has no Kind set yet (`reward_versions.reward_kind IS NULL`, the state
+  // every row predating T-119 is in) — never a fabricated default.
+  string reward_kind = 15;  // 'FIXED_AMOUNT'|'PERCENTAGE'|'POINTS'|'PHYSICAL'|'PROMO_CODE'
+
+  // Which promo-code recipe fulfils this reward, for `reward_kind = 'PROMO_CODE'`. The id is
+  // promo-code-service's own opaque config id, carried as a STRING (never a UUID-shaped or numeric
+  // type — that service's ids are opaque decimal strings by contract).
+  //
+  // Empty when the reward is not promo-code fulfilled, or when no config has been bound yet.
+  string promo_code_config_id = 16;
+
+  // The pinned version of that promo-code config. **0/absent until T-174** gives a Maker somewhere
+  // to record the choice; the portal has no column holding it before then, and a fabricated `1`
+  // would be a version claim nobody made.
+  int32  promo_code_config_version_no = 17;
 }
 
 // A budget (pooled) or a customer limit (per customer) — 11-BUDGETS-AND-LIMITS.md §5.

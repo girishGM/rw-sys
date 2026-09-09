@@ -33,10 +33,14 @@ interface DemoRow {
   character_set: string;
 }
 
+// T-PC-059: `reward_value_type`/`character_set` moved off `promo_code_config` onto
+// `promo_code_config_version` (identity/version split) — the seed now writes `created_by` on both
+// the identity row and its version_no=1 row (same demo actor), so querying the version table by
+// that same actor id still selects exactly the rows this seed produced.
 async function fetchDemoRows(sequelize: Sequelize): Promise<DemoRow[]> {
   return sequelize.query<DemoRow>(
     `SELECT reward_value_type, character_set
-       FROM promo_code.promo_code_config
+       FROM promo_code.promo_code_config_version
       WHERE created_by = :actor`,
     { type: QueryTypes.SELECT, replacements: { actor: DEMO_ACTOR_ID } },
   );

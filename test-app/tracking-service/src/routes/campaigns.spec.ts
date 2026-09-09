@@ -113,16 +113,18 @@ describe('GET /api/campaigns', () => {
           id === NEW_CAMPAIGN_ID ? NEW_JOURNEY : originalPortal.getCampaignJourney(id),
       });
 
-      const response = await request(createApp(state)).get(
-        '/api/campaigns?customerId=priya-shah',
-      );
+      const response = await request(createApp(state)).get('/api/campaigns?customerId=priya-shah');
 
       const launched = response.body.data.find(
         (c: { campaignCode: string }) => c.campaignCode === 'BRAND_NEW_LAUNCH',
       );
       expect(launched).toBeDefined();
       expect(launched.progress.trackers[0]).toEqual(
-        expect.objectContaining({ trackerCode: 'NEW_TRACKER', completedCount: 0, completed: false }),
+        expect.objectContaining({
+          trackerCode: 'NEW_TRACKER',
+          completedCount: 0,
+          completed: false,
+        }),
       );
     });
 
@@ -136,9 +138,7 @@ describe('GET /api/campaigns', () => {
         getCampaignJourney: (id: number) => originalPortal.getCampaignJourney(id),
       });
 
-      const response = await request(createApp(state)).get(
-        '/api/campaigns?customerId=priya-shah',
-      );
+      const response = await request(createApp(state)).get('/api/campaigns?customerId=priya-shah');
 
       expect(
         response.body.data.find((c: { campaignCode: string }) => c.campaignCode === 'FIXTURE_ALL'),

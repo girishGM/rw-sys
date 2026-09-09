@@ -1,0 +1,82 @@
+// T-RR-062, corrected by T-INT-002. This service's own client-side contract for the gRPC leg of
+// outbound dispatch to reward-tracking-service (`ARCHITECTURE.md` §9) — the third transport
+// alongside the existing Kafka (`02-KAFKA-CONTRACTS.md` §2, `reward.redemption.completed.v1`) and
+// REST (`POST /internal/reward-tracking-events`) pair.
+//
+// **T-INT-002 correction**: T-RR-062 defined this file's package/service/method/field numbers as
+// its own best guess, written before reward-tracking-service (RTS) actually existed. RTS has since
+// shipped its own real, canonical contract at
+// `reward-tracking-service/proto/reward_tracking_ingest.proto` — `rewardtracking.ingest.v1`,
+// service `RewardTrackingIngestService`, method `IngestRewardTrackingEvent`. This file's package,
+// service name, method name, and every field's number/type now mirror that real file exactly
+// (field-for-field, same numbers, same order) so the bytes this client puts on the wire decode
+// correctly on RTS's own server — per `reward_tracking_ingest.proto`'s own header, RTS is the
+// canonical source of truth for this RPC and this service (RR) is the client mirroring it, not the
+// other way around. This file is intentionally kept distinct from RTS's own `.proto` (own header,
+// own message type names below) rather than copied wholesale — see T-INT-002's own task notes for
+// why a byte-for-byte copy isn't warranted here (unlike `reward_ingest.proto`, which RAP and RR
+// deliberately keep identical) — but every wire-identifying detail (package/service/method, and
+// every field's number+type) is now correct.
+//
+// A single unary RPC carrying exactly the same field set as the Kafka/REST message body
+// (`toRewardTrackingMessage`'s own output, `reward-tracking-outbox.repository.ts`) — deliberately,
+// so all three channels are provably carrying the same information end to end, with no
+// channel-specific translation layer that could silently drift. `customer_id` is the already-
+// decrypted value (R8) — never `customer_id_encrypted` — exactly like the Kafka message body and
+// the REST request body, decrypted once by `OutboxPublisherService` at the point of publish, never
+// persisted, never logged.
+//
+// Every monetary/decimal field is `string`, never a numeric proto type (same "binary floating
+// point cannot represent monetary decimals exactly" reasoning `promo_code_generation.proto`'s own
+// header states for its own `amount`/`reward_value` fields). Every nullable field is a plain
+// `string`/`int32`, with an empty string / `0` standing in for "absent" at the wire level exactly
+// like `promo_code_generation.proto`'s own `merchant_id`/`expires_at` convention — proto3 has no
+// native `null`, and this service already accepts that convention elsewhere rather than inventing
+// wrapper types for this one new client. `unit_type`/`unit_code` (fields 14/15) exist only because
+// RTS's real request message declares them at those wire positions — RR has no data to populate
+// them yet (`buildOutboxPayload`/`RewardTrackingDispatchPayload` carry no such fields), so RR
+// always sends them as empty string ("absent"), same as any other field it has no value for; adding
+// them here is required for wire-position compatibility with every other field that follows.
+
+syntax = "proto3";
+
+package rewardtracking.ingest.v1;
+
+service RewardTrackingIngestService {
+  // Synchronous delivery of one already-finalized redemption fact — the gRPC equivalent of one
+  // Kafka publish to `reward.redemption.completed.v1` / one REST call to
+  // `POST /internal/reward-tracking-events`. Idempotent on the consumer's own side, keyed by
+  // `reward_entry_id` (`02-KAFKA-CONTRACTS.md` §2's own delivery-semantics note applies here
+  // identically — this client makes no at-most-once/exactly-once guarantee of its own).
+  rpc IngestRewardTrackingEvent (RedemptionCompletedMessage) returns (DispatchAck);
+}
+
+message RedemptionCompletedMessage {
+  string reward_entry_id          = 1;
+  string correlation_id           = 2;
+  int32  tenant_id                = 3;
+  string tenant_code              = 4;
+  string country_code             = 5;
+  string customer_id              = 6;   // decrypted (R8) — never customer_id_encrypted
+  string campaign_code            = 7;
+  string tracker_code             = 8;
+  string tracker_component_code   = 9;
+  string merchant_code            = 10;  // empty string if absent
+  string reward_code              = 11;
+  string reward_category          = 12;
+  string reward_kind              = 13;  // "PERCENTAGE" | "FIXED_AMOUNT" | "POINTS" | "PROMO_CODE" | "" (unknown)
+  string unit_type                = 14;  // always "" — RR has no data for this field yet
+  string unit_code                = 15;  // always "" — RR has no data for this field yet
+  string reward_value             = 16;  // decimal-as-string — never a float
+  string reward_value_unit        = 17;
+  string external_system_code     = 18;  // empty string if absent
+  string external_reference_id    = 19;  // empty string if absent
+  string promo_code_config_id     = 20;  // empty string if absent/not applicable
+  int32  promo_code_config_version_no = 21;  // 0 if absent/not applicable
+  string redeemed_at              = 22;  // ISO 8601
+  string expires_at               = 23;  // ISO 8601, empty string if none
+}
+
+message DispatchAck {
+  string status = 1;   // RTS's real response value: "applied" or "duplicate" — never "ACCEPTED"
+}

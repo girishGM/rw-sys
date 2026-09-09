@@ -45,18 +45,24 @@ describe('formatRewardCopy', () => {
     expect(formatRewardCopy(reward({ unitType: 'points', amount: '500' }))).toBe('500 points');
   });
 
-  it('never fabricates "$0.00 cashback" for a real reward with no fixed amount — uses its name instead', () => {
+  it('never fabricates "$0.00 cashback" for a real reward with no fixed amount — uses its name instead, unmodified', () => {
+    // `rewardCopy.ts`'s own header: appending "cashback" here would duplicate the word for a name
+    // that already reads as a complete phrase (e.g. "Signup Cashback") — this test previously
+    // asserted the pre-fix, duplicated-word string and was never updated when that behaviour was
+    // deliberately changed; corrected here to match the implementation's own documented intent
+    // (found incidentally while verifying an unrelated task, T-INT-022 — see that task's completion
+    // report).
     expect(
       formatRewardCopy(
         reward({ unitType: 'currency', amount: null, rewardName: 'Signup Cashback' }),
       ),
-    ).toBe('Signup Cashback cashback');
+    ).toBe('Signup Cashback');
   });
 
-  it('never fabricates "0 points" for a real points reward with no fixed amount — uses its name instead', () => {
+  it('never fabricates "0 points" for a real points reward with no fixed amount — uses its name instead, unmodified', () => {
     expect(
       formatRewardCopy(reward({ unitType: 'points', amount: null, rewardName: 'Loyalty Points' })),
-    ).toBe('Loyalty Points points');
+    ).toBe('Loyalty Points');
   });
 
   it('falls back to the reward name for an unrecognised unitType', () => {

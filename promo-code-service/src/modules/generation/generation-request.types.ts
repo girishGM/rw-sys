@@ -47,6 +47,17 @@ export interface GenerationRequest {
   merchantId: string | null;
   transport: Transport;
   activityContext: ActivityContext | null;
+  /**
+   * T-PC-060 (defect fix filed against T-PC-058). An explicit, frozen-at-grant-time
+   * `promo_code_config_version.version_no`, already resolved upstream by the caller
+   * (`02-KAFKA-CONTRACTS.md` §3 / `03-GRPC-CONTRACT.md` §1's `version_no` — wire-level string,
+   * same "never a float/int on the wire" convention every other id-shaped field in this schema
+   * follows). When present, wins over the binding's own currently-pinned version — honors
+   * whatever was already granted upstream, even if the binding has since been re-pinned to a
+   * different version. `null`/absent (an older or not-yet-updated caller) falls back to the
+   * binding's own pin — backward compatible, never a hard break for a pre-existing caller.
+   */
+  versionNo: string | null;
 }
 
 const activityContextSchema = z
@@ -101,6 +112,10 @@ const generationRequestSchema = z.object({
     errorMap: () => ({ message: 'transport must be one of KAFKA, GRPC' }),
   }),
   activityContext: activityContextSchema,
+  // T-PC-060: wire-level string (never a float/int on the wire), same convention every other
+  // id-shaped field in this schema already follows. `.min(1)` rejects an empty string outright
+  // (never a silently-accepted "explicit but blank" pin) while still allowing `null`/absent.
+  versionNo: z.string().min(1, 'versionNo must not be an empty string').nullable().optional(),
 });
 
 export type GenerationRequestValidationResult =
@@ -133,6 +148,7 @@ export function parseGenerationRequest(input: unknown): GenerationRequestValidat
       merchantId: parsed.merchantId ?? null,
       transport: parsed.transport,
       activityContext: parsed.activityContext ?? null,
+      versionNo: parsed.versionNo ?? null,
     },
   };
 }

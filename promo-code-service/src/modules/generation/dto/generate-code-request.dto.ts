@@ -40,6 +40,9 @@ const generateCodeRequestSchema = z.object({
   customerId: z.string().min(1, 'customerId is required'),
   merchantId: z.string().min(1).optional(),
   activityContext: activityContextSchema,
+  // T-PC-060 (defect fix filed against T-PC-058): optional, wire-level string, mirroring
+  // `generation-request.types.ts`'s own `versionNo` field — see that file's header comment.
+  versionNo: z.string().min(1).optional(),
 });
 
 export interface GenerateCodeRequestDto {
@@ -54,6 +57,7 @@ export interface GenerateCodeRequestDto {
     currency?: string;
     metadata?: Record<string, unknown>;
   };
+  versionNo?: string;
 }
 
 /**

@@ -7,11 +7,20 @@
  * shape boundary between that raw row and the domain object every other layer (service,
  * REST controller in T-PC-011, bind API in T-PC-012) actually works with.
  *
- * `rewardValue` is kept as a `string`, not a `number`, end to end (row → domain). Postgres
- * `decimal(18,4)` comes back from `pg` as a string by default (no custom type parser
- * registered anywhere in this service), and re-parsing it to a JS `number` risks silent
- * precision loss on a money value — `04-API-CONTRACT.md` §1's own example response shows
- * `"rewardValue": "10.0000"` as a string for exactly this reason.
+ * **T-PC-058 update**: migration `T-PC-058_001_split_promo_code_config_version.ts` moved every
+ * code-generation/payout column (`code_prefix`/.../`code_expiry_days`) off this table onto the new
+ * `promo_code_config_version` table (`promo-code-config-version.entity.ts`) — this row is now the
+ * *enduring identity* only (tenant, merchant, name, status), never the payout itself. `CharacterSet`/
+ * `RewardValueType` stay defined and exported **from this file** even though this table no longer
+ * carries either column directly — `src/modules/generation/promo-code.repository.ts` (a different
+ * task's exclusive scope, R8) imports both by name from here
+ * (`import type { CharacterSet, RewardValueType } from '../promo-code-config/promo-code-config.entity'`)
+ * and that import must keep resolving; moving them to `promo-code-config-version.entity.ts` instead
+ * would silently break a file this task is not allowed to edit.
+ *
+ * `rewardValue` (now on `PromoCodeConfigVersion`, not here) is still kept as a `string`, not a
+ * `number`, end to end (row → domain) — Postgres `decimal(18,4)` comes back from `pg` as a string
+ * by default, and re-parsing it to a JS `number` risks silent precision loss on a money value.
  */
 
 export type PromoCodeConfigStatus = 'ACTIVE' | 'INACTIVE' | 'ARCHIVED';
@@ -24,16 +33,6 @@ export interface PromoCodeConfigRow {
   tenant_id: string;
   merchant_id: string | null;
   name: string;
-  code_prefix: string | null;
-  code_postfix: string | null;
-  code_length: number;
-  character_set: CharacterSet;
-  exclude_ambiguous_chars: boolean;
-  reward_value_type: RewardValueType;
-  reward_value: string;
-  reward_unit: string;
-  max_redemptions_per_code: number;
-  code_expiry_days: number | null;
   status: PromoCodeConfigStatus;
   created_by: string;
   updated_by: string;
@@ -48,16 +47,6 @@ export interface PromoCodeConfig {
   tenantId: string;
   merchantId: string | null;
   name: string;
-  codePrefix: string | null;
-  codePostfix: string | null;
-  codeLength: number;
-  characterSet: CharacterSet;
-  excludeAmbiguousChars: boolean;
-  rewardValueType: RewardValueType;
-  rewardValue: string;
-  rewardUnit: string;
-  maxRedemptionsPerCode: number;
-  codeExpiryDays: number | null;
   status: PromoCodeConfigStatus;
   createdBy: string;
   updatedBy: string;
@@ -71,16 +60,6 @@ export function toDomain(row: PromoCodeConfigRow): PromoCodeConfig {
     tenantId: row.tenant_id,
     merchantId: row.merchant_id,
     name: row.name,
-    codePrefix: row.code_prefix,
-    codePostfix: row.code_postfix,
-    codeLength: row.code_length,
-    characterSet: row.character_set,
-    excludeAmbiguousChars: row.exclude_ambiguous_chars,
-    rewardValueType: row.reward_value_type,
-    rewardValue: row.reward_value,
-    rewardUnit: row.reward_unit,
-    maxRedemptionsPerCode: row.max_redemptions_per_code,
-    codeExpiryDays: row.code_expiry_days,
     status: row.status,
     createdBy: row.created_by,
     updatedBy: row.updated_by,

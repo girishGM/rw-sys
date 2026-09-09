@@ -28,6 +28,26 @@
  *    a Jest worker with another suite's own unscoped outbox rows), the "don't race a live poller
  *    against a concurrently-running suite's own rows" hazard T-PC-045 fixed for the *shared*
  *    harness does not apply to this dedicated one.
+ *
+ * **T-PC-063 (defect fix filed against T-PC-058).** `seedBoundConfig()` used to construct a single
+ * `PromoCodeConfigRepository.create()` object literal carrying both identity fields
+ * (`merchantId`/`name`) and payout/code-generation fields (`codePrefix`/`codeLength`/.../
+ * `codeExpiryDays`) — migration `T-PC-058_001_split_promo_code_config_version.ts` (landed by
+ * T-PC-059) moved every payout column off `promo_code_config` onto the new
+ * `promo_code_config_version` table, so that literal started failing `npm run typecheck` with
+ * TS2353 ("codePrefix does not exist in type CreatePromoCodeConfigData") the moment T-PC-059
+ * landed. **Reproduced**: `git stash` of this file's own T-PC-063 diff, then `npm run typecheck`,
+ * reproduced that exact TS2353 at this file's own (then) line 316 — restored after confirming red.
+ * Fixed by seeding through `PromoCodeConfigService.create()` (identity + first `draft` version,
+ * one call) `+ PromoCodeConfigService.publish()` (`draft -> published`) end to end — the same
+ * "go through the real service, not a hand-rolled INSERT" precedent
+ * `promo-code-generation-version.spec.ts` (T-PC-060) documents choosing *not* to take, for a
+ * different reason (that file's own seeding target, `PromoCodeConfigRepository.create()`/
+ * `CampaignBindingRepository.create()`, was itself broken at the time it was written — already
+ * fixed here, so this harness has no reason to bypass it). `CampaignBindingService.bind()` itself
+ * is unchanged by this fix — it already resolves and pins the config's own currently-`published`
+ * version (`campaign-binding.service.ts`'s own `assertConfigActiveAndPublished`), so publishing
+ * before binding is required, not optional.
  */
 import 'reflect-metadata';
 import { randomUUID } from 'node:crypto';
@@ -48,7 +68,7 @@ import { createKafkaConsumerApp } from '@/messaging/kafka-consumer.main';
 import { GenerateRequestedConsumer } from '@/messaging/generate-requested.consumer';
 import { GENERATE_REQUESTED_TOPIC } from '@/messaging/kafka-consumer.config';
 import { GENERATE_RESULT_TOPIC } from '@/modules/generation/promo-code-generation.constants';
-import { PromoCodeConfigRepository } from '@/modules/promo-code-config/promo-code-config.repository';
+import { PromoCodeConfigService } from '@/modules/promo-code-config/promo-code-config.service';
 import { CampaignBindingService } from '@/modules/campaign-binding/campaign-binding.service';
 
 import {
@@ -199,7 +219,7 @@ export class LoadTestHarness {
     readonly kafkaApp: INestApplication,
     readonly kafkaConsumer: GenerateRequestedConsumer,
     readonly sequelize: Sequelize,
-    private readonly promoCodeConfigRepository: PromoCodeConfigRepository,
+    private readonly promoCodeConfigService: PromoCodeConfigService,
     private readonly bindingService: CampaignBindingService,
     readonly producer: Producer,
     private readonly ca: TestCertAuthority,
@@ -251,7 +271,7 @@ export class LoadTestHarness {
     const sequelize = createAppTestConnection();
     await sequelize.authenticate();
 
-    const promoCodeConfigRepository = httpApp.get(PromoCodeConfigRepository);
+    const promoCodeConfigService = httpApp.get(PromoCodeConfigService);
     const bindingService = httpApp.get(CampaignBindingService);
 
     // Short, fresh-per-run identity (X.509 CN is capped at 64 bytes — same constraint
@@ -286,7 +306,7 @@ export class LoadTestHarness {
       kafkaApp,
       kafkaConsumer,
       sequelize,
-      promoCodeConfigRepository,
+      promoCodeConfigService,
       bindingService,
       producer,
       ca,
@@ -302,38 +322,63 @@ export class LoadTestHarness {
     return tenantId;
   }
 
-  /** Provisions a tenant + `ACTIVE` config + `CAMPAIGN`-level binding directly through the real
-   * domain services (`PromoCodeConfigRepository`/`CampaignBindingService`) rather than an HTTP
-   * round trip — a load test's own fixture setup should not itself be rate-limited by the HTTP
-   * stack under test; the write paths exercised are the identical ones the REST controllers call
-   * (`04-API-CONTRACT.md` §2/§3), so nothing about the resulting row differs from a real bind. */
+  /** Provisions a tenant + `ACTIVE` config with one `published` version + `CAMPAIGN`-level
+   * binding directly through the real domain services (`PromoCodeConfigService`/
+   * `CampaignBindingService`) rather than an HTTP round trip — a load test's own fixture setup
+   * should not itself be rate-limited by the HTTP stack under test; the write paths exercised are
+   * the identical ones the REST controllers call (`04-API-CONTRACT.md` §2/§3), so nothing about
+   * the resulting rows differs from a real create+publish+bind. T-PC-063: `create()` writes the
+   * identity row plus its first `draft` version in one call (T-PC-058's split); `publish()` is
+   * then required before `bind()`, since `CampaignBindingService.bind()` only ever pins a
+   * config's currently-`published` version (`campaign-binding.service.ts`'s own
+   * `assertConfigActiveAndPublished`) — an unpublished, `draft`-only config cannot be bound at
+   * all. */
   async seedBoundConfig(codePrefix: string): Promise<BoundLoadConfigFixture> {
     const tenantId = this.freshTenant();
     const actorId = randomUUID();
-    const config = await this.promoCodeConfigRepository.create(tenantId, {
-      merchantId: null,
-      name: `t-pc-043 load config ${randomUUID()}`,
-      codePrefix,
-      codePostfix: null,
-      codeLength: 12,
-      characterSet: 'ALPHANUMERIC',
-      excludeAmbiguousChars: true,
-      rewardValueType: 'FIXED_AMOUNT',
-      rewardValue: 5,
-      rewardUnit: 'USD',
-      maxRedemptionsPerCode: 1,
-      codeExpiryDays: 30,
-      createdBy: actorId,
-    });
+    const created = await this.promoCodeConfigService.create(
+      tenantId,
+      {
+        // T-PC-063: `merchantId`/`codePostfix` omitted rather than `null` — the create DTO's own
+        // zod schema (`create-promo-code-config.dto.ts`) makes every optional field accept
+        // *undefined*, not `null` (confirmed directly: `.optional()` without `.nullable()`
+        // rejects a `null` value with a ZodError) — the same "omit, don't null" convention
+        // `promo-code-config.service.spec.ts`'s own `validCreateInput()` (T-PC-010,
+        // agent-promo-config's scope) already establishes for this schema.
+        name: `t-pc-043 load config ${randomUUID()}`,
+        codePrefix,
+        codeLength: 12,
+        characterSet: 'ALPHANUMERIC',
+        excludeAmbiguousChars: true,
+        rewardValueType: 'FIXED_AMOUNT',
+        rewardValue: 5,
+        rewardUnit: 'USD',
+        maxRedemptionsPerCode: 1,
+        codeExpiryDays: 30,
+      },
+      actorId,
+    );
+    if (!created.draftVersion) {
+      // Defensive only (R3) — `PromoCodeConfigService.create()` always returns the freshly
+      // created draft version alongside the identity row it was just created under.
+      throw new Error(`seedBoundConfig: expected a draft version for "${created.id}"`);
+    }
+    await this.promoCodeConfigService.publish(
+      tenantId,
+      created.id,
+      created.draftVersion.id,
+      actorId,
+    );
+
     const bindRefId = randomUUID();
     await this.bindingService.bind({
-      promoCodeConfigId: config.id,
+      promoCodeConfigId: created.id,
       tenantId,
       bindLevel: 'CAMPAIGN',
       bindRefId,
       boundBy: actorId,
     });
-    return { tenantId, actorId, configId: config.id, bindRefId };
+    return { tenantId, actorId, configId: created.id, bindRefId };
   }
 
   allowedGrpcClient(): PromoCodeServiceTestClient {
@@ -389,10 +434,15 @@ export class LoadTestHarness {
         'DELETE FROM promo_code.campaign_promo_config WHERE tenant_id = :tenantId',
         { replacements: { tenantId } },
       );
-      await this.sequelize.query(
-        'DELETE FROM promo_code.promo_code_config WHERE tenant_id = :tenantId',
-        { replacements: { tenantId } },
-      );
+      // T-PC-063: deliberately does **not** delete `promo_code_config`/`promo_code_config_version`
+      // rows any more. Since T-PC-058's split, every config `seedBoundConfig()` creates now has a
+      // `published` `promo_code_config_version` child row, and
+      // `trg_promo_code_config_version_undeletable` (migration `T-PC-058_002`) rejects a `DELETE`
+      // on any non-`draft` version — so a `DELETE FROM promo_code_config` here would fail on the
+      // ordinary (undeclared-`ON DELETE`, so `NO ACTION`) FK from that child row before the
+      // trigger is even reached. Same "immutable history, not a leak this test can or should work
+      // around" reasoning `promo-code-generation-version.spec.ts`'s own `afterAll` (T-PC-060)
+      // already established for this exact table pair.
     }
     if (this.serviceIdentityIds.length > 0) {
       await this.sequelize.query(

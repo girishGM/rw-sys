@@ -274,6 +274,67 @@ export const envSchema = z.object({
    * is git-ignored.
    */
   PROMO_CODE_SERVICE_INTERNAL_TOKEN: z.string().optional(),
+
+  // --- T-INT-010: REST mirror of CampaignConfigService --------------------------------------
+  // (reward-service-integration-plan/tasks/T-INT-010, ARCHITECTURE.md finding 1/2). Same
+  // optional/fail-closed shape as `GRPC_ENABLED` above, not the "always weaker when unset"
+  // shape T-012/T-019 use: this is a brand-new machine credential, and 02-SECURITY.md §9 ("no
+  // silent defaults for security values") applies to it exactly as it does to the gRPC TLS
+  // material — unset must mean "this surface admits nobody," never "admits everybody."
+  //
+  // DEVIATION, disclosed in T-INT-010's completion report: this file is not in that task's own
+  // "Files owned" list. It is touched anyway because `PROMO_CODE_SERVICE_INTERNAL_TOKEN`'s own
+  // comment two blocks up records a fact about this process that makes any other approach
+  // silently broken: `@nestjs/config` assigns back only the *validated* object, so an env var
+  // absent from this schema is dropped even when an operator's `.env` file sets it (T-057's
+  // D-3). `service-api-auth.guard.ts` cannot read a working value out of `process.env` any other
+  // way, and adding one line to this schema is the minimum change that makes it configurable at
+  // all — the same reasoning `app.module.ts` (also outside a task's literal scope on paper) is
+  // explicitly named an allowed registration point for.
+
+  /**
+   * The shared bearer secret every caller of `/api/v1/campaign-config/**` must present as
+   * `Authorization: Bearer <token>`. Unset → `ServiceApiAuthGuard` refuses every request with
+   * 401, which is also this task's documented rollback path: the gRPC surface is completely
+   * unaffected either way. A secret (R4): never a real value committed — `.env.development`
+   * carries a throwaway local-only value, matching `PROMO_CODE_SERVICE_INTERNAL_TOKEN`'s own
+   * precedent two blocks up.
+   */
+  CAMPAIGN_CONFIG_API_TOKEN: z.string().optional(),
+
+  // --- T-INT-030: portal-backend client for RTS's admin-rewards API (leg 8) -------------------
+  // (reward-service-integration-plan/tasks/T-INT-030-portal-rts-admin-client.md). Same disclosed
+  // deviation T-INT-010 already recorded two blocks up, for the identical structural reason:
+  // `@nestjs/config` assigns back only the *validated* object, and zod strips unknown keys, so a
+  // client reading `process.env` directly would see `undefined` for a value an operator did set.
+  // This file is not in T-INT-030's own "Files owned" list; edited anyway, disclosed here and in
+  // that task's completion report.
+
+  /**
+   * The shared HMAC secret both this portal (minting) and reward-tracking-service (verifying,
+   * `PORTAL_ADMIN_API_AUTH_SECRET` on that side — same env var name, deliberately, since it is one
+   * shared secret) use for the short-lived RTS-specific bearer token this leg mints per dashboard
+   * call. Base64-encoded, >= 32 bytes once decoded (`reward-tracking-admin-token.ts`'s own
+   * validation). Unset → `RewardTrackingAdminTokenService` refuses to construct, which fails this
+   * process's boot rather than its first dashboard request (R4: no default, no fallback — this is
+   * a machine credential, not a weaker-when-unset knob).
+   */
+  PORTAL_ADMIN_API_AUTH_SECRET: z.string().optional(),
+
+  /**
+   * Base URL of a locally- or remotely-running reward-tracking-service instance
+   * (`http://localhost:3040` locally, matching that service's own default `PORT`). No trailing
+   * slash required — `RewardTrackingRestClient` normalises. Unset → every dashboard call refuses
+   * with a 502 rather than dialing an empty string.
+   */
+  REWARD_TRACKING_SERVICE_BASE_URL: z.string().optional(),
+
+  /**
+   * How long a minted RTS token stays valid, in seconds. Optional — unset falls back to
+   * `RewardTrackingAdminTokenService`'s own default (60s), which comfortably covers one outbound
+   * dashboard call and nothing more; this token is never persisted or reused across requests.
+   */
+  REWARD_TRACKING_ADMIN_TOKEN_TTL_SECONDS: z.coerce.number().int().positive().optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;

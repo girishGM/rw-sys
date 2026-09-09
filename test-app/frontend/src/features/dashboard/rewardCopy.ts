@@ -20,10 +20,10 @@ export function formatRewardCopy(reward: RewardAssignment): string {
       // the reward's own real name instead whenever there's no real number to show.
       return reward.amount !== null
         ? `$${Number(reward.amount).toFixed(2)} cashback`
-        // The real seeded reward name already reads as a complete phrase on its own (e.g.
-        // "Signup Cashback") — appending "cashback"/"points" here duplicated the word for every
-        // reward whose name already ends in its own unit type. Use the name as-is.
-        : reward.rewardName;
+        : // The real seeded reward name already reads as a complete phrase on its own (e.g.
+          // "Signup Cashback") — appending "cashback"/"points" here duplicated the word for every
+          // reward whose name already ends in its own unit type. Use the name as-is.
+          reward.rewardName;
     case 'voucher':
       return 'a promo code';
     case 'points':

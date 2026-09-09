@@ -15,6 +15,10 @@ export const queryKeys = {
     ['campaign', code, customerId ?? null] as const,
   campaignRoot: ['campaign'] as const,
   rewards: (customerId: string) => ['rewards', customerId] as const,
+  /** T-INT-022 — this customer's confirmed reward-tracking-service summary (`GET
+   * /api/rewards/confirmed`), deliberately a distinct key from `rewards` above (the optimistic
+   * ledger) — the two are never meant to invalidate together. */
+  confirmedRewards: (customerId: string) => ['rewards-confirmed', customerId] as const,
   /** T-010 — this customer's `GET /api/activities` history (the Activity Simulator feed). */
   activities: (customerId: string) => ['activities', customerId] as const,
 };

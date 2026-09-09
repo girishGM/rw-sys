@@ -18,6 +18,7 @@ import type {
   ActivityResult,
   CampaignDetail,
   CampaignSummary,
+  ConfirmedRewardsResult,
   Customer,
   DashboardSummary,
   RewardLedgerEntry,
@@ -118,6 +119,14 @@ export function getCampaign(code: string, customerId?: string | null): Promise<C
 
 export function getRewards(customerId: string): Promise<readonly RewardLedgerEntry[]> {
   return apiFetch<readonly RewardLedgerEntry[]>(withCustomerId('/api/rewards', customerId));
+}
+
+/** T-INT-022 — this customer's *confirmed* reward summary, sourced from reward-tracking-service
+ * (leg 7) via `tracking-service`'s own `/api/rewards/confirmed`. `status` inside the envelope
+ * (never a non-2xx response, see that route's own header) tells the caller which of the 3 real
+ * states it's in — never conflated with {@link getRewards}'s own optimistic ledger. */
+export function getConfirmedRewards(customerId: string): Promise<ConfirmedRewardsResult> {
+  return apiFetch<ConfirmedRewardsResult>(withCustomerId('/api/rewards/confirmed', customerId));
 }
 
 export function postActivity(body: ActivityRequest): Promise<ActivityResult> {

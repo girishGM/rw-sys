@@ -63,6 +63,7 @@ function baseSummary(overrides: Partial<DashboardSummary> = {}): DashboardSummar
         completedCount: 3,
         threshold: 5,
         completed: false,
+        progressUnknown: false,
       },
       {
         campaignId: 3,
@@ -75,6 +76,7 @@ function baseSummary(overrides: Partial<DashboardSummary> = {}): DashboardSummar
         completedCount: 2,
         threshold: 2,
         completed: true,
+        progressUnknown: false,
       },
     ],
     expiringSoon: [
@@ -207,6 +209,38 @@ describe('DashboardPage', () => {
 
     // The other, still-in-progress tracker keeps its normal bar.
     expect(screen.getAllByRole('progressbar')).toHaveLength(1);
+  });
+
+  it('T-INT-021: a tracker with progressUnknown renders a distinct "unavailable" state, never as 0 progress', async () => {
+    vi.spyOn(apiClient, 'getDashboard').mockResolvedValue(
+      baseSummary({
+        trackerProgress: [
+          {
+            campaignId: 1,
+            campaignCode: 'SUMMER_CASHBACK_SPRINT',
+            campaignName: 'Summer Cashback Sprint',
+            trackerId: 10,
+            trackerCode: 'SCS_TRACKER',
+            trackerName: 'Grocery Streak',
+            completionLogic: 'all',
+            completedCount: null,
+            threshold: 5,
+            completed: null,
+            progressUnknown: true,
+          },
+        ],
+      }),
+    );
+    renderDashboard();
+
+    await screen.findByText('Grocery Streak');
+    expect(
+      screen.getByText('Progress unavailable right now — check back soon.'),
+    ).toBeInTheDocument();
+    // Never renders as a real zero — no "0/5", no progress bar, no "more to unlock" copy.
+    expect(screen.queryByText('0/5')).not.toBeInTheDocument();
+    expect(screen.getByText('?/5')).toBeInTheDocument();
+    expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
   });
 
   it('TC-6: renders real running-campaign names, formatted dates and status', async () => {

@@ -24,6 +24,17 @@ export interface GenerationSuccessResult {
   expiresAt: Date | null;
   errorCode: null;
   errorMessage: null;
+  /**
+   * T-PC-060 (defect fix filed against T-PC-058). The resolved `promo_code_config_version.
+   * version_no` this code was actually generated under (`02-KAFKA-CONTRACTS.md` §5 /
+   * `03-GRPC-CONTRACT.md` §1's `version_no` echo). **Optional, not always present** — deliberately,
+   * so this additive field never breaks an existing literal `GenerationResult` object built by a
+   * file outside this task's scope (`src/grpc/promo-code.controller.ts`'s own `successResult`
+   * fixture, `src/observability/metrics/generation-latency.instrumentation.spec.ts`,
+   * `test/messaging/generate-requested.consumer.spec.ts` — none declare this field, none needed
+   * to). Every code path in `PromoCodeGenerationService` itself always populates a real value.
+   */
+  versionNo?: string;
 }
 
 export interface GenerationFailureResult {
@@ -36,6 +47,9 @@ export interface GenerationFailureResult {
   expiresAt: null;
   errorCode: GenerationErrorCode;
   errorMessage: string;
+  /** Never populated on a failure — see `GenerationSuccessResult.versionNo`'s own note on why
+   * this is optional rather than a forced `null` literal like every sibling field above. */
+  versionNo?: undefined;
 }
 
 export type GenerationResult = GenerationSuccessResult | GenerationFailureResult;

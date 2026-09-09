@@ -17,7 +17,6 @@ import { QueryTypes } from 'sequelize';
 import { PROMO_CODE_SEQUELIZE } from './promo-code-config.constants';
 import { ConfigNameConflictError } from './promo-code-config.errors';
 import type {
-  CharacterSet,
   PromoCodeConfig,
   PromoCodeConfigRow,
   PromoCodeConfigStatus,
@@ -25,19 +24,14 @@ import type {
 } from './promo-code-config.entity';
 import { toDomain } from './promo-code-config.entity';
 
+/**
+ * T-PC-058: trimmed to the enduring identity fields only — `codePrefix`/.../`codeExpiryDays` moved
+ * to `promo_code_config_version` (migration `T-PC-058_001`) and are now written via
+ * `PromoCodeConfigVersionRepository.createDraft`/`updateDraft` instead of here.
+ */
 export interface CreatePromoCodeConfigData {
   merchantId: string | null;
   name: string;
-  codePrefix: string | null;
-  codePostfix: string | null;
-  codeLength: number;
-  characterSet: CharacterSet;
-  excludeAmbiguousChars: boolean;
-  rewardValueType: RewardValueType;
-  rewardValue: number;
-  rewardUnit: string;
-  maxRedemptionsPerCode: number;
-  codeExpiryDays: number | null;
   createdBy: string;
 }
 
@@ -49,6 +43,20 @@ export interface ListPromoCodeConfigsFilter {
   status?: PromoCodeConfigStatus;
 }
 
+/**
+ * T-PC-058. The thin, list-facing shape `04-API-CONTRACT.md` §1 requires — identity's own
+ * `id`/`name` joined to whatever is currently the config's `published` `promo_code_config_version`
+ * (`listSummaries` below). A config with no published version yet (a still-`draft`-only recipe, not
+ * yet usable) is deliberately excluded — never returned with a fabricated/`null` payout.
+ */
+export interface PromoCodeConfigListItem {
+  id: string;
+  name: string;
+  rewardValueType: RewardValueType;
+  rewardValue: string;
+  rewardUnit: string;
+}
+
 export interface RepositoryOptions {
   transaction?: Transaction;
 }
@@ -56,16 +64,6 @@ export interface RepositoryOptions {
 const COLUMN_BY_FIELD: Record<keyof UpdatePromoCodeConfigData, string> = {
   merchantId: 'merchant_id',
   name: 'name',
-  codePrefix: 'code_prefix',
-  codePostfix: 'code_postfix',
-  codeLength: 'code_length',
-  characterSet: 'character_set',
-  excludeAmbiguousChars: 'exclude_ambiguous_chars',
-  rewardValueType: 'reward_value_type',
-  rewardValue: 'reward_value',
-  rewardUnit: 'reward_unit',
-  maxRedemptionsPerCode: 'max_redemptions_per_code',
-  codeExpiryDays: 'code_expiry_days',
 };
 
 /** Postgres error code for a unique-violation (23505) — checked, not string-matched. */
@@ -83,13 +81,9 @@ export class PromoCodeConfigRepository {
     try {
       const [row] = await this.sequelize.query<PromoCodeConfigRow>(
         `INSERT INTO promo_code.promo_code_config
-           (tenant_id, merchant_id, name, code_prefix, code_postfix, code_length,
-            character_set, exclude_ambiguous_chars, reward_value_type, reward_value,
-            reward_unit, max_redemptions_per_code, code_expiry_days, created_by, updated_by)
+           (tenant_id, merchant_id, name, created_by, updated_by)
          VALUES
-           (:tenantId, :merchantId, :name, :codePrefix, :codePostfix, :codeLength,
-            :characterSet, :excludeAmbiguousChars, :rewardValueType, :rewardValue,
-            :rewardUnit, :maxRedemptionsPerCode, :codeExpiryDays, :createdBy, :createdBy)
+           (:tenantId, :merchantId, :name, :createdBy, :createdBy)
          RETURNING *`,
         {
           type: QueryTypes.SELECT,
@@ -143,6 +137,51 @@ export class PromoCodeConfigRepository {
       },
     );
     return rows.map(toDomain);
+  }
+
+  /**
+   * `04-API-CONTRACT.md` §1 — the list route's own thin summary shape, now sourced from a join to
+   * each config's currently-`published` `promo_code_config_version` (T-PC-058: `rewardValueType`/
+   * `rewardValue`/`rewardUnit` no longer live on this table). A config with no published version
+   * yet (only an open `draft`, or none at all) is excluded via the `JOIN` itself — never returned
+   * with a fabricated/`null` payout, since it isn't actually usable in a bind yet either.
+   */
+  async listSummaries(
+    tenantId: string,
+    filter: ListPromoCodeConfigsFilter = {},
+    options: RepositoryOptions = {},
+  ): Promise<PromoCodeConfigListItem[]> {
+    const status = filter.status ?? 'ACTIVE';
+    const merchantClause = filter.merchantId
+      ? '(c.merchant_id IS NULL OR c.merchant_id = :merchantId)'
+      : 'c.merchant_id IS NULL';
+    const rows = await this.sequelize.query<{
+      id: string;
+      name: string;
+      reward_value_type: RewardValueType;
+      reward_value: string;
+      reward_unit: string;
+    }>(
+      `SELECT c.id, c.name, v.reward_value_type, v.reward_value, v.reward_unit
+         FROM promo_code.promo_code_config c
+         JOIN promo_code.promo_code_config_version v
+           ON v.promo_code_config_id = c.id AND v.status = 'published'
+        WHERE c.tenant_id = :tenantId AND c.status = :status AND c.deleted_at IS NULL
+          AND ${merchantClause}
+        ORDER BY c.name ASC`,
+      {
+        type: QueryTypes.SELECT,
+        replacements: { tenantId, status, merchantId: filter.merchantId ?? null },
+        transaction: options.transaction,
+      },
+    );
+    return rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      rewardValueType: row.reward_value_type,
+      rewardValue: row.reward_value,
+      rewardUnit: row.reward_unit,
+    }));
   }
 
   async update(

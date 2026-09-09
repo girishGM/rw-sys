@@ -11,9 +11,14 @@ import { Inject, Injectable } from '@nestjs/common';
 import type { Sequelize } from 'sequelize-typescript';
 import { PROMO_CODE_SEQUELIZE } from '../promo-code-config/promo-code-config.constants';
 import { PromoCodeConfigService } from '../promo-code-config/promo-code-config.service';
+import { PromoCodeConfigVersionRepository } from '../promo-code-config/promo-code-config-version.repository';
 import { CampaignBindingRepository } from './campaign-binding.repository';
 import type { BindLevel, CampaignPromoConfig } from './campaign-promo-config.entity';
-import { BindingConflictError, ConfigNotActiveError } from './campaign-binding.errors';
+import {
+  BindingConflictError,
+  ConfigNotActiveError,
+  NoPublishedVersionError,
+} from './campaign-binding.errors';
 import {
   parseCreateCampaignPromoConfigDto,
   type CreateCampaignPromoConfigDto,
@@ -40,19 +45,32 @@ export class CampaignBindingService {
     private readonly repository: CampaignBindingRepository,
     private readonly promoCodeConfigService: PromoCodeConfigService,
     @Inject(PROMO_CODE_SEQUELIZE) private readonly sequelize: Sequelize,
+    // T-PC-058. Appended as a 4th, defaulted parameter — never inserted before `sequelize` — for
+    // the exact same "every pre-existing 3-arg `new CampaignBindingService(...)` call site outside
+    // this task's own file scope must keep compiling" reason `PromoCodeConfigService`'s own
+    // constructor documents (`test/modules/generation/**`, `agent-promo-generation`'s exclusive
+    // scope, R8). NestJS DI still resolves this normally at runtime; the default only fires for a
+    // plain `new` call that omits it.
+    private readonly versionRepository: PromoCodeConfigVersionRepository = new PromoCodeConfigVersionRepository(
+      sequelize,
+    ),
   ) {}
 
   /**
-   * `04-API-CONTRACT.md` §2. Validates the target config is `ACTIVE` for the given tenant
-   * *before* touching `campaign_promo_config` at all (implementation note 2), then deactivates
-   * any existing active binding for the same `(tenantId, bindLevel, bindRefId)` and inserts the
-   * new one inside a single transaction (implementation note 1) — never two separate statements
-   * a crash could split.
+   * `04-API-CONTRACT.md` §2. Validates the target config is `ACTIVE` for the given tenant *and*
+   * has a currently `published` version to pin to *before* touching `campaign_promo_config` at all
+   * (implementation note 2), then deactivates any existing active binding for the same `(tenantId,
+   * bindLevel, bindRefId)` and inserts the new one — pinned to that resolved version — inside a
+   * single transaction (implementation note 1) — never two separate statements a crash could
+   * split.
    */
   async bind(input: unknown): Promise<CampaignPromoConfig> {
     const dto = parseCreateCampaignPromoConfigDto(input);
-    await this.assertConfigActive(dto.tenantId, dto.promoCodeConfigId);
-    return this.deactivateAndCreateWithRetry(dto, 1);
+    const promoCodeConfigVersionId = await this.assertConfigActiveAndPublished(
+      dto.tenantId,
+      dto.promoCodeConfigId,
+    );
+    return this.deactivateAndCreateWithRetry(dto, promoCodeConfigVersionId, 1);
   }
 
   /**
@@ -76,11 +94,28 @@ export class CampaignBindingService {
     return { outcome: 'RESOLVED', promoCodeConfigId: binding.promoCodeConfigId };
   }
 
-  private async assertConfigActive(tenantId: string, promoCodeConfigId: string): Promise<void> {
+  /**
+   * T-PC-058. Returns the config's currently-`published` version's own `id` — the value pinned
+   * onto the new `campaign_promo_config` row. Throws `ConfigNotActiveError` (config missing/not
+   * `ACTIVE`, unchanged from before this task) or `NoPublishedVersionError` (config is `ACTIVE`
+   * but has no `published` version yet — nothing to pin to).
+   */
+  private async assertConfigActiveAndPublished(
+    tenantId: string,
+    promoCodeConfigId: string,
+  ): Promise<string> {
     const config = await this.promoCodeConfigService.findById(tenantId, promoCodeConfigId);
     if (!config || config.status !== 'ACTIVE') {
       throw new ConfigNotActiveError(tenantId, promoCodeConfigId);
     }
+    const published = await this.versionRepository.findPublishedForConfig(
+      tenantId,
+      promoCodeConfigId,
+    );
+    if (!published) {
+      throw new NoPublishedVersionError(tenantId, promoCodeConfigId);
+    }
+    return published.id;
   }
 
   /**
@@ -93,6 +128,7 @@ export class CampaignBindingService {
    */
   private async deactivateAndCreateWithRetry(
     dto: CreateCampaignPromoConfigDto,
+    promoCodeConfigVersionId: string,
     retriesLeft: number,
   ): Promise<CampaignPromoConfig> {
     try {
@@ -104,6 +140,7 @@ export class CampaignBindingService {
           dto.tenantId,
           {
             promoCodeConfigId: dto.promoCodeConfigId,
+            promoCodeConfigVersionId,
             bindLevel: dto.bindLevel,
             bindRefId: dto.bindRefId,
             boundBy: dto.boundBy,
@@ -114,7 +151,7 @@ export class CampaignBindingService {
     } catch (error) {
       if (this.isActiveBindingConflict(error)) {
         if (retriesLeft > 0) {
-          return this.deactivateAndCreateWithRetry(dto, retriesLeft - 1);
+          return this.deactivateAndCreateWithRetry(dto, promoCodeConfigVersionId, retriesLeft - 1);
         }
         throw new BindingConflictError(dto.tenantId, dto.bindLevel, dto.bindRefId);
       }

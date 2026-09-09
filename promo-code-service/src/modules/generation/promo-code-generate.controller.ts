@@ -59,6 +59,10 @@ export class PromoCodeGenerateController {
             metadata: parsed.activityContext.metadata,
           }
         : null,
+      // T-PC-060: passed through untouched — `generateCode()`'s own schema resolves it (an
+      // explicit pin winning over the binding's own current one) or rejects it, never this
+      // adapter (R10).
+      versionNo: parsed.versionNo ?? null,
     });
 
     return toGenerateCodeResponseDto(result);

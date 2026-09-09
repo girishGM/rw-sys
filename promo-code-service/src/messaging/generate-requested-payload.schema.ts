@@ -24,6 +24,13 @@
  * note 6 does not fully hold for `customerId`. Escalated for the architect to reconcile the task
  * file's own self-contradiction, per `AGENT-PROTOCOL.md` §3 ("if a design doc contradicts itself,
  * stop and escalate").
+ *
+ * T-PC-061: `versionNo` declared explicitly (rather than relying solely on `.passthrough()`) so
+ * `GenerateRequestedPayload`'s own inferred type surfaces it — `02-KAFKA-CONTRACTS.md` §3's own
+ * new field. Still optional/lenient like every other field here; presence isn't required and a
+ * wrong JS type is the only thing rejected. `generate-requested.consumer.ts` passes it straight
+ * through to `generateCode()`, which currently drops it (its own schema doesn't accept it yet —
+ * see that consumer's own note) until T-PC-060 adds real resolution.
  */
 import { z } from 'zod';
 
@@ -42,6 +49,7 @@ export const generateRequestedPayloadSchema = z
     bindRefId: z.string().optional(),
     customerId: z.string().optional(),
     merchantId: z.string().nullable().optional(),
+    versionNo: z.string().nullable().optional(),
     activityContext: activityContextSchema,
   })
   .passthrough();

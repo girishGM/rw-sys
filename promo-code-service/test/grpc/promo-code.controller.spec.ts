@@ -24,9 +24,11 @@ import { MtlsGuard } from '@/grpc/mtls.guard';
 import type { ServiceIdentityRepository } from '@/grpc/service-identity.repository';
 import { PromoCodeController } from '@/grpc/promo-code.controller';
 import type { PromoCodeGenerationService } from '@/modules/generation/promo-code-generation.service';
-import type { PromoCodeConfigRepository } from '@/modules/promo-code-config/promo-code-config.repository';
+import type {
+  PromoCodeConfigListItem,
+  PromoCodeConfigRepository,
+} from '@/modules/promo-code-config/promo-code-config.repository';
 import type { GenerationResult } from '@/modules/generation/generation-result.types';
-import type { PromoCodeConfig } from '@/modules/promo-code-config/promo-code-config.entity';
 import { CorrelationContextService } from '@/observability/logging/correlation-context.service';
 
 const PROTO_PATH = join(__dirname, '..', '..', 'proto', 'promo_code.v1.proto');
@@ -124,11 +126,15 @@ describe('T-PC-031 — MtlsGuard (unit, mocked repository)', () => {
 describe('T-PC-031 — PromoCodeController (unit, mocked generation service/repository)', () => {
   function buildController(
     generateCode: jest.Mock,
-    list: jest.Mock = jest.fn().mockResolvedValue([]),
+    // T-PC-062: renamed from `list` — `PromoCodeController.listActivePromoCodeConfigs` now calls
+    // `PromoCodeConfigRepository.listSummaries()` (T-PC-058 moved every payout column off
+    // `promo_code_config` onto `promo_code_config_version`; `listSummaries()` joins to the
+    // currently-`published` version, mirroring `GET /api/v1/promo-code-configs`'s own fix).
+    listSummaries: jest.Mock = jest.fn().mockResolvedValue([]),
     correlationContext: CorrelationContextService = new CorrelationContextService(),
   ): PromoCodeController {
     const generationService = { generateCode } as unknown as PromoCodeGenerationService;
-    const repository = { list } as unknown as PromoCodeConfigRepository;
+    const repository = { listSummaries } as unknown as PromoCodeConfigRepository;
     return new PromoCodeController(generationService, repository, correlationContext);
   }
 
@@ -167,6 +173,10 @@ describe('T-PC-031 — PromoCodeController (unit, mocked generation service/repo
       expiresAt: '2030-01-01T00:00:00.000Z',
       errorCode: '',
       errorMessage: '',
+      // T-PC-062: this fixture's own `successResult` never sets `versionNo` — `''` is the
+      // `nullToEmpty(undefined)` fallback, not a hardcoded placeholder (see the dedicated
+      // "echoes a populated versionNo" case below for the populated path).
+      versionNo: '',
     });
     expect(generateCode).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -179,6 +189,64 @@ describe('T-PC-031 — PromoCodeController (unit, mocked generation service/repo
         transport: 'GRPC',
       }),
     );
+  });
+
+  // T-PC-062 (regression): once `GenerationResult.versionNo` is actually populated (T-PC-060's
+  // own scope, now landed), the response echoes it — this line was `versionNo: ''` unconditionally
+  // before this task's fix, which would fail this exact assertion.
+  it('echoes a populated GenerationResult.versionNo back onto the response, not a hardcoded empty string', async () => {
+    const generateCode = jest.fn().mockResolvedValue({ ...successResult, versionNo: '3' });
+    const controller = buildController(generateCode);
+
+    const response = await controller.generateCode({
+      correlationId: 'corr-7',
+      tenantId: 'tenant-1',
+      bindLevel: 'CAMPAIGN',
+      bindRefId: 'ref-1',
+      customerId: 'cust-1',
+      merchantId: '',
+    });
+
+    expect(response.versionNo).toBe('3');
+  });
+
+  // T-PC-061 TC-2/TC-4: an explicit version_no on the request is passed through to the domain
+  // service untouched (a caller that already resolved a pin upstream is never silently dropped at
+  // this adapter) — proves the request-side half of the wire contract without depending on
+  // T-PC-060's own resolution logic being present yet.
+  it('T-PC-061: passes an explicit version_no on the request through to generateCode() untouched', async () => {
+    const generateCode = jest.fn().mockResolvedValue(successResult);
+    const controller = buildController(generateCode);
+
+    await controller.generateCode({
+      correlationId: 'corr-5',
+      tenantId: 'tenant-1',
+      bindLevel: 'CAMPAIGN',
+      bindRefId: 'ref-1',
+      customerId: 'cust-1',
+      merchantId: '',
+      versionNo: '3',
+    });
+
+    expect(generateCode).toHaveBeenCalledWith(expect.objectContaining({ versionNo: '3' }));
+  });
+
+  // T-PC-061 (adjacent behaviour unchanged): an absent version_no maps to `null`, exactly the
+  // existing convention for every other optional string field on this request (`merchant_id`).
+  it('T-PC-061: an absent version_no maps to null, not an empty string, on the request passed to the domain service', async () => {
+    const generateCode = jest.fn().mockResolvedValue(successResult);
+    const controller = buildController(generateCode);
+
+    await controller.generateCode({
+      correlationId: 'corr-6',
+      tenantId: 'tenant-1',
+      bindLevel: 'CAMPAIGN',
+      bindRefId: 'ref-1',
+      customerId: 'cust-1',
+      merchantId: '',
+    });
+
+    expect(generateCode).toHaveBeenCalledWith(expect.objectContaining({ versionNo: null }));
   });
 
   it('maps empty merchant_id to null, never an empty string, on the request passed to the domain service', async () => {
@@ -245,30 +313,21 @@ describe('T-PC-031 — PromoCodeController (unit, mocked generation service/repo
     expect(generateCode).not.toHaveBeenCalled();
   });
 
-  it('ListActivePromoCodeConfigs maps repository rows onto the thin summary proto shape', async () => {
-    const config: PromoCodeConfig = {
+  // T-PC-062 (regression — reproduces the defect T-PC-058 reported): before this fix,
+  // `listActivePromoCodeConfigs` called `PromoCodeConfigRepository.list()`, which no longer exists
+  // on this mocked repository shape (only `listSummaries` is stubbed here) — reverting the
+  // controller to call `.list(...)` again makes this test fail with
+  // `TypeError: ...repository.list is not a function`, proving this test actually pins the fix.
+  it('ListActivePromoCodeConfigs maps listSummaries() rows onto the thin summary proto shape', async () => {
+    const config: PromoCodeConfigListItem = {
       id: 'config-1',
-      tenantId: 'tenant-1',
-      merchantId: null,
       name: 'Test config',
-      codePrefix: null,
-      codePostfix: null,
-      codeLength: 8,
-      characterSet: 'ALPHANUMERIC',
-      excludeAmbiguousChars: false,
       rewardValueType: 'FIXED_AMOUNT',
       rewardValue: '10.0000',
       rewardUnit: 'USD',
-      maxRedemptionsPerCode: 1,
-      codeExpiryDays: null,
-      status: 'ACTIVE',
-      createdBy: 'actor-1',
-      updatedBy: 'actor-1',
-      createdAt: new Date(),
-      updatedAt: new Date(),
     };
-    const list = jest.fn().mockResolvedValue([config]);
-    const controller = buildController(jest.fn(), list);
+    const listSummaries = jest.fn().mockResolvedValue([config]);
+    const controller = buildController(jest.fn(), listSummaries);
 
     const response = await controller.listActivePromoCodeConfigs({
       tenantId: 'tenant-1',
@@ -286,7 +345,10 @@ describe('T-PC-031 — PromoCodeController (unit, mocked generation service/repo
         },
       ],
     });
-    expect(list).toHaveBeenCalledWith('tenant-1', { merchantId: undefined, status: 'ACTIVE' });
+    expect(listSummaries).toHaveBeenCalledWith('tenant-1', {
+      merchantId: undefined,
+      status: 'ACTIVE',
+    });
   });
 
   it('ListActivePromoCodeConfigs rejects a missing tenant_id with INVALID_ARGUMENT, not a business FAILED response', async () => {

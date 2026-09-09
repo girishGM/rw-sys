@@ -37,23 +37,88 @@ function baseConfigFields(overrides: Record<string, unknown> = {}) {
   };
 }
 
+// T-PC-059: `promo_code_config` was split into an identity row (tenant/merchant/name) and a
+// `promo_code_config_version` row (code_length/character_set/reward_value_type/reward_value/
+// reward_unit and the rest of the payout columns). `insertConfig` keeps its own signature/return
+// (still just the identity id) so every existing call site below is unaffected — it now performs
+// both inserts internally, one version_no=1 row per config.
+//
+// The version row is created as `draft`, not `published` — deliberately, and unlike migration
+// `T-PC-058_001`'s own real backfill (which does mark its one version `published`, matching
+// already-live data): a `published`/`deprecated`/`retired` row is permanently undeletable by the
+// immutability trigger (`T-PC-058_002`, ported from the portal's own `reward_versions` pattern),
+// and this whole file's own `afterAll` blocks hard-`DELETE` every row they create. Reproduced live
+// — with `published` here, every one of this describe block's own cleanups started failing with
+// "is published and cannot be deleted", the trigger correctly doing exactly its job. None of this
+// file's own tests care about draft vs. published status, so `draft` (freely deletable, no special
+// cleanup dance needed) is the right choice for disposable test fixtures; see
+// `promo-code-config-version.migration.spec.ts` for the dedicated coverage of what `published`
+// rows actually enforce, including their own precedented `DISABLE TRIGGER` cleanup escape hatch
+// (`portal/back-end/test/database/t005-versioning-schema.e2e-spec.ts`'s own doc comment) for the
+// handful of fixtures there that must be published to prove it.
+//
+// Wrapped in one transaction — TC-3/TC-4 below deliberately supply an out-of-range `code_length`
+// so the *version* insert fails its CHECK constraint; without a shared transaction the *identity*
+// insert immediately above it would already be committed by that point, leaving a real orphan
+// `promo_code_config` row with no version behind on every single run (reproduced live: exactly
+// this leaked six such rows into the shared dev DB before this fix — cleaned up as part of this
+// task's own verification). A transaction makes the pair atomic — either both rows exist, or
+// neither does — regardless of which of the two statements is the one that fails.
 async function insertConfig(
   sequelize: Sequelize,
   overrides: Record<string, unknown> = {},
 ): Promise<string> {
   const f = baseConfigFields(overrides);
+  return sequelize.transaction(async (transaction) => {
+    const [identityRow] = await sequelize.query<{ id: string }>(
+      `INSERT INTO promo_code.promo_code_config
+         (tenant_id, merchant_id, name, created_by, updated_by, deleted_at)
+       VALUES (:tenant_id, :merchant_id, :name, :created_by, :updated_by, :deleted_at)
+       RETURNING id`,
+      {
+        type: QueryTypes.SELECT,
+        replacements: { deleted_at: null, merchant_id: null, ...f },
+        transaction,
+      },
+    );
+
+    await sequelize.query(
+      `INSERT INTO promo_code.promo_code_config_version
+         (promo_code_config_id, version_no, code_prefix, code_postfix, code_length, character_set,
+          exclude_ambiguous_chars, reward_value_type, reward_value, reward_unit,
+          max_redemptions_per_code, code_expiry_days, status, created_by)
+       VALUES
+         (:configId, 1, :code_prefix, :code_postfix, :code_length, :character_set,
+          :exclude_ambiguous_chars, :reward_value_type, :reward_value, :reward_unit,
+          :max_redemptions_per_code, :code_expiry_days, 'draft', :created_by)`,
+      {
+        type: QueryTypes.RAW,
+        replacements: {
+          code_prefix: null,
+          code_postfix: null,
+          exclude_ambiguous_chars: true,
+          max_redemptions_per_code: 1,
+          code_expiry_days: null,
+          ...f,
+          configId: identityRow.id,
+        },
+        transaction,
+      },
+    );
+
+    return identityRow.id;
+  });
+}
+
+// The version_no=1 row `insertConfig` always creates — needed wherever a test writes directly to
+// `campaign_promo_config`, which (T-PC-059) now requires a `promo_code_config_version_id`.
+async function latestVersionId(sequelize: Sequelize, configId: string): Promise<string> {
   const [row] = await sequelize.query<{ id: string }>(
-    `INSERT INTO promo_code.promo_code_config
-       (tenant_id, merchant_id, name, code_length, character_set, reward_value_type, reward_value,
-        reward_unit, created_by, updated_by, deleted_at)
-     VALUES
-       (:tenant_id, :merchant_id, :name, :code_length, :character_set, :reward_value_type,
-        :reward_value, :reward_unit, :created_by, :updated_by, :deleted_at)
-     RETURNING id`,
-    {
-      type: QueryTypes.SELECT,
-      replacements: { deleted_at: null, merchant_id: null, ...f },
-    },
+    `SELECT id FROM promo_code.promo_code_config_version
+       WHERE promo_code_config_id = :configId
+       ORDER BY version_no DESC
+       LIMIT 1`,
+    { type: QueryTypes.SELECT, replacements: { configId } },
   );
   return row.id;
 }
@@ -67,8 +132,10 @@ describe('T-PC-002 — promo_code schema migrations', () => {
   });
 
   afterAll(async () => {
-    // Strict FK-safe order: audit/outbox/promo_code (leaves), then campaign_promo_config,
-    // then promo_code_config (root) — mirrors the migrations' own reverse-FK drop order.
+    // Strict FK-safe order: audit/outbox/promo_code/campaign_promo_config (leaves — the latter
+    // two also now hold a promo_code_config_version_id FK, T-PC-059), then
+    // promo_code_config_version, then promo_code_config (root) — mirrors the migrations' own
+    // reverse-FK drop order.
     await sequelize.query(
       `DELETE FROM promo_code.promo_code_config_audit
          WHERE promo_code_config_id IN (
@@ -91,6 +158,13 @@ describe('T-PC-002 — promo_code schema migrations', () => {
       'DELETE FROM promo_code.campaign_promo_config WHERE tenant_id = :tenant_id',
       { type: QueryTypes.RAW, replacements: { tenant_id: TENANT_ID } },
     );
+    await sequelize.query(
+      `DELETE FROM promo_code.promo_code_config_version
+         WHERE promo_code_config_id IN (
+           SELECT id FROM promo_code.promo_code_config WHERE tenant_id = :tenant_id
+         )`,
+      { type: QueryTypes.RAW, replacements: { tenant_id: TENANT_ID } },
+    );
     await sequelize.query('DELETE FROM promo_code.promo_code_config WHERE tenant_id = :tenant_id', {
       type: QueryTypes.RAW,
       replacements: { tenant_id: TENANT_ID },
@@ -106,11 +180,13 @@ describe('T-PC-002 — promo_code schema migrations', () => {
     await expect(migrator.up()).resolves.toBeDefined();
   });
 
-  // TC-2. Updated by T-PC-044 to include `grpc_service_identity` (008) alongside the original 5
-  // — this test's own job is "every table this schema currently owns exists with the right
-  // name," and that set legitimately grew by one; see `grpc-service-identity.spec.ts` for that
-  // table's own dedicated constraint/grant coverage.
-  it('TC-2: all 6 promo_code tables exist with the correct names', async () => {
+  // TC-2. Updated by T-PC-044 to include `grpc_service_identity` (008) alongside the original 5,
+  // and by T-PC-059 to include `promo_code_config_version` (identity/version split) — this test's
+  // own job is "every table this schema currently owns exists with the right name," and that set
+  // legitimately grew again; see `grpc-service-identity.spec.ts` for `grpc_service_identity`'s own
+  // dedicated coverage and this file's own "promo_code_config_version" describe block below for
+  // the new table's.
+  it('TC-2: all 7 promo_code tables exist with the correct names', async () => {
     // Selects a second column (`table_schema`) deliberately, not just `table_name` — with the
     // installed pg driver a single-column SELECT comes back as `[[value], [value], ...]`
     // (array-of-arrays) rather than `[{ table_name: value }, ...]` (reproduced live), a driver
@@ -127,6 +203,7 @@ describe('T-PC-002 — promo_code schema migrations', () => {
       'promo_code',
       'promo_code_config',
       'promo_code_config_audit',
+      'promo_code_config_version',
       'promo_code_outbox',
     ]);
   });
@@ -169,22 +246,27 @@ describe('T-PC-002 — promo_code schema migrations', () => {
   // TC-7 / TC-8 share one config id and one bind_ref_id.
   describe('campaign_promo_config uniqueness', () => {
     let configId: string;
+    let versionId: string;
     let bindRefId: string;
 
     beforeEach(async () => {
       configId = await insertConfig(sequelize);
+      versionId = await latestVersionId(sequelize, configId);
       bindRefId = randomUUID();
     });
 
+    // T-PC-059: `campaign_promo_config.promo_code_config_version_id` is NOT NULL.
     async function insertBinding(status: string): Promise<void> {
       await sequelize.query(
         `INSERT INTO promo_code.campaign_promo_config
-           (promo_code_config_id, tenant_id, bind_level, bind_ref_id, status, bound_by)
-         VALUES (:configId, :tenant_id, 'CAMPAIGN', :bindRefId, :status, :actor)`,
+           (promo_code_config_id, promo_code_config_version_id, tenant_id, bind_level,
+            bind_ref_id, status, bound_by)
+         VALUES (:configId, :versionId, :tenant_id, 'CAMPAIGN', :bindRefId, :status, :actor)`,
         {
           type: QueryTypes.RAW,
           replacements: {
             configId,
+            versionId,
             tenant_id: TENANT_ID,
             bindRefId,
             status,
@@ -302,6 +384,12 @@ describe('T-PC-052 — portal-sourced id columns widened to varchar(64)', () => 
         'DELETE FROM promo_code.campaign_promo_config WHERE promo_code_config_id IN (:ids)',
         { type: QueryTypes.RAW, replacements: { ids: createdConfigIds } },
       );
+      // T-PC-059: promo_code_config_version rows (child of promo_code_config) must go before
+      // the identity row they reference.
+      await sequelize.query(
+        'DELETE FROM promo_code.promo_code_config_version WHERE promo_code_config_id IN (:ids)',
+        { type: QueryTypes.RAW, replacements: { ids: createdConfigIds } },
+      );
       await sequelize.query('DELETE FROM promo_code.promo_code_config WHERE id IN (:ids)', {
         type: QueryTypes.RAW,
         replacements: { ids: createdConfigIds },
@@ -358,11 +446,14 @@ describe('T-PC-052 — portal-sourced id columns widened to varchar(64)', () => 
     );
     expect(config).toMatchObject({ tenant_id: '42', merchant_id: '43' });
 
+    // T-PC-059: campaign_promo_config.promo_code_config_version_id is NOT NULL.
+    const versionId = await latestVersionId(sequelize, configId);
     await sequelize.query(
       `INSERT INTO promo_code.campaign_promo_config
-         (promo_code_config_id, tenant_id, bind_level, bind_ref_id, bound_by)
-       VALUES (:configId, '42', 'CAMPAIGN', :bindRefId, '46')`,
-      { type: QueryTypes.RAW, replacements: { configId, bindRefId } },
+         (promo_code_config_id, promo_code_config_version_id, tenant_id, bind_level, bind_ref_id,
+          bound_by)
+       VALUES (:configId, :versionId, '42', 'CAMPAIGN', :bindRefId, '46')`,
+      { type: QueryTypes.RAW, replacements: { configId, versionId, bindRefId } },
     );
     const [binding] = await sequelize.query<{ bind_ref_id: string; bound_by: string }>(
       `SELECT bind_ref_id, bound_by FROM promo_code.campaign_promo_config
@@ -440,6 +531,11 @@ describe('T-PC-057 — promo_code.transport CHECK widened to allow REST', () => 
         replacements: { codes: insertedCodes },
       });
     }
+    // T-PC-059: promo_code_config_version (child) before promo_code_config (root).
+    await sequelize.query(
+      'DELETE FROM promo_code.promo_code_config_version WHERE promo_code_config_id = :id',
+      { type: QueryTypes.RAW, replacements: { id: configId } },
+    );
     await sequelize.query('DELETE FROM promo_code.promo_code_config WHERE id = :id', {
       type: QueryTypes.RAW,
       replacements: { id: configId },
@@ -486,6 +582,46 @@ describe('T-PC-057 — promo_code.transport CHECK widened to allow REST', () => 
       name: 'SequelizeDatabaseError',
       parent: expect.objectContaining({ constraint: 'promo_code_transport_check' }),
     });
+  });
+});
+
+describe('T-PC-066 — promo_code_transport_check constraint invariant', () => {
+  let sequelize: Sequelize;
+
+  beforeAll(async () => {
+    sequelize = createMigrationConnection();
+    await sequelize.authenticate();
+  });
+
+  afterAll(async () => {
+    await sequelize.close();
+  });
+
+  // TC-3 (the regression test): asserts the actual, live `pg_constraint` state directly —
+  // independent of what `promo_code.migrations` bookkeeping claims — because the defect this
+  // guards against is *exactly* a mismatch between the two (bookkeeping said 010 was applied;
+  // the constraint it's supposed to leave behind did not exist). A test that only exercised
+  // `migrator.up()`/`.executed()` again could never catch this class of drift, since Umzug
+  // would (correctly, by its own bookkeeping) skip 010 as already done and report nothing wrong.
+  //
+  // Proven red on the unfixed code: reverted to the reported broken state with
+  // `ALTER TABLE promo_code.promo_code DROP CONSTRAINT promo_code_transport_check;` (bookkeeping
+  // left untouched, exactly matching the filed defect's evidence) and re-ran this file — this
+  // test failed with `rows` empty (constraint absent) while every other suite's tests were
+  // unaffected, then passed again once `011_repair_promo_code_transport_check.ts` was applied via
+  // `npm run db:migrate`. See this task's completion report for the full transcript.
+  it('TC-3: promo_code_transport_check exists on promo_code.promo_code with the widened definition', async () => {
+    const rows = await sequelize.query<{ definition: string }>(
+      `SELECT pg_get_constraintdef(oid) AS definition
+         FROM pg_constraint
+        WHERE conrelid = 'promo_code.promo_code'::regclass
+          AND conname = 'promo_code_transport_check'`,
+      { type: QueryTypes.SELECT },
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].definition).toBe(
+      "CHECK (((transport)::text = ANY ((ARRAY['KAFKA'::character varying, 'GRPC'::character varying, 'REST'::character varying])::text[])))",
+    );
   });
 });
 

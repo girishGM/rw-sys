@@ -25,7 +25,7 @@ import type { Sequelize } from 'sequelize-typescript';
 import { ConfigModule } from '@/config/config.module';
 import { KafkaConsumerModule } from '@/messaging/kafka-consumer.module';
 import { GenerateRequestedConsumer } from '@/messaging/generate-requested.consumer';
-import { PromoCodeConfigRepository } from '@/modules/promo-code-config/promo-code-config.repository';
+import { PromoCodeConfigService } from '@/modules/promo-code-config/promo-code-config.service';
 import { CampaignBindingService } from '@/modules/campaign-binding/campaign-binding.service';
 import {
   GENERATE_REQUESTED_DLQ_TOPIC,
@@ -60,7 +60,7 @@ async function pollUntil<T>(
 describe('T-PC-030 — GenerateRequestedConsumer (real Redpanda, real Postgres) (e2e)', () => {
   let moduleRef: TestingModule;
   let consumer: GenerateRequestedConsumer;
-  let promoCodeConfigRepository: PromoCodeConfigRepository;
+  let promoCodeConfigService: PromoCodeConfigService;
   let bindingService: CampaignBindingService;
   let sequelize: Sequelize;
   let producer: Producer;
@@ -76,7 +76,7 @@ describe('T-PC-030 — GenerateRequestedConsumer (real Redpanda, real Postgres) 
     await moduleRef.init();
 
     consumer = moduleRef.get(GenerateRequestedConsumer);
-    promoCodeConfigRepository = moduleRef.get(PromoCodeConfigRepository);
+    promoCodeConfigService = moduleRef.get(PromoCodeConfigService);
     bindingService = moduleRef.get(CampaignBindingService);
     await consumer.start();
 
@@ -112,10 +112,13 @@ describe('T-PC-030 — GenerateRequestedConsumer (real Redpanda, real Postgres) 
         'DELETE FROM promo_code.campaign_promo_config WHERE tenant_id = :tenantId',
         { replacements: { tenantId } },
       );
-      await sequelize.query(
-        'DELETE FROM promo_code.promo_code_config WHERE tenant_id = :tenantId',
-        { replacements: { tenantId } },
-      );
+      // T-PC-062: deliberately does **not** delete `promo_code_config` rows — `seedBoundConfig()`
+      // now goes through `PromoCodeConfigService.create()` + `.publish()` (T-PC-058's real service
+      // layer), so each config has a real `published` `promo_code_config_version` row referencing
+      // it via FK, and that version row can never be deleted (`trg_promo_code_config_version_
+      // undeletable`, migration `T-PC-058_002`). Same precedent `grpc-server.e2e-spec.ts`'s own
+      // `afterAll` (T-PC-062) and `promo-code-generation-version.spec.ts`'s (T-PC-060) already
+      // established.
     }
     await sequelize.close();
   });
@@ -134,26 +137,44 @@ describe('T-PC-030 — GenerateRequestedConsumer (real Redpanda, real Postgres) 
     return id;
   }
 
+  // T-PC-062: `PromoCodeConfigRepository.create()` is identity-only since T-PC-058/059 split
+  // `promo_code_config`/`promo_code_config_version` — `CampaignBindingService.bind()` now
+  // requires a `published` version to pin, so seeding goes through the real service layer
+  // (`PromoCodeConfigService.create()` + `.publish()`) instead, same precedent
+  // `grpc-server.e2e-spec.ts`'s own `createPublishedConfig` helper established.
   async function seedBoundConfig(
     tenantIdFactory: () => string = freshTenant,
   ): Promise<{ tenantId: string; bindRefId: string }> {
     const tenantId = tenantIdFactory();
     const actorId = randomUUID();
-    const config = await promoCodeConfigRepository.create(tenantId, {
-      merchantId: null,
-      name: `t-pc-030 e2e config ${randomUUID()}`,
-      codePrefix: 'KAFKA-',
-      codePostfix: null,
-      codeLength: 10,
-      characterSet: 'ALPHANUMERIC',
-      excludeAmbiguousChars: true,
-      rewardValueType: 'FIXED_AMOUNT',
-      rewardValue: 5,
-      rewardUnit: 'USD',
-      maxRedemptionsPerCode: 1,
-      codeExpiryDays: 30,
-      createdBy: actorId,
-    });
+    const created = await promoCodeConfigService.create(
+      tenantId,
+      {
+        name: `t-pc-030 e2e config ${randomUUID()}`,
+        codePrefix: 'KAFKA-',
+        codeLength: 10,
+        characterSet: 'ALPHANUMERIC',
+        excludeAmbiguousChars: true,
+        rewardValueType: 'FIXED_AMOUNT',
+        rewardValue: 5,
+        rewardUnit: 'USD',
+        maxRedemptionsPerCode: 1,
+        codeExpiryDays: 30,
+      },
+      actorId,
+    );
+    if (!created.draftVersion) {
+      throw new Error('expected PromoCodeConfigService.create() to open a draft version');
+    }
+    const config = await promoCodeConfigService.publish(
+      tenantId,
+      created.id,
+      created.draftVersion.id,
+      actorId,
+    );
+    if (!config) {
+      throw new Error('expected PromoCodeConfigService.publish() to return the updated config');
+    }
     const bindRefId = randomUUID();
     await bindingService.bind({
       promoCodeConfigId: config.id,

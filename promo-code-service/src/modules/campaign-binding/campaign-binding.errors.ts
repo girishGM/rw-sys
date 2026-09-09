@@ -40,6 +40,25 @@ export class ConfigNotActiveError extends Error {
 }
 
 /**
+ * T-PC-058. `promoCodeConfigId` resolves to an `ACTIVE` config for this tenant, but that config has
+ * no currently `published` `promo_code_config_version` yet (only a `draft`, or nothing at all) — a
+ * bind pins to the currently-published version at bind time, so there is nothing yet to pin to.
+ * Distinct from `ConfigNotActiveError` because the config itself is fine; it just isn't usable in a
+ * bind until a Maker publishes at least one version.
+ */
+export class NoPublishedVersionError extends Error {
+  constructor(
+    public readonly tenantId: string,
+    public readonly promoCodeConfigId: string,
+  ) {
+    super(
+      `promoCodeConfigId "${promoCodeConfigId}" has no published version for tenant "${tenantId}" — publish one before binding`,
+    );
+    this.name = 'NoPublishedVersionError';
+  }
+}
+
+/**
  * Implementation note 3: two concurrent bind requests for the same `(tenantId, bindLevel,
  * bindRefId)` can both pass the application-level "is there an active one?" check before either
  * commits — the unique partial index (`uc_campaign_promo_config_active`) is the actual

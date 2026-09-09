@@ -12,10 +12,17 @@
  *   3. Resolve the binding (`CampaignBindingService.resolveActiveBinding`, T-PC-012) →
  *      `CONFIG_NOT_BOUND`/`CONFIG_INACTIVE` mapped straight through, never collapsed
  *      (implementation note 7).
- *   4. Collision-retry loop: generate a candidate code (T-PC-020's `CodeGenerator`), attempt a
+ *   4. Resolve the `promo_code_config_version` (T-PC-060, defect fix filed against T-PC-058): an
+ *      explicit, caller-supplied `versionNo` wins over the binding's own currently-pinned version
+ *      when present and valid for the resolved config — `VERSION_NOT_FOUND` if it isn't valid,
+ *      never a silent substitution. Absent → the binding's own pin (`04-API-CONTRACT.md`/
+ *      `T-PC-058-version-promo-code-config.md` implementation note 4).
+ *   5. Collision-retry loop: generate a candidate code (T-PC-020's `CodeGenerator`), attempt a
  *      transactional insert of `promo_code` (+ `promo_code_outbox` for `KAFKA` transport only,
  *      implementation note 5), retry on a code collision, bounded by `maxRetryAttempts`
- *      (implementation note 3) → `GENERATION_EXHAUSTED` once exhausted.
+ *      (implementation note 3) → `GENERATION_EXHAUSTED` once exhausted. The resolved version's own
+ *      `id` is stamped onto the new row (`promo_code.promo_code_config_version_id`) alongside the
+ *      existing value snapshot, and its `version_no` is echoed back on the returned result.
  */
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import type { Sequelize } from 'sequelize-typescript';
@@ -25,6 +32,7 @@ import { CampaignBindingService } from '../campaign-binding/campaign-binding.ser
 import { CodeGenerator } from './code-generator';
 import type { CodeGenerationConfig } from './code-generator.types';
 import { PromoCodeRepository } from './promo-code.repository';
+import type { PromoCodeConfigVersion } from './promo-code.repository';
 import type { PromoCode } from './promo-code.entity';
 import { parseGenerationRequest } from './generation-request.types';
 import type { GenerationRequest } from './generation-request.types';
@@ -79,7 +87,7 @@ export class PromoCodeGenerationService {
       request.correlationId,
     );
     if (existing) {
-      return this.toSuccessResult(existing);
+      return this.toSuccessResult(existing, await this.resolveVersionNoForPromoCode(existing));
     }
 
     const binding = await this.campaignBindingService.resolveActiveBinding(
@@ -114,49 +122,133 @@ export class PromoCodeGenerationService {
       );
     }
 
-    return this.generateWithRetry(request, config);
+    const versionResult = await this.resolveVersion(request, binding.promoCodeConfigId);
+    if (versionResult.outcome === 'INVALID_VERSION_NO') {
+      return this.failure(
+        'INVALID_REQUEST',
+        `versionNo "${request.versionNo}" is not a positive integer`,
+      );
+    }
+    if (versionResult.outcome === 'VERSION_NOT_FOUND') {
+      return this.failure(
+        'VERSION_NOT_FOUND',
+        `versionNo "${request.versionNo}" does not resolve to a promo_code_config_version for promoCodeConfigId "${binding.promoCodeConfigId}"`,
+      );
+    }
+    if (versionResult.outcome === 'CONFIG_NOT_BOUND') {
+      // Defensive only (implementation note 4/R3): `campaign_promo_config.
+      // promo_code_config_version_id` is `NOT NULL` at the DB level (migration
+      // `T-PC-058_003_campaign_promo_config_version_pin.ts`), so a resolved, active binding always
+      // carries a pin — this branch guards a race between `resolveActiveBinding`'s own read above
+      // and this one (the binding was deactivated/rebound in between), not an expected steady state.
+      return this.failure(
+        'CONFIG_NOT_BOUND',
+        `No currently-pinned promo_code_config_version for tenant "${request.tenantId}", bindLevel "${request.bindLevel}", bindRefId "${request.bindRefId}"`,
+      );
+    }
+
+    return this.generateWithRetry(request, binding.promoCodeConfigId, versionResult.version);
+  }
+
+  /**
+   * Implementation note 4. An explicit, caller-supplied `versionNo` (frozen-at-grant-time, already
+   * resolved upstream) wins over the binding's own currently-pinned version when present — TC-7's
+   * "generates under the older, explicitly-requested version" — and is rejected outright, never
+   * silently substituted, when it doesn't belong to `promoCodeConfigId` (TC-8). Absent/`null`
+   * falls back to the binding's own pin (TC-6) — backward compatible with a caller that predates
+   * this field.
+   */
+  private async resolveVersion(
+    request: GenerationRequest,
+    promoCodeConfigId: string,
+  ): Promise<
+    | { outcome: 'RESOLVED'; version: PromoCodeConfigVersion }
+    | { outcome: 'VERSION_NOT_FOUND' }
+    | { outcome: 'INVALID_VERSION_NO' }
+    | { outcome: 'CONFIG_NOT_BOUND' }
+  > {
+    if (request.versionNo !== null) {
+      const versionNoNum = Number(request.versionNo);
+      if (!Number.isInteger(versionNoNum) || versionNoNum <= 0) {
+        return { outcome: 'INVALID_VERSION_NO' };
+      }
+      const explicit = await this.repository.findVersionByConfigAndVersionNo(
+        request.tenantId,
+        promoCodeConfigId,
+        versionNoNum,
+      );
+      if (!explicit) {
+        return { outcome: 'VERSION_NOT_FOUND' };
+      }
+      return { outcome: 'RESOLVED', version: explicit };
+    }
+
+    const pinnedVersionId = await this.repository.findActiveBindingVersionId(
+      request.tenantId,
+      request.bindLevel,
+      request.bindRefId,
+    );
+    if (!pinnedVersionId) {
+      return { outcome: 'CONFIG_NOT_BOUND' };
+    }
+    const pinned = await this.repository.findVersionById(request.tenantId, pinnedVersionId);
+    if (!pinned) {
+      return { outcome: 'CONFIG_NOT_BOUND' };
+    }
+    return { outcome: 'RESOLVED', version: pinned };
+  }
+
+  /**
+   * `promo_code.promo_code_config_version_id` is a FK, not a `version_no` — an idempotent replay
+   * (the top-of-method correlationId check) or a correlation-conflict read-back
+   * (`generateWithRetry`'s own catch block) only has the already-issued row at hand, neither of
+   * which carries `version_no` directly. `null` only for a pre-`T-PC-060` row that predates this
+   * column entirely (migration note: "nullable at the DB level for pre-existing rows").
+   */
+  private async resolveVersionNoForPromoCode(promoCode: PromoCode): Promise<string | null> {
+    if (!promoCode.promoCodeConfigVersionId) {
+      return null;
+    }
+    const version = await this.repository.findVersionById(
+      promoCode.tenantId,
+      promoCode.promoCodeConfigVersionId,
+    );
+    return version ? String(version.versionNo) : null;
   }
 
   private async generateWithRetry(
     request: GenerationRequest,
-    config: {
-      id: string;
-      characterSet: CodeGenerationConfig['characterSet'];
-      codeLength: number;
-      codePrefix: string | null;
-      codePostfix: string | null;
-      excludeAmbiguousChars: boolean;
-      rewardValueType: string;
-      rewardValue: string;
-      rewardUnit: string;
-      codeExpiryDays: number | null;
-    },
+    promoCodeConfigId: string,
+    version: PromoCodeConfigVersion,
   ): Promise<GenerationResult> {
+    const codeGenConfig: CodeGenerationConfig = {
+      characterSet: version.characterSet,
+      codeLength: version.codeLength,
+      codePrefix: version.codePrefix,
+      codePostfix: version.codePostfix,
+      excludeAmbiguousChars: version.excludeAmbiguousChars,
+    };
+
     for (let attempt = 1; attempt <= this.maxRetryAttempts; attempt += 1) {
-      const code = this.codeGenerator.generate({
-        characterSet: config.characterSet,
-        codeLength: config.codeLength,
-        codePrefix: config.codePrefix,
-        codePostfix: config.codePostfix,
-        excludeAmbiguousChars: config.excludeAmbiguousChars,
-      });
+      const code = this.codeGenerator.generate(codeGenConfig);
 
       try {
         const promoCode = await this.sequelize.transaction(async (transaction) => {
           const created = await this.repository.create(
             {
-              promoCodeConfigId: config.id,
+              promoCodeConfigId,
+              promoCodeConfigVersionId: version.id,
               campaignPromoConfigId: null,
               code,
               customerId: request.customerId,
               tenantId: request.tenantId,
               merchantId: request.merchantId,
-              rewardValueType: config.rewardValueType,
-              rewardValue: config.rewardValue,
-              rewardUnit: config.rewardUnit,
+              rewardValueType: version.rewardValueType,
+              rewardValue: version.rewardValue,
+              rewardUnit: version.rewardUnit,
               correlationId: request.correlationId,
               transport: request.transport,
-              codeExpiryDays: config.codeExpiryDays,
+              codeExpiryDays: version.codeExpiryDays,
             },
             { transaction },
           );
@@ -168,7 +260,7 @@ export class PromoCodeGenerationService {
               {
                 promoCodeId: created.id,
                 topic: GENERATE_RESULT_TOPIC,
-                payload: this.buildResultPayload(created),
+                payload: this.buildResultPayload(created, version.versionNo),
               },
               { transaction },
             );
@@ -177,7 +269,7 @@ export class PromoCodeGenerationService {
           return created;
         });
 
-        return this.toSuccessResult(promoCode);
+        return this.toSuccessResult(promoCode, String(version.versionNo));
       } catch (error) {
         if (this.repository.isCorrelationConflict(error)) {
           // TC-13: a concurrent call for the same correlationId committed first. Not a
@@ -188,7 +280,7 @@ export class PromoCodeGenerationService {
             request.correlationId,
           );
           if (winner) {
-            return this.toSuccessResult(winner);
+            return this.toSuccessResult(winner, await this.resolveVersionNoForPromoCode(winner));
           }
           throw error;
         }
@@ -211,7 +303,7 @@ export class PromoCodeGenerationService {
     );
   }
 
-  private buildResultPayload(promoCode: PromoCode): Record<string, unknown> {
+  private buildResultPayload(promoCode: PromoCode, versionNo: number): Record<string, unknown> {
     // `02-KAFKA-CONTRACTS.md` §5's `data` shape — the envelope itself (`eventId`/`occurredAt`/
     // `source`/etc.) is built fresh at publish time by T-PC-022, not stored here (that task's own
     // implementation note 5: "keeps occurredAt/eventId honest about when the send actually
@@ -226,10 +318,20 @@ export class PromoCodeGenerationService {
       expiresAt: promoCode.expiresAt ? promoCode.expiresAt.toISOString() : null,
       errorCode: null,
       errorMessage: null,
+      // T-PC-060: `02-KAFKA-CONTRACTS.md` §5's `versionNo` — a wire-level string, same convention
+      // as every other id-shaped field on this payload.
+      versionNo: String(versionNo),
     };
   }
 
-  private toSuccessResult(promoCode: PromoCode): GenerationSuccessResult {
+  /**
+   * `versionNo` is `null` only when resolving it failed to find anything (a pre-`T-PC-060` row
+   * being idempotently replayed/read back, per `resolveVersionNoForPromoCode`'s own note) — passed
+   * in already-resolved rather than looked up again here, since the two call sites that have it
+   * directly at hand (`generateWithRetry`'s own successful insert) would otherwise pay a redundant
+   * DB round trip for a value they already computed.
+   */
+  private toSuccessResult(promoCode: PromoCode, versionNo: string | null): GenerationSuccessResult {
     return {
       status: 'SUCCESS',
       promoCodeId: promoCode.id,
@@ -240,6 +342,7 @@ export class PromoCodeGenerationService {
       expiresAt: promoCode.expiresAt,
       errorCode: null,
       errorMessage: null,
+      ...(versionNo !== null ? { versionNo } : {}),
     };
   }
 

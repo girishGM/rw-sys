@@ -19,12 +19,17 @@ import {
   ExceptionFilter,
   HttpException,
   BadRequestException,
+  NotFoundException,
   Logger,
 } from '@nestjs/common';
 import type { Response } from 'express';
 import {
   ConfigNameConflictError,
+  DraftAlreadyExistsError,
+  NoOpenDraftError,
   PromoCodeConfigValidationError,
+  VersionNotDraftError,
+  VersionNotFoundError,
 } from '../promo-code-config.errors';
 
 @Catch()
@@ -51,6 +56,26 @@ export class HttpExceptionFilter implements ExceptionFilter {
     if (exception instanceof ConfigNameConflictError) {
       return new ConflictException({
         statusCode: 409,
+        message: exception.message,
+      });
+    }
+    // T-PC-058: `NoOpenDraftError`/`DraftAlreadyExistsError`/`VersionNotDraftError` are all a
+    // *state* conflict — the request is otherwise well-formed, but the config's own version
+    // lifecycle isn't in the state the request assumes — so all three map to 409, same family as
+    // `ConfigNameConflictError` above.
+    if (
+      exception instanceof NoOpenDraftError ||
+      exception instanceof DraftAlreadyExistsError ||
+      exception instanceof VersionNotDraftError
+    ) {
+      return new ConflictException({
+        statusCode: 409,
+        message: exception.message,
+      });
+    }
+    if (exception instanceof VersionNotFoundError) {
+      return new NotFoundException({
+        statusCode: 404,
         message: exception.message,
       });
     }

@@ -1,0 +1,47 @@
+// LOCAL COPY — this file is copied verbatim from
+// `realtime-activity-processing-service/proto/activity_ingest.proto` (that service's own
+// authoritative, hand-written source, per its own header comment). It is duplicated here, not
+// referenced by a relative path across the two projects' folders, because
+// `realtime-activity-processing-service/` and `test-app/` are separate, independently-worked
+// projects in this repo (see reward-system/CLAUDE.md) — the same "hand-declare the wire shape
+// locally, no cross-project file dependency" convention `test-app/tracking-service`'s own
+// `promo-code-client/types.ts` and `portal-client/types.ts` already established for its two other
+// REST integrations, applied here to a gRPC `.proto` instead of a hand-typed interface, since
+// `@grpc/proto-loader` needs a real `.proto` file to load, not just field type declarations.
+//
+// Keep this in sync BY HAND if RAP's own proto ever changes shape — there is no shared package
+// or codegen step linking the two copies (RAP's own `.grpc.types.ts` documents the identical
+// "hand-in-sync" convention for its TypeScript side). Do not edit RAP's own copy from here; this
+// file is read-only input to this app's own `rap-client/` module.
+
+syntax = "proto3";
+
+package rewardrap.ingest.v1;
+
+service ActivityIngestService {
+  rpc SubmitActivity (SubmitActivityRequest) returns (SubmitActivityResponse);
+}
+
+message SubmitActivityRequest {
+  string customer_id = 1;
+  string customer_id_type = 2;
+  string activity_performed_date = 3;   // full ISO-8601 with zone offset, e.g. "2026-09-01T10:15:30Z" — REQUIRED to carry an explicit offset, not assumed UTC by omission
+  string transaction_type = 4;          // one of transaction_type / activity_code required
+  string activity_code = 5;
+  string activity_type = 6;
+  string activity_category = 7;
+  string activity_value = 8;            // decimal-as-string — avoids float precision loss over the wire
+  string activity_value_unit = 9;
+  string channel = 10;
+  string activity_performed_env = 11;
+  string activity_name = 12;
+  string activity_event_id = 13;        // OPTIONAL but strongly recommended — ARCHITECTURE.md §7
+  string correlation_id = 14;           // OPTIONAL — service generates one if blank
+  string merchant_code = 15;            // OPTIONAL
+}
+
+message SubmitActivityResponse {
+  string correlation_id = 1;
+  string status = 2;                    // "accepted" | "duplicate" — never a per-tracker-component outcome here (async, see below)
+  repeated string matched_tracker_components = 3;  // tracker_component_code values this activity fanned out to, for the caller's own visibility
+}

@@ -36,9 +36,35 @@ import {
   RewardGrpcFallbackClient,
   type RewardEntryGrpcPayload,
 } from '@/modules/dispatch/reward-grpc-fallback.client';
+import type { RewardRestFallbackClientPort } from '@/modules/dispatch/reward-rest-fallback.client';
+import type { RewardDispatchChannelResolverPort } from '@/modules/dispatch/outbox-publisher.service';
 import { MetricsService } from '@/observability/metrics.service';
 import { StructuredLoggerFactory } from '@/observability/structured-logger';
 import type { LogRedactorService } from '@/modules/encryption/log-redactor.service';
+
+/** T-INT-006: this e2e file predates the config-driven resolver — it exists to prove the *Kafka
+ * unreachable -> gRPC fallback also fails -> retry table* chain live end to end, not to exercise
+ * the resolver itself (that's `reward-dispatch-channel-resolver.spec.ts`'s own job, against a fake
+ * `pg.Pool`). This fake simply reproduces the exact primary/fallback pair T-RAP-034 originally
+ * hardcoded (Kafka primary, gRPC fallback), so this file's own pre-existing assertions keep proving
+ * the same thing they always did. */
+function fakeChannelResolver(): RewardDispatchChannelResolverPort {
+  return {
+    resolve: async () => ({ primaryChannel: 'KAFKA', fallbackChannel: 'GRPC' }),
+  };
+}
+
+/** Never exercised by this file's own scenario (Kafka fails, then the resolved fallback — gRPC —
+ * is attempted, per `fakeChannelResolver` above) — throws loudly if it ever is, so a future change
+ * to this file's own resolver fake can't silently start routing through REST without this test
+ * noticing. */
+function unusedRestFallback(): RewardRestFallbackClientPort {
+  return {
+    submitRewardEntry: async () => {
+      throw new Error('unusedRestFallback: REST should never be attempted in this scenario');
+    },
+  };
+}
 
 /** Same hand-rolled fake `structured-logger.spec.ts` itself uses for this exact collaborator — a
  * real `StructuredLoggerFactory`/`StructuredLogger`, not a mock, over a no-op redactor. */
@@ -276,6 +302,8 @@ describe('Reward dispatch chain, live (real Postgres + real kafkajs connect atte
         retryRepository,
         unreachableKafkaProducer,
         grpcClient,
+        unusedRestFallback(),
+        fakeChannelResolver(),
         encryption,
         { getRewardDispatchMaxRetryAttempts: () => 0 },
         metrics,

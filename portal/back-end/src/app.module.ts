@@ -32,6 +32,8 @@ import { GrpcModule } from '@/grpc/grpc.module';
 import { CampaignAgentModule } from '@/modules/campaign-agent/agent.module';
 import { DashboardModule } from '@/modules/dashboard/dashboard.module';
 import { FieldValueSourcesModule } from '@/modules/field-value-sources/field-value-sources.module';
+import { CampaignConfigApiModule } from '@/modules/campaign-config-api/campaign-config-api.module';
+import { RewardTrackingIntegrationModule } from '@/modules/reward-tracking-integration/reward-tracking-integration.module';
 
 /**
  * Append-only registration point (05-EXECUTION-PLAN.md §3): each task adds its own module
@@ -231,6 +233,23 @@ import { FieldValueSourcesModule } from '@/modules/field-value-sources/field-val
   // (13-REWARD-MASTER-VALUE-SOURCES.md §3). Registers no global guard, interceptor or filter, so
   // its position here carries no ordering meaning; listed last, appended per 05-EXECUTION-PLAN.md
   // §3.
+  // T-INT-010 (reward-service-integration-plan) appended CampaignConfigApiModule
+  // (`/campaign-config/**`) — the REST mirror of `CampaignConfigService`'s five read RPCs, for
+  // callers (RAP/RR/RTS) that cannot dial gRPC on Render's free tier. Its routes are `@Public()`
+  // (no portal session) but are fully authenticated by their own `ServiceApiAuthGuard`, an
+  // additive guard that runs only on this module's controller — see that guard's own header for
+  // why `@Public()` is necessary here and for the disclosed edit it required in
+  // `test/security/route-inventory.e2e-spec.ts`. No global guard, interceptor or filter of its
+  // own, so its position here carries no ordering meaning; listed last, alongside every other
+  // Wave-appended feature module above.
+  // T-INT-030 (reward-service-integration-plan) appended RewardTrackingIntegrationModule
+  // (`/dashboard/reward-tracking/**`) — leg 8's portal-backend client for RTS's real
+  // `AdminRewardsController`, minting the RTS-specific HMAC bearer token that guard's own header
+  // documented as portal-owned follow-up work. Unlike `CampaignConfigApiModule` above, every route
+  // here stays behind the already-global `JwtAuthGuard`/`RolesGuard` chain (no `@Public()`) — this
+  // is a browser-session-authenticated dashboard proxy, not a machine-to-machine surface — so it
+  // registers no global guard, interceptor or filter of its own; its position here carries no
+  // ordering meaning. Listed last, alongside every other Wave-appended module.
   imports: [
     LoggerModule,
     TracingModule,
@@ -265,6 +284,8 @@ import { FieldValueSourcesModule } from '@/modules/field-value-sources/field-val
     CampaignAgentModule,
     DashboardModule,
     FieldValueSourcesModule,
+    CampaignConfigApiModule,
+    RewardTrackingIntegrationModule,
   ],
 })
 export class AppModule {}

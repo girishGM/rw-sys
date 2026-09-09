@@ -14,6 +14,26 @@
  * exactly as that section specifies ("expected to fail closed and fall through to
  * `reward_dispatch_retry` ... in any environment where `reward-redemption-service` isn't actually
  * running").
+ *
+ * **T-INT-006 port fix**: this constant used to be hardcoded `50061` — a real, shipped mismatch
+ * against RR's own real gRPC server default, `50081`
+ * (`reward-redemption-service/src/grpc/grpc-server.config.ts`'s own `DEFAULT_GRPC_PORT`,
+ * `ARCHITECTURE.md` finding 6(c) of `reward-service-integration-plan`). Fixed to `50081` here.
+ *
+ * **Not imported from `proto/reward_ingest_dispatch_grpc_defaults.ts`, deliberately**: a real
+ * `import` from this file (under `src/modules/dispatch/**`) into `proto/` (a sibling of `src/`, not
+ * a descendant) widens `tsc`'s inferred `rootDir` for `nest build`'s emit, which restructures the
+ * entire compiled `dist/` output (observed directly: `dist/modules/**` becomes `dist/src/modules/**`
+ * and a new `dist/proto/**` appears) — breaking every other file's own `__dirname`-relative runtime
+ * path assumption (`resolveProtoPath()` here included) and Render's `node dist/main.js` entry point
+ * in one shot, for a single shared constant. `proto/reward_ingest_dispatch_grpc_defaults.ts` still
+ * exists as this task's own "Files owned" file and is still the value this constant must track (see
+ * that file's own header) — `test/dispatch/reward-ingest-dispatch-grpc-defaults.spec.ts` imports
+ * *both* this constant and that file's own copy directly (Jest transforms each file independently,
+ * no single whole-program `tsc` emit, so importing across the `src/`/`proto/` boundary is safe
+ * there) and asserts all three — this value, the `proto/` file's copy, and a direct read of RR's own
+ * real source — agree, so the two copies can never silently drift without failing that test.
+ * Recorded as a Deviation in this task's own completion report.
  */
 import { Injectable, Logger, type OnModuleDestroy } from '@nestjs/common';
 import { join } from 'node:path';
@@ -21,7 +41,7 @@ import { readFileSync } from 'node:fs';
 import * as grpc from '@grpc/grpc-js';
 import * as protoLoader from '@grpc/proto-loader';
 
-export const DEFAULT_REWARD_REDEMPTION_GRPC_PORT = 50061;
+export const DEFAULT_REWARD_REDEMPTION_GRPC_PORT = 50081;
 /** Generous enough for a real network hop, short enough that an unreachable
  * `reward-redemption-service` fails a tier-2 attempt within a bounded time rather than stalling a
  * dispatch cycle — same convention `campaign-config.client.ts`'s own

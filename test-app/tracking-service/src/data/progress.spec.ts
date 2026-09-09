@@ -151,9 +151,9 @@ describe('ProgressStore', () => {
       expect(current).toHaveLength(2);
       expect(current.map((c) => c.campaignId)).toEqual([42, 43]);
       // the pre-existing campaign's own progress (set above) survived the addCampaigns call
-      expect(
-        current[0].trackers[0].components.find((c) => c.componentId === 1)?.completed,
-      ).toBe(true);
+      expect(current[0].trackers[0].components.find((c) => c.componentId === 1)?.completed).toBe(
+        true,
+      );
     });
 
     it('is a no-op given an empty list', () => {
