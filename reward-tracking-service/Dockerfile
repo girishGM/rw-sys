@@ -65,10 +65,16 @@ RUN npm ci --ignore-scripts
 FROM deps AS build
 WORKDIR /app
 
-COPY tsconfig.json tsconfig.build.json ./
+COPY tsconfig.json tsconfig.build.json nest-cli.json ./
 COPY src src
 COPY proto proto
 
+# T-INT-041 fix: this stage never copied `nest-cli.json` itself into the build context, so
+# `nest build` silently fell back to its own default behavior (no custom `assets` entry) and
+# never copied `src/modules/campaign-cache/proto/campaign_config.proto` into `dist/` — even
+# though the exact same `npm run build` succeeds outside Docker, on a checkout that already has
+# nest-cli.json sitting next to package.json. Confirmed by inspecting the `build` stage directly
+# (`docker build --target build` + `ls dist/modules/campaign-cache/`) before this fix landed.
 RUN npm run build \
  # No source maps of server code in the final image. `sourceMap: true` (tsconfig.json) is
  # correct for local debugging; stripping the emitted `.map` files here — after the build that
