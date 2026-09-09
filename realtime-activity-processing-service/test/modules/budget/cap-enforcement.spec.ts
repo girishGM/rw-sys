@@ -11,15 +11,44 @@
  *    `RuleEvaluationRowHandler.handle()` exactly as production traffic would — proving the
  *    `budget_consumption`/`customer_reward_limit_consumption` reservations really happen inside
  *    the same transaction T-RAP-031 opened, not a separately wired call.
+ *
+ * **T-INT-045 update.** Adds coverage for `resolveRewardValueIfNeeded` (pure) plus four DB-backed
+ * tests (`T-INT-045 TC-1`..`TC-4`, matching the task file's own numbering, distinct from this
+ * file's pre-existing TC-1..9) proving `CapEnforcementService` no longer unconditionally requires
+ * a resolvable `fixedAmount`/`amount` for every bound reward — the real, live defect
+ * `reward-service-integration-plan/tasks/T-INT-045-*.md` describes (every currently-active
+ * tenant-1 campaign hit this, since none has a published reward version with a fixed amount, and a
+ * `PROMO_CODE` reward has no fixed amount by design). See `cap-enforcement.service.ts`'s own
+ * header for the full before/after reasoning and the documented `'0'`-placeholder decision.
+ *
+ * **T-INT-044 retry 1 update.** The "T-RAP-048 retry 2/3 regression" test below deliberately
+ * leaves a same-tenant `STRANDED-T048-2` row genuinely `pending` across its own insert →
+ * `insertAndClaim()` call → a final re-`SELECT` re-verifying it is still `pending` — several real
+ * round trips during which a DIFFERENT, real, globally-scoped `ActivityLogClaimWorker` running in a
+ * concurrently-running worker-bundle file (`processing-worker.e2e-spec.ts`,
+ * `full-pipeline(-multi-instance).e2e-spec.ts`, `mixed-transport-load.e2e-spec.ts`) can claim it
+ * first — the identical hazard shape independent review reproduced for real in
+ * `rule-evaluation.spec.ts`'s own copy of this test during this task's own retry-1 review. Same
+ * fix as `claim-worker.spec.ts`'s two `T-INT-044 regression` tests: this test now also acquires
+ * `acquireIngestConsumerGroupReaderLease()` (the same cross-process lock every worker-bundle file
+ * already takes before starting a real global claim worker) for the whole window its own row sits
+ * exposed, closing this specific residual gap without touching production semantics or weakening
+ * the assertion itself.
  */
 import 'reflect-metadata';
 import { Sequelize } from 'sequelize-typescript';
 import { QueryTypes } from 'sequelize';
 import {
+  acquireIngestConsumerGroupReaderLease,
+  type IngestConsumerGroupReaderLease,
+} from '../../e2e/kafka-shared-consumer-group-lock';
+import { READER_LEASE_ACQUIRE_TIMEOUT_MS } from '../../e2e/full-pipeline-test-helpers';
+import {
   CapEnforcementService,
   deriveCapKey,
   matchCapsForAssignment,
   resolveFixedRewardValue,
+  resolveRewardValueIfNeeded,
 } from '@/modules/budget/cap-enforcement.service';
 import { BudgetConsumptionRepository } from '@/modules/budget/budget-consumption.repository';
 import { CustomerLimitConsumptionRepository } from '@/modules/budget/customer-limit-consumption.repository';
@@ -189,6 +218,39 @@ describe('resolveFixedRewardValue (pure, no DB)', () => {
     expect(() => resolveFixedRewardValue(fakeReward({ policiesJson: '{"rate": 0.1}' }))).toThrow(
       /resolvable/,
     );
+  });
+});
+
+describe('resolveRewardValueIfNeeded (pure, no DB) — T-INT-045', () => {
+  it('returns null and never calls resolveFixedRewardValue when no matched cap has any amount configured at all', () => {
+    const unresolvable = fakeReward({
+      policiesJson: '{"apiProvider":"PROMO_CODE_CONFIG_SERVICE"}',
+    });
+    expect(resolveRewardValueIfNeeded(unresolvable, [])).toBeNull();
+
+    const occurrenceOnlyCap = fakeCap({ maxTotalAmount: '', maxOccurrences: 5 });
+    expect(resolveRewardValueIfNeeded(unresolvable, [occurrenceOnlyCap])).toBeNull();
+  });
+
+  it('maxTotalAmount === "0" counts as "not configured", same as an empty string — still never resolved', () => {
+    const unresolvable = fakeReward({ policiesJson: '{"apiProvider":"X"}' });
+    const zeroAmountCap = fakeCap({ maxTotalAmount: '0', maxOccurrences: 3 });
+    expect(resolveRewardValueIfNeeded(unresolvable, [zeroAmountCap])).toBeNull();
+  });
+
+  it('resolves a real fixedAmount when a matched cap genuinely needs one (unchanged existing behavior)', () => {
+    const reward = fakeReward({ policiesJson: '{"fixedAmount":"7.25"}' });
+    const cap = fakeCap({ maxTotalAmount: '100.00' });
+    expect(resolveRewardValueIfNeeded(reward, [cap])).toBe('7.25');
+  });
+
+  it('returns null — never throws — when a matched cap needs an amount but the reward value is unresolvable', () => {
+    const unresolvable = fakeReward({
+      policiesJson: '{"apiProvider":"PROMO_CODE_CONFIG_SERVICE"}',
+    });
+    const cap = fakeCap({ maxTotalAmount: '100.00' });
+    expect(() => resolveRewardValueIfNeeded(unresolvable, [cap])).not.toThrow();
+    expect(resolveRewardValueIfNeeded(unresolvable, [cap])).toBeNull();
   });
 });
 
@@ -443,23 +505,35 @@ describe('Budget/cap enforcement (real Postgres, rap_app role)', () => {
    * nothing to give back, so neither another suite's row nor an earlier test's stranded row can
    * ever be returned here — this statement can only ever touch the one row this call itself just
    * inserted.
+   *
+   * **T-INT-044 update.** This file is one of the four this task's own Evidence section names as
+   * still carrying doc-comment history of this exact hazard, even though its own path
+   * (`test/modules/budget/`) sits outside this task's "Files owned" list's literal
+   * `test/modules/processing/*.spec.ts` glob — an oversight in that glob, not a deliberate
+   * exclusion, given the Evidence section explicitly names this file by its own T-RAP-048 history.
+   * The by-id claim above still ran as a *second*, separate statement after the insert's own
+   * transaction had already committed — the same real, if narrow, cross-suite window
+   * `rule-evaluation.spec.ts`/`tracker-completion.spec.ts`'s own identical helper carried before
+   * their own T-INT-044 fix (see either file's own header for the full reasoning, not repeated
+   * here). Folding the claim into the SAME transaction as the insert removes the window entirely,
+   * for the identical reason it does there.
    */
   async function insertAndClaim(overrides: Partial<FanOutRowInput> = {}): Promise<ActivityLogRow> {
-    const [inserted] = await sequelize.transaction((t) =>
-      fanOutRepository.insertFanOutRows([pendingRowInput(overrides)], t),
-    );
-    if (!inserted) {
-      throw new Error(
-        'Failed to insert the row this test needs to claim (unexpected dedup conflict)',
+    const claimed = await sequelize.transaction(async (t) => {
+      const [inserted] = await fanOutRepository.insertFanOutRows([pendingRowInput(overrides)], t);
+      if (!inserted) {
+        throw new Error(
+          'Failed to insert the row this test needs to claim (unexpected dedup conflict)',
+        );
+      }
+      return sequelize.query<ActivityLogRow>(
+        `UPDATE realtime_activity_processing.activity_logs
+            SET status = 'processing', updated_at = now()
+          WHERE id = :id AND status = 'pending'
+          RETURNING *`,
+        { type: QueryTypes.SELECT, replacements: { id: inserted.id }, transaction: t },
       );
-    }
-    const claimed = await sequelize.query<ActivityLogRow>(
-      `UPDATE realtime_activity_processing.activity_logs
-          SET status = 'processing', updated_at = now()
-        WHERE id = :id AND status = 'pending'
-        RETURNING *`,
-      { type: QueryTypes.SELECT, replacements: { id: inserted.id } },
-    );
+    });
     if (claimed.length === 0) {
       throw new Error('Failed to claim the row this test just inserted');
     }
@@ -515,26 +589,44 @@ describe('Budget/cap enforcement (real Postgres, rap_app role)', () => {
   // reverted to retry 1. Fixed (claim by this call's own known id): always returns the row this
   // call itself inserted, regardless of what else is sitting `pending` in the queue, and the
   // stranded row is left untouched.
-  it("T-RAP-048 retry 2/3 regression: insertAndClaim never claims a different pending row that only shares this file's TENANT_ID", async () => {
-    await sequelize.transaction((t) =>
-      fanOutRepository.insertFanOutRows(
-        [pendingRowInput({ trackerComponentCode: 'STRANDED-T048-2' })],
-        t,
-      ),
-    );
+  //
+  // T-INT-044 retry 1: the `STRANDED-T048-2` row is deliberately left genuinely `pending` from its
+  // own insert through the final re-`SELECT` below, several real round trips during which a
+  // foreign, real, globally-scoped `ActivityLogClaimWorker` in a concurrently-running worker-bundle
+  // file could otherwise claim it first (see this file's own header). Acquires the same
+  // cross-process `acquireIngestConsumerGroupReaderLease()` every worker-bundle file already takes
+  // before starting a real global claim worker, for the whole exposure window, so no such foreign
+  // claim can happen while this test's own row sits `pending`.
+  it(
+    "T-RAP-048 retry 2/3 regression: insertAndClaim never claims a different pending row that only shares this file's TENANT_ID",
+    async () => {
+      const readerLease: IngestConsumerGroupReaderLease =
+        await acquireIngestConsumerGroupReaderLease(READER_LEASE_ACQUIRE_TIMEOUT_MS);
+      try {
+        await sequelize.transaction((t) =>
+          fanOutRepository.insertFanOutRows(
+            [pendingRowInput({ trackerComponentCode: 'STRANDED-T048-2' })],
+            t,
+          ),
+        );
 
-    const row = await insertAndClaim({ trackerComponentCode: 'COMP-T048-TARGET-2' });
+        const row = await insertAndClaim({ trackerComponentCode: 'COMP-T048-TARGET-2' });
 
-    expect(row.tracker_component_code).toBe('COMP-T048-TARGET-2');
+        expect(row.tracker_component_code).toBe('COMP-T048-TARGET-2');
 
-    const strandedRows = await sequelize.query<ActivityLogRow>(
-      `SELECT * FROM realtime_activity_processing.activity_logs
+        const strandedRows = await sequelize.query<ActivityLogRow>(
+          `SELECT * FROM realtime_activity_processing.activity_logs
         WHERE tenant_id = :tenantId AND tracker_component_code = 'STRANDED-T048-2'`,
-      { type: QueryTypes.SELECT, replacements: { tenantId: TENANT_ID } },
-    );
-    expect(strandedRows).toHaveLength(1);
-    expect(strandedRows[0].status).toBe('pending');
-  });
+          { type: QueryTypes.SELECT, replacements: { tenantId: TENANT_ID } },
+        );
+        expect(strandedRows).toHaveLength(1);
+        expect(strandedRows[0].status).toBe('pending');
+      } finally {
+        readerLease.release();
+      }
+    },
+    READER_LEASE_ACQUIRE_TIMEOUT_MS + 30_000,
+  );
 
   async function loadActivityLog(id: string): Promise<ActivityLogRow> {
     const rows = await sequelize.query<ActivityLogRow>(
@@ -1066,5 +1158,202 @@ describe('Budget/cap enforcement (real Postgres, rap_app role)', () => {
     expect(activityLog.status).toBe('error');
     expect(activityLog.comment).toContain('cap breach');
     expect(breachCallback.reportBreach).toHaveBeenCalledTimes(1);
+  });
+
+  // ------------------------------------------------------------------------------------------
+  // T-INT-045 TC-1..4 — this task's own test cases (real Postgres, driven directly through
+  // `CapEnforcementService.enforceForCompletion`, same pattern as TC-7 above). `unresolvableReward`
+  // mirrors the real, live `PROMO_CODE` seed data this defect was found against
+  // (`WEEKEND_PROMO_BLITZ`/`POL_PROMO_VOUCHER`, `reward-service-integration-plan/tasks/T-INT-045-
+  // *.md`'s own "Evidence"): a `policies_json` shape with no `fixedAmount`/`amount` field at all.
+  // ------------------------------------------------------------------------------------------
+
+  function unresolvableReward(overrides: Partial<BoundRewardProto> = {}): BoundRewardProto {
+    return fakeReward({
+      rewardType: 'PROMO_CODE',
+      policiesJson: JSON.stringify({ apiProvider: 'PROMO_CODE_CONFIG_SERVICE' }),
+      ...overrides,
+    });
+  }
+
+  function newCapEnforcement(): CapEnforcementService {
+    return new CapEnforcementService(
+      budgetRepository,
+      customerLimitRepository,
+      fakeBreachCallback(),
+      fakeLoggerFactory(),
+    );
+  }
+
+  it('T-INT-045 TC-1: an unresolvable-value reward completes a tracker component when no CampaignCap matches it at all — granted, no throw', async () => {
+    const reward = unresolvableReward({
+      rewardId: 94_501,
+      systemCode: 'RWD_INT045_TC1',
+      refId: 94_501,
+    });
+    const capEnforcement = newCapEnforcement();
+
+    const outcome = await sequelize.transaction((t) =>
+      capEnforcement.enforceForCompletion(t, {
+        correlationId: 'corr-int045-tc1',
+        tenantId: TENANT_ID,
+        campaignId: 94_501,
+        campaignCode: 'CAMP_INT045_TC1',
+        customerIdHash: `int045-tc1-${Math.random().toString(36).slice(2)}`,
+        trackerId: 8200,
+        rewardEntryDate: new Date(),
+        assignments: [reward],
+        caps: [], // zero CampaignCap rows — mirrors tenant 1's real, live `reward_config.campaign_caps`
+      }),
+    );
+
+    expect(outcome.denied).toEqual([]);
+    expect(outcome.granted).toEqual([{ reward, rewardValue: '0' }]);
+  });
+
+  it('T-INT-045 TC-2: a maxOccurrences-only cap (no maxTotalAmount) denies purely on count for an unresolvable-value reward, never throwing for the amount', async () => {
+    const reward = unresolvableReward({
+      rewardId: 94_502,
+      systemCode: 'RWD_INT045_TC2',
+      refId: 94_502,
+    });
+    const cap = fakeCap({
+      unitType: reward.unitType,
+      unitCode: reward.unitCode,
+      maxTotalAmount: '',
+      maxOccurrences: 1,
+    });
+    const capEnforcement = newCapEnforcement();
+    const { periodStart, periodEnd } = computePeriodBucket(cap, new Date());
+    const capKey = deriveCapKey(cap);
+    await sequelize.transaction(async (t) => {
+      const seedRow = await budgetRepository.lockOrCreate(t, {
+        tenantId: TENANT_ID,
+        campaignCode: 'CAMP_INT045_TC2',
+        rewardPolicyCode: capKey.rewardPolicyCode,
+        capType: capKey.capType,
+        periodStart,
+        periodEnd,
+      });
+      await budgetRepository.increment(t, seedRow.id, '0', 1); // already at max_occurrences = 1
+    });
+
+    const outcome = await sequelize.transaction((t) =>
+      capEnforcement.enforceForCompletion(t, {
+        correlationId: 'corr-int045-tc2',
+        tenantId: TENANT_ID,
+        campaignId: 94_502,
+        campaignCode: 'CAMP_INT045_TC2',
+        customerIdHash: `int045-tc2-${Math.random().toString(36).slice(2)}`,
+        trackerId: 8200,
+        rewardEntryDate: new Date(),
+        assignments: [reward],
+        caps: [cap],
+      }),
+    );
+
+    expect(outcome.granted).toEqual([]);
+    expect(outcome.denied).toHaveLength(1);
+    expect(outcome.denied[0].comment).toContain('count');
+    expect(outcome.denied[0].comment).not.toContain('resolvable');
+  });
+
+  it('T-INT-045 TC-3: a genuinely matching maxTotalAmount cap treats an unresolvable reward value as unbounded for the amount dimension — granted, "0" recorded, never invented', async () => {
+    const reward = unresolvableReward({
+      rewardId: 94_503,
+      systemCode: 'RWD_INT045_TC3',
+      refId: 94_503,
+    });
+    const cap = fakeCap({
+      unitType: reward.unitType,
+      unitCode: reward.unitCode,
+      maxTotalAmount: '5.00',
+      maxOccurrences: 0,
+    });
+    const capEnforcement = newCapEnforcement();
+
+    const outcome = await sequelize.transaction((t) =>
+      capEnforcement.enforceForCompletion(t, {
+        correlationId: 'corr-int045-tc3',
+        tenantId: TENANT_ID,
+        campaignId: 94_503,
+        campaignCode: 'CAMP_INT045_TC3',
+        customerIdHash: `int045-tc3-${Math.random().toString(36).slice(2)}`,
+        trackerId: 8200,
+        rewardEntryDate: new Date(),
+        assignments: [reward],
+        caps: [cap],
+      }),
+    );
+
+    expect(outcome.denied).toEqual([]);
+    expect(outcome.granted).toEqual([{ reward, rewardValue: '0' }]);
+
+    const budgetRow = await loadBudgetRow(cap, 'CAMP_INT045_TC3');
+    // The recorded delta is the documented '0' placeholder, never a fabricated amount.
+    expect(budgetRow?.consumed_amount).toBe('0.0000');
+    expect(budgetRow?.consumed_count).toBe(1);
+  });
+
+  it('T-INT-045 TC-4 (regression): a reward WITH a resolvable fixedAmount and a matching maxTotalAmount cap is granted exactly as before this task', async () => {
+    const reward = fakeReward({
+      rewardId: 94_504,
+      systemCode: 'RWD_INT045_TC4',
+      refId: 94_504,
+      level: 'component',
+      policiesJson: JSON.stringify({ fixedAmount: '12.50' }),
+    });
+    const cap = fakeCap({ maxTotalAmount: '100.00', maxOccurrences: 0 });
+    const capEnforcement = newCapEnforcement();
+
+    const outcome = await sequelize.transaction((t) =>
+      capEnforcement.enforceForCompletion(t, {
+        correlationId: 'corr-int045-tc4',
+        tenantId: TENANT_ID,
+        campaignId: 94_504,
+        campaignCode: 'CAMP_INT045_TC4',
+        customerIdHash: `int045-tc4-${Math.random().toString(36).slice(2)}`,
+        trackerId: 8200,
+        rewardEntryDate: new Date(),
+        assignments: [reward],
+        caps: [cap],
+      }),
+    );
+
+    expect(outcome.denied).toEqual([]);
+    expect(outcome.granted).toEqual([{ reward, rewardValue: '12.50' }]);
+
+    const budgetRow = await loadBudgetRow(cap, 'CAMP_INT045_TC4');
+    expect(budgetRow?.consumed_amount).toBe('12.5000');
+  });
+
+  it('T-INT-045 TC-4 (regression): the same resolvable-amount reward still breaches when it would exceed maxTotalAmount — unchanged existing behavior', async () => {
+    const reward = fakeReward({
+      rewardId: 94_505,
+      systemCode: 'RWD_INT045_TC4B',
+      refId: 94_505,
+      level: 'component',
+      policiesJson: JSON.stringify({ fixedAmount: '12.50' }),
+    });
+    const cap = fakeCap({ maxTotalAmount: '10.00', maxOccurrences: 0 });
+    const capEnforcement = newCapEnforcement();
+
+    const outcome = await sequelize.transaction((t) =>
+      capEnforcement.enforceForCompletion(t, {
+        correlationId: 'corr-int045-tc4b',
+        tenantId: TENANT_ID,
+        campaignId: 94_505,
+        campaignCode: 'CAMP_INT045_TC4B',
+        customerIdHash: `int045-tc4b-${Math.random().toString(36).slice(2)}`,
+        trackerId: 8200,
+        rewardEntryDate: new Date(),
+        assignments: [reward],
+        caps: [cap],
+      }),
+    );
+
+    expect(outcome.granted).toEqual([]);
+    expect(outcome.denied).toHaveLength(1);
+    expect(outcome.denied[0].comment).toContain('amount');
   });
 });

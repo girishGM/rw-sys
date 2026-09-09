@@ -1,15 +1,24 @@
 /**
- * T-RAP-034. `OutboxPublisherService` (tiers 1-2, `05-PROCESSING-PIPELINE.md` §7) against fakes for
- * every collaborator — deterministic, no real broker/gRPC server needed (`reward-grpc-fallback.spec.ts`
- * covers the real wire client separately; `dispatch-chain.e2e-spec.ts` covers the whole
- * chain against a genuinely-unreachable broker). Same "assert the observable property" discipline
- * as every prior fake-collaborator suite in this project (`activity-ingest.consumer.spec.ts`):
- * every assertion below checks what was actually called/persisted, not an internal implementation
- * string.
+ * T-RAP-034, config-driven transport selection added by T-INT-006. `OutboxPublisherService`
+ * (tiers 1-2, `05-PROCESSING-PIPELINE.md` §7) against fakes for every collaborator —
+ * deterministic, no real broker/gRPC/REST server needed (`reward-grpc-fallback.spec.ts`/
+ * `reward-rest-fallback.client.spec.ts` cover the real wire clients separately;
+ * `dispatch-chain.e2e-spec.ts` covers the whole chain against a genuinely-unreachable broker). Same
+ * "assert the observable property" discipline as every prior fake-collaborator suite in this
+ * project (`activity-ingest.consumer.spec.ts`): every assertion below checks what was actually
+ * called/persisted, not an internal implementation string.
  *
  * `EncryptionService` is the one **real** collaborator here (not faked) — TC-2/TC-3/TC-4/TC-5 all
  * depend on `row.payload.customerIdEncrypted` actually decrypting to the same `customerId` the test
  * encrypted, proving R4's boundary end to end, not just that some decrypt method was called.
+ *
+ * **T-INT-006**: `fakes.channelResolver` stands in for `RewardDispatchChannelResolverService` — a
+ * plain object exposing `resolve()`, matching `RewardDispatchChannelResolverPort`'s own narrow
+ * shape (`outbox-publisher.service.ts`), so every test below controls exactly which channel is
+ * "primary"/"fallback" for that row without touching a real Postgres table (that table's own
+ * resolution logic is covered separately, against a fake `pg.Pool`, by
+ * `reward-dispatch-channel-resolver.spec.ts`). `fakes.restFallback` is the new third transport
+ * option, alongside the two pre-existing fakes.
  */
 import 'reflect-metadata';
 import { Logger } from '@nestjs/common';
@@ -17,10 +26,15 @@ import { EncryptionService } from '@/modules/encryption/encryption.service';
 import type { RewardEntryOutboxRepository } from '@/modules/reward-entry/reward-entry-outbox.repository';
 import type { RewardEntryRepository } from '@/modules/reward-entry/reward-entry.repository';
 import type { RewardDispatchMaxRetryResolver } from '@/modules/dispatch/dispatch.config';
-import { OutboxPublisherService } from '@/modules/dispatch/outbox-publisher.service';
+import {
+  OutboxPublisherService,
+  type RewardDispatchChannelResolverPort,
+} from '@/modules/dispatch/outbox-publisher.service';
 import type { RewardDispatchRetryRepository } from '@/modules/dispatch/reward-dispatch-retry.repository';
 import type { RewardKafkaProducerClient } from '@/modules/dispatch/reward-kafka-producer.client';
 import type { RewardGrpcFallbackClient } from '@/modules/dispatch/reward-grpc-fallback.client';
+import type { RewardRestFallbackClientPort } from '@/modules/dispatch/reward-rest-fallback.client';
+import type { RewardDispatchChannel } from '@/modules/dispatch/reward-dispatch-channel-resolver.service';
 import { MetricsService } from '@/observability/metrics.service';
 import { StructuredLoggerFactory } from '@/observability/structured-logger';
 import type { LogRedactorService } from '@/modules/encryption/log-redactor.service';
@@ -96,10 +110,21 @@ interface Fakes {
   retryRepository: RewardDispatchRetryRepository & { create: jest.Mock };
   kafkaProducer: RewardKafkaProducerClient & { publish: jest.Mock };
   grpcFallback: RewardGrpcFallbackClient & { submitRewardEntry: jest.Mock };
+  restFallback: RewardRestFallbackClientPort & { submitRewardEntry: jest.Mock };
+  channelResolver: RewardDispatchChannelResolverPort & { resolve: jest.Mock };
   configResolver: RewardDispatchMaxRetryResolver;
 }
 
-function buildFakes(pendingRows: ReturnType<typeof fakePendingRow>[]): Fakes {
+/** T-INT-006: every test below defaults to the pre-existing hardcoded order (primary KAFKA,
+ * fallback GRPC) unless it explicitly overrides `channelResolver`, so every pre-T-INT-006 test case
+ * keeps exercising the exact same behaviour it always has. */
+function buildFakes(
+  pendingRows: ReturnType<typeof fakePendingRow>[],
+  channels: { primary: RewardDispatchChannel; fallback: RewardDispatchChannel } = {
+    primary: 'KAFKA',
+    fallback: 'GRPC',
+  },
+): Fakes {
   return {
     outboxRepository: {
       findPendingBatch: jest.fn().mockResolvedValue(pendingRows),
@@ -121,6 +146,15 @@ function buildFakes(pendingRows: ReturnType<typeof fakePendingRow>[]): Fakes {
     grpcFallback: {
       submitRewardEntry: jest.fn(),
     } as unknown as Fakes['grpcFallback'],
+    restFallback: {
+      submitRewardEntry: jest.fn(),
+    } as unknown as Fakes['restFallback'],
+    channelResolver: {
+      resolve: jest.fn().mockResolvedValue({
+        primaryChannel: channels.primary,
+        fallbackChannel: channels.fallback,
+      }),
+    } as unknown as Fakes['channelResolver'],
     configResolver: { getRewardDispatchMaxRetryAttempts: () => THRESHOLD },
   };
 }
@@ -135,6 +169,8 @@ function buildService(
     fakes.retryRepository,
     fakes.kafkaProducer,
     fakes.grpcFallback,
+    fakes.restFallback,
+    fakes.channelResolver,
     encryption,
     fakes.configResolver,
     metrics,
@@ -321,5 +357,113 @@ describe('OutboxPublisherService', () => {
     service.start();
     service.stop();
     service.stop();
+  });
+
+  describe('T-INT-006 — config-driven channel resolution', () => {
+    it('TC-3: primary REST, RR reachable -> row dispatched via REST, PUBLISHED, zero Kafka/gRPC calls', async () => {
+      const row = fakePendingRow({ __customerId: 'CUST-REST', attempts: 0 });
+      const fakes = buildFakes([row], { primary: 'REST', fallback: 'GRPC' });
+      fakes.restFallback.submitRewardEntry.mockResolvedValue({
+        rewardEntryId: 'reward-entry-1',
+        status: 'received',
+      });
+      const metrics = new MetricsService();
+      const service = buildService(fakes, metrics);
+
+      await service.runOnce();
+
+      expect(fakes.restFallback.submitRewardEntry).toHaveBeenCalledTimes(1);
+      const [payload] = fakes.restFallback.submitRewardEntry.mock.calls[0];
+      expect(payload.customerId).toBe('CUST-REST');
+      expect(fakes.kafkaProducer.publish).not.toHaveBeenCalled();
+      expect(fakes.grpcFallback.submitRewardEntry).not.toHaveBeenCalled();
+      expect(fakes.outboxRepository.markPublished).toHaveBeenCalledWith('outbox-row-1');
+      expect(fakes.rewardEntryRepository.markDispatched).toHaveBeenCalledWith('reward-entry-1');
+      expect(metrics.getCounterValue('reward_dispatch_tier_total', { tier: 'rest' })).toBe(1);
+    });
+
+    it('TC-4 (part 1): primary REST fails below threshold -> attempts incremented, gRPC fallback not tried yet', async () => {
+      const row = fakePendingRow({ attempts: 0 });
+      const fakes = buildFakes([row], { primary: 'REST', fallback: 'GRPC' });
+      fakes.restFallback.submitRewardEntry.mockRejectedValue(new Error('RR REST unreachable'));
+      const service = buildService(fakes);
+
+      await service.runOnce();
+
+      expect(fakes.outboxRepository.incrementAttempts).toHaveBeenCalledWith('outbox-row-1');
+      expect(fakes.rewardEntryRepository.recordDispatchAttemptFailure).toHaveBeenCalledWith(
+        'reward-entry-1',
+        expect.stringContaining('RR REST unreachable'),
+      );
+      expect(fakes.outboxRepository.markPublished).not.toHaveBeenCalled();
+      expect(fakes.grpcFallback.submitRewardEntry).not.toHaveBeenCalled();
+    });
+
+    it('TC-4 (part 2): once attempts reach the threshold, gRPC fallback is attempted instead of REST, and succeeds', async () => {
+      const row = fakePendingRow({ __customerId: 'CUST-FALLBACK', attempts: THRESHOLD });
+      const fakes = buildFakes([row], { primary: 'REST', fallback: 'GRPC' });
+      fakes.grpcFallback.submitRewardEntry.mockResolvedValue({
+        rewardEntryId: 'reward-entry-1',
+        status: 'accepted',
+      });
+      const service = buildService(fakes);
+
+      await service.runOnce();
+
+      expect(fakes.restFallback.submitRewardEntry).not.toHaveBeenCalled();
+      expect(fakes.grpcFallback.submitRewardEntry).toHaveBeenCalledTimes(1);
+      expect(fakes.outboxRepository.markPublished).toHaveBeenCalledWith('outbox-row-1');
+      expect(fakes.rewardEntryRepository.markDispatched).toHaveBeenCalledWith('reward-entry-1');
+    });
+
+    it('TC-5: primary KAFKA (via set-transport-primary.js-equivalent config) succeeds, no REST/gRPC attempted', async () => {
+      const row = fakePendingRow({ attempts: 0 });
+      const fakes = buildFakes([row], { primary: 'KAFKA', fallback: 'REST' });
+      fakes.kafkaProducer.publish.mockResolvedValue(undefined);
+      const service = buildService(fakes);
+
+      await service.runOnce();
+
+      expect(fakes.kafkaProducer.publish).toHaveBeenCalledTimes(1);
+      expect(fakes.restFallback.submitRewardEntry).not.toHaveBeenCalled();
+      expect(fakes.grpcFallback.submitRewardEntry).not.toHaveBeenCalled();
+    });
+
+    it('TC-7: primary REST and fallback GRPC both unreachable -> reward_dispatch_retry row created, unchanged tier-3 behaviour', async () => {
+      const row = fakePendingRow({ attempts: THRESHOLD });
+      const fakes = buildFakes([row], { primary: 'REST', fallback: 'GRPC' });
+      fakes.grpcFallback.submitRewardEntry.mockRejectedValue(
+        new Error('RR unreachable on every transport'),
+      );
+      const service = buildService(fakes);
+
+      await service.runOnce();
+
+      expect(fakes.outboxRepository.markFailed).toHaveBeenCalledWith('outbox-row-1');
+      expect(fakes.rewardEntryRepository.markDispatchFailed).toHaveBeenCalledWith(
+        'reward-entry-1',
+        expect.stringContaining('RR unreachable on every transport'),
+      );
+      expect(fakes.retryRepository.create).toHaveBeenCalledWith({
+        rewardEntryId: 'reward-entry-1',
+        failureReason: expect.stringContaining('RR unreachable on every transport'),
+      });
+    });
+
+    it('the resolver is called with this row’s own reward/tracker/campaign/tenant context', async () => {
+      const row = fakePendingRow({ attempts: 0 });
+      const fakes = buildFakes([row], { primary: 'KAFKA', fallback: 'GRPC' });
+      fakes.kafkaProducer.publish.mockResolvedValue(undefined);
+      const service = buildService(fakes);
+
+      await service.runOnce();
+
+      expect(fakes.channelResolver.resolve).toHaveBeenCalledWith({
+        rewardCode: 'RWD1',
+        trackerCode: 'TRK1',
+        campaignCode: 'CAMP1',
+        tenantId: 1,
+      });
+    });
   });
 });

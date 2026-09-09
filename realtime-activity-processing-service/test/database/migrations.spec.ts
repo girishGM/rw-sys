@@ -157,7 +157,12 @@ describe('T-RAP-002 — realtime_activity_processing schema migrations', () => {
 
   // TC-2: every table from 01-DATABASE.md §1-§11 is present (`\dt realtime_activity_processing.*`
   // equivalent via information_schema, excluding Umzug's own bookkeeping table).
-  it('TC-2: all 12 realtime_activity_processing tables exist with the correct names', async () => {
+  // T-INT-011 added a 13th table (`portal_config_channel_config`, migration `016`) — updated here
+  // since this exact-table-list assertion would otherwise fail on that migration's own,
+  // legitimate schema addition; not a task this test file's own owning agent needs to revisit.
+  // T-INT-006 added a 14th table (`reward_dispatch_channel_config`, migration `017`) — same
+  // reasoning, same fix.
+  it('TC-2: all 14 realtime_activity_processing tables exist with the correct names', async () => {
     const rows = await sequelize.query<{ table_name: string; table_schema: string }>(
       `SELECT table_name, table_schema FROM information_schema.tables
          WHERE table_schema = 'realtime_activity_processing' AND table_name != 'migrations'
@@ -173,6 +178,8 @@ describe('T-RAP-002 — realtime_activity_processing schema migrations', () => {
       'customer_tracker_component_progress',
       'customer_tracker_status',
       'field_encryption_config',
+      'portal_config_channel_config',
+      'reward_dispatch_channel_config',
       'reward_dispatch_retry',
       'reward_entry',
       'reward_entry_outbox',

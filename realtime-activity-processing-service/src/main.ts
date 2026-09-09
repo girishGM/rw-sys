@@ -1,9 +1,10 @@
 import 'reflect-metadata';
 import { NestFactory } from '@nestjs/core';
 import { ConfigService } from '@nestjs/config';
-import { Logger } from '@nestjs/common';
+import { Logger, Module } from '@nestjs/common';
 import type { INestApplication, INestApplicationContext, INestMicroservice } from '@nestjs/common';
 import { AppModule } from './app.module';
+import { ConfigModule } from './config/config.module';
 import type { Config } from './config/config.schema';
 import { createGrpcMicroservice } from './grpc/grpc-server.main';
 import { createIngestConsumerContext } from './messaging/ingest/activity-ingest-consumer.main';
@@ -12,21 +13,33 @@ import {
   createProgressApiApp,
   resolveProgressApiPort,
 } from './modules/progress-api/progress-api-server.main';
+import { ProcessingModule } from './modules/processing/processing.module';
+import { DispatchModule } from './modules/dispatch/dispatch.module';
 
 /**
- * T-INT-003. Hybrid bootstrap: the primary HTTP app (`AppModule` — always on, this is Render's
- * whole deployed process today) plus three transports that previously only existed as standalone,
- * never-wired-in composition roots (`ARCHITECTURE.md` §3.1) — the mTLS `ActivityIngestService`
- * gRPC server (`src/grpc/grpc-server.main.ts`), the `activity.ingest.v1` Kafka consumer
- * (`src/messaging/ingest/activity-ingest-consumer.main.ts`), and the customer progress REST API
- * (`src/modules/progress-api/progress-api-server.main.ts`). Each of the three is started as its
- * own separate `NestApplication`/`NestMicroservice`/`NestApplicationContext` instance in this same
- * OS process, reusing the bootstrap functions those files already export — this file invents no
- * new transport-startup logic of its own (task file implementation note 1). None of the three
- * standalone `*.main.ts` files is modified, deleted, or bypassed (R2) — each remains independently
- * runnable exactly as before this task (TC-7).
+ * T-INT-003 (extended by T-INT-043). Hybrid bootstrap: the primary HTTP app (`AppModule` — always
+ * on, this is Render's whole deployed process today) plus four transports that previously only
+ * existed as standalone, never-wired-in composition roots (`ARCHITECTURE.md` §3.1) — the mTLS
+ * `ActivityIngestService` gRPC server (`src/grpc/grpc-server.main.ts`), the `activity.ingest.v1`
+ * Kafka consumer (`src/messaging/ingest/activity-ingest-consumer.main.ts`), the customer progress
+ * REST API (`src/modules/progress-api/progress-api-server.main.ts`), and — T-INT-043 — the
+ * processing/dispatch worker bundle (`ProcessingModule` + `DispatchModule`: `ActivityLogClaimWorker`
+ * → `RuleEvaluatorService`/`TrackerCompletionEvaluatorService` → `CapEnforcementService` →
+ * `reward_entry` creation → `OutboxPublisherService`/`RewardDispatchRetryWorker` dispatch to
+ * reward-redemption-service). Each is started as its own separate
+ * `NestApplication`/`NestMicroservice`/`NestApplicationContext` instance in this same OS process,
+ * reusing the bootstrap functions those files already export where one exists — this file invents
+ * no new transport-startup logic of its own (task file implementation note 1). None of the three
+ * pre-existing standalone `*.main.ts` files is modified, deleted, or bypassed (R2) — each remains
+ * independently runnable exactly as before this task (TC-7). `ProcessingModule`/`DispatchModule`
+ * had no standalone `*.main.ts` of their own before T-INT-043 (confirmed by grepping every
+ * `*.main.ts` in this service plus `app.module.ts` — see that task's own "Evidence" section); this
+ * file's own `ProcessingWorkerRootModule`/`createProcessingWorkerContext()` below are that gap's
+ * first real composition root, added directly here rather than as a fifth standalone file, per
+ * T-INT-043's own Scope note that either shape is acceptable and this one is the more consistent
+ * choice given `main.ts` already hosts three other hybrid-only gates with the identical shape.
  *
- * ## Why each of the three gates below defaults OFF here specifically, even though two of them
+ * ## Why each of the four gates below defaults OFF here specifically, even though two of them
  * ## (`GRPC_SERVER_ENABLED`, `ACTIVITY_INGEST_CONSUMER_ENABLED`) already default ON in their own
  * ## standalone files when unset
  *
@@ -42,18 +55,41 @@ import {
  * gate below is evaluated independently, at this call site, with the opposite unset-default
  * (`=== 'true'`, not `!== 'false'`) from what each transport's own internal function uses — an
  * explicit T-INT-003 deviation from a literal reading of implementation note 3, recorded in this
- * task's own completion report under "Deviations". `PROGRESS_API_ENABLED` is a brand-new var (the
- * standalone progress-api file has no gate of its own to reuse or diverge from) and is given the
- * same off-by-default treatment for symmetry with the other two, exactly as implementation note 1
- * asks.
+ * task's own completion report under "Deviations". `PROGRESS_API_ENABLED` and (T-INT-043)
+ * `PROCESSING_ENABLED` are both brand-new vars (neither standalone-equivalent exists to reuse or
+ * diverge from — `ProcessingModule`/`DispatchModule` had no standalone entry point at all) and are
+ * given the same off-by-default treatment for symmetry with the other two, exactly as
+ * implementation note 1 asks.
  */
 const logger = new Logger('Bootstrap');
+
+/**
+ * T-INT-043. `ProcessingModule` (`ActivityLogClaimWorker`/`StaleProcessingSweepService`, both
+ * autostart by default — see each service's own `OnModuleInit`) + `DispatchModule`
+ * (`OutboxPublisherService`/`RewardDispatchRetryWorker`, both autostart by default whenever
+ * `NODE_ENV !== 'test'` — `dispatch.module.ts`'s own `OUTBOX_PUBLISHER_AUTOSTART`/
+ * `RETRY_WORKER_AUTOSTART` factories). Constructing this application context is therefore
+ * sufficient on its own to start the whole chain end to end in a real (non-test) process — no
+ * explicit `.start()` call is needed here, unlike `test/e2e/full-pipeline-test-helpers.ts`'s own
+ * `WorkerRootModule` equivalent, which runs under `NODE_ENV=test` and does call `.start()`
+ * explicitly for that reason. `InvalidationModule` is deliberately NOT imported here — out of
+ * T-INT-043's own Scope ("Out: Any other RAP module").
+ */
+@Module({ imports: [ConfigModule, ProcessingModule, DispatchModule] })
+export class ProcessingWorkerRootModule {}
+
+/** No enable-gate of its own (mirrors `createProgressApiApp()`'s own precedent) — the only gate is
+ * `PROCESSING_ENABLED`, read at the `startHybridBootstrap()` call site below. */
+export async function createProcessingWorkerContext(): Promise<INestApplicationContext> {
+  return NestFactory.createApplicationContext(ProcessingWorkerRootModule);
+}
 
 export interface HybridBootstrapResult {
   httpApp: INestApplication;
   grpcApp: INestMicroservice | null;
   ingestConsumerContext: INestApplicationContext | null;
   progressApiApp: INestApplication | null;
+  processingWorkerContext: INestApplicationContext | null;
 }
 
 interface TransportFailure {
@@ -112,8 +148,8 @@ async function attemptOptionalTransport<T>(
  * `ConfigModule.forRoot({ validate: validateConfig })` (config.module.ts) runs during
  * `NestFactory.create` below and calls `process.exit(1)` before this function ever reaches
  * `app.listen(...)` if a required environment variable is missing or malformed — see
- * config.schema.ts's header for the full contract. This still applies unchanged; the three
- * optional transports added by this task read their own env vars directly, never through
+ * config.schema.ts's header for the full contract. This still applies unchanged; the optional
+ * transports added by T-INT-003/T-INT-043 read their own env vars directly, never through
  * `ConfigService`/`config.schema.ts` (out of `agent-rap-foundation`'s own delegated split — see
  * each transport's own config file header), so an unset/invalid value for one of THEIR required
  * vars only crashes boot when that specific transport has been explicitly enabled.
@@ -133,6 +169,7 @@ export async function startHybridBootstrap(): Promise<HybridBootstrapResult> {
   const grpcServerEnabled = process.env.GRPC_SERVER_ENABLED === 'true';
   const activityIngestConsumerEnabled = process.env.ACTIVITY_INGEST_CONSUMER_ENABLED === 'true';
   const progressApiEnabled = process.env.PROGRESS_API_ENABLED === 'true';
+  const processingEnabled = process.env.PROCESSING_ENABLED === 'true';
 
   const grpcResult = await attemptOptionalTransport(
     grpcServerEnabled,
@@ -168,16 +205,26 @@ export async function startHybridBootstrap(): Promise<HybridBootstrapResult> {
     },
   );
 
+  const processingResult = await attemptOptionalTransport(
+    processingEnabled,
+    'processing/dispatch worker (ProcessingModule + DispatchModule)',
+    async () => createProcessingWorkerContext(),
+  );
+
   const result: HybridBootstrapResult = {
     httpApp: app,
     grpcApp: grpcResult.handle,
     ingestConsumerContext: ingestResult.handle,
     progressApiApp: progressApiResult.handle,
+    processingWorkerContext: processingResult.handle,
   };
 
-  const failures = [grpcResult.failure, ingestResult.failure, progressApiResult.failure].filter(
-    (failure): failure is TransportFailure => failure !== null,
-  );
+  const failures = [
+    grpcResult.failure,
+    ingestResult.failure,
+    progressApiResult.failure,
+    processingResult.failure,
+  ].filter((failure): failure is TransportFailure => failure !== null);
 
   if (failures.length > 0) {
     const labels = failures.map((failure) => failure.label).join(', ');

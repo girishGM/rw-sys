@@ -9,10 +9,29 @@
  *    `RuleEvaluationRowHandler.handle()` exactly as production traffic would — proving the
  *    `customer_tracker_status` upsert really happens inside the same transaction T-RAP-031 opened,
  *    not a separately wired call.
+ *
+ * **T-INT-044 retry 1 update.** The "T-RAP-048 retry 2/3 regression" test below deliberately
+ * leaves a same-tenant `STRANDED-T048-2` row genuinely `pending` across its own insert →
+ * `insertAndClaim()` call → a final re-`SELECT` re-verifying it is still `pending` — several real
+ * round trips during which a DIFFERENT, real, globally-scoped `ActivityLogClaimWorker` running in a
+ * concurrently-running worker-bundle file (`processing-worker.e2e-spec.ts`,
+ * `full-pipeline(-multi-instance).e2e-spec.ts`, `mixed-transport-load.e2e-spec.ts`) can claim it
+ * first — the identical hazard shape independent review reproduced for real in
+ * `rule-evaluation.spec.ts`'s own copy of this test during this task's own retry-1 review. Same
+ * fix as `claim-worker.spec.ts`'s two `T-INT-044 regression` tests: this test now also acquires
+ * `acquireIngestConsumerGroupReaderLease()` (the same cross-process lock every worker-bundle file
+ * already takes before starting a real global claim worker) for the whole window its own row sits
+ * exposed, closing this specific residual gap without touching production semantics or weakening
+ * the assertion itself.
  */
 import 'reflect-metadata';
 import { Sequelize } from 'sequelize-typescript';
 import { QueryTypes } from 'sequelize';
+import {
+  acquireIngestConsumerGroupReaderLease,
+  type IngestConsumerGroupReaderLease,
+} from '../../e2e/kafka-shared-consumer-group-lock';
+import { READER_LEASE_ACQUIRE_TIMEOUT_MS } from '../../e2e/full-pipeline-test-helpers';
 import { TrackerCompletionEvaluatorService } from '@/modules/processing/tracker-completion-evaluator.service';
 import { TrackerStatusRepository } from '@/modules/processing/tracker-status.repository';
 import { TrackerComponentProgressRepository } from '@/modules/processing/tracker-component-progress.repository';
@@ -342,23 +361,40 @@ describe('Tracker completion aggregation (real Postgres, rap_app role)', () => {
    * nothing to give back, so neither another suite's row nor an earlier test's stranded row can
    * ever be returned here — this statement can only ever touch the one row this call itself just
    * inserted.
+   *
+   * **T-INT-044 update:** retry 2/3's claim-by-id above still ran as a *second*, separate
+   * statement after the insert's own transaction had already committed — a real, if narrow,
+   * window during which this row was genuinely visible table-wide as `pending`, during which
+   * `05-PROCESSING-PIPELINE.md` §4's genuinely global, unscoped claim query (any real, concurrently
+   * running `ActivityLogClaimWorker` in this codebase's own test suite — a different unit spec
+   * file's own real repository call, or a full-pipeline/hybrid-bootstrap e2e file's own real
+   * worker bundle) could in principle win it first, exactly the class of hazard
+   * `claim-worker.spec.ts`'s own `insertAndPinActivityReachedDate` helper already documents this
+   * same fix for (see that helper's own header comment for the full reasoning, not repeated here).
+   * Folding the claim into the SAME transaction as the insert — one multi-statement transaction,
+   * committed once — removes the window entirely: this row goes straight from "does not exist" to
+   * "exists, already `processing`" in a single commit, so no external claim query, however
+   * unlucky its timing, ever has a chance to observe it as `pending` at all. The `AND status =
+   * 'pending'` guard is kept even though nothing outside this same, still-open transaction can
+   * see the row yet — cheap, and it keeps this statement's own shape self-documenting as "a
+   * claim", not "an unconditional status flip".
    */
   async function insertAndClaim(overrides: Partial<FanOutRowInput> = {}): Promise<ActivityLogRow> {
-    const [inserted] = await sequelize.transaction((t) =>
-      fanOutRepository.insertFanOutRows([pendingRowInput(overrides)], t),
-    );
-    if (!inserted) {
-      throw new Error(
-        'Failed to insert the row this test needs to claim (unexpected dedup conflict)',
+    const claimed = await sequelize.transaction(async (t) => {
+      const [inserted] = await fanOutRepository.insertFanOutRows([pendingRowInput(overrides)], t);
+      if (!inserted) {
+        throw new Error(
+          'Failed to insert the row this test needs to claim (unexpected dedup conflict)',
+        );
+      }
+      return sequelize.query<ActivityLogRow>(
+        `UPDATE realtime_activity_processing.activity_logs
+            SET status = 'processing', updated_at = now()
+          WHERE id = :id AND status = 'pending'
+          RETURNING *`,
+        { type: QueryTypes.SELECT, replacements: { id: inserted.id }, transaction: t },
       );
-    }
-    const claimed = await sequelize.query<ActivityLogRow>(
-      `UPDATE realtime_activity_processing.activity_logs
-          SET status = 'processing', updated_at = now()
-        WHERE id = :id AND status = 'pending'
-        RETURNING *`,
-      { type: QueryTypes.SELECT, replacements: { id: inserted.id } },
-    );
+    });
     if (claimed.length === 0) {
       throw new Error('Failed to claim the row this test just inserted');
     }
@@ -414,26 +450,44 @@ describe('Tracker completion aggregation (real Postgres, rap_app role)', () => {
   // reverted to retry 1. Fixed (claim by this call's own known id): always returns the row this
   // call itself inserted, regardless of what else is sitting `pending` in the queue, and the
   // stranded row is left untouched.
-  it("T-RAP-048 retry 2/3 regression: insertAndClaim never claims a different pending row that only shares this file's TENANT_ID", async () => {
-    await sequelize.transaction((t) =>
-      fanOutRepository.insertFanOutRows(
-        [pendingRowInput({ trackerComponentCode: 'STRANDED-T048-2' })],
-        t,
-      ),
-    );
+  //
+  // T-INT-044 retry 1: the `STRANDED-T048-2` row is deliberately left genuinely `pending` from its
+  // own insert through the final re-`SELECT` below, several real round trips during which a
+  // foreign, real, globally-scoped `ActivityLogClaimWorker` in a concurrently-running worker-bundle
+  // file could otherwise claim it first (see this file's own header). Acquires the same
+  // cross-process `acquireIngestConsumerGroupReaderLease()` every worker-bundle file already takes
+  // before starting a real global claim worker, for the whole exposure window, so no such foreign
+  // claim can happen while this test's own row sits `pending`.
+  it(
+    "T-RAP-048 retry 2/3 regression: insertAndClaim never claims a different pending row that only shares this file's TENANT_ID",
+    async () => {
+      const readerLease: IngestConsumerGroupReaderLease =
+        await acquireIngestConsumerGroupReaderLease(READER_LEASE_ACQUIRE_TIMEOUT_MS);
+      try {
+        await sequelize.transaction((t) =>
+          fanOutRepository.insertFanOutRows(
+            [pendingRowInput({ trackerComponentCode: 'STRANDED-T048-2' })],
+            t,
+          ),
+        );
 
-    const row = await insertAndClaim({ trackerComponentCode: 'COMP-T048-TARGET-2' });
+        const row = await insertAndClaim({ trackerComponentCode: 'COMP-T048-TARGET-2' });
 
-    expect(row.tracker_component_code).toBe('COMP-T048-TARGET-2');
+        expect(row.tracker_component_code).toBe('COMP-T048-TARGET-2');
 
-    const strandedRows = await sequelize.query<ActivityLogRow>(
-      `SELECT * FROM realtime_activity_processing.activity_logs
+        const strandedRows = await sequelize.query<ActivityLogRow>(
+          `SELECT * FROM realtime_activity_processing.activity_logs
         WHERE tenant_id = :tenantId AND tracker_component_code = 'STRANDED-T048-2'`,
-      { type: QueryTypes.SELECT, replacements: { tenantId: TENANT_ID } },
-    );
-    expect(strandedRows).toHaveLength(1);
-    expect(strandedRows[0].status).toBe('pending');
-  });
+          { type: QueryTypes.SELECT, replacements: { tenantId: TENANT_ID } },
+        );
+        expect(strandedRows).toHaveLength(1);
+        expect(strandedRows[0].status).toBe('pending');
+      } finally {
+        readerLease.release();
+      }
+    },
+    READER_LEASE_ACQUIRE_TIMEOUT_MS + 30_000,
+  );
 
   async function loadTrackerStatus(
     trackerCode: string,

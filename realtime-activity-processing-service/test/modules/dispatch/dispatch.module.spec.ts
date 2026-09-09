@@ -25,6 +25,7 @@ describe('DispatchModule', () => {
     'FIELD_ENCRYPTION_HMAC_KEY',
     'OUTBOX_PUBLISHER_AUTOSTART',
     'RETRY_WORKER_AUTOSTART',
+    'REWARD_REDEMPTION_REST_TOKEN',
   ] as const;
   let savedEnv: Record<string, string | undefined>;
 
@@ -37,6 +38,14 @@ describe('DispatchModule', () => {
     // value deterministic regardless.
     process.env.OUTBOX_PUBLISHER_AUTOSTART = 'false';
     process.env.RETRY_WORKER_AUTOSTART = 'false';
+    // T-INT-006: `DispatchModule`'s new `RewardRestFallbackClient` factory provider calls
+    // `loadRewardRestFallbackClientOptions()` eagerly at DI-resolution time (same "constructing is
+    // safe" moment `RewardGrpcFallbackClient`'s own factory already resolves at, immediately above
+    // it in `dispatch.module.ts`) — unlike the gRPC client's options loader, this one throws
+    // `MissingRewardRedemptionRestTokenError` when the token env var is unset, so this
+    // DI-wiring-only smoke test needs a throwaway value here for the exact same reason it already
+    // sets `FIELD_ENCRYPTION_AES_KEY`/`FIELD_ENCRYPTION_HMAC_KEY` above.
+    process.env.REWARD_REDEMPTION_REST_TOKEN = 'dispatch-module-spec-throwaway-token';
   });
 
   afterEach(() => {

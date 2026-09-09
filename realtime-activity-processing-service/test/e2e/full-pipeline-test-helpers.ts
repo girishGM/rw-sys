@@ -598,6 +598,16 @@ export async function startInstance(options: StartInstanceOptions): Promise<Inst
     delete process.env.PORTAL_GRPC_TLS_KEY_PATH;
     process.env.FIELD_ENCRYPTION_AES_KEY = options.aesKeyB64;
     process.env.FIELD_ENCRYPTION_HMAC_KEY = options.hmacKeyB64;
+    // T-INT-006: `WorkerRootModule` below imports `DispatchModule`, whose new
+    // `RewardRestFallbackClient` factory provider (`dispatch.module.ts`) calls
+    // `loadRewardRestFallbackClientOptions()` eagerly at DI-resolution time and throws
+    // `MissingRewardRedemptionRestTokenError` when this env var is unset — same "constructing is
+    // safe" moment `RewardGrpcFallbackClient`'s own factory already resolves at, but this one has
+    // no safe default (an auth token, unlike a host/port). A throwaway value here only satisfies
+    // that constructor; this harness's own reward-dispatch assertions all resolve `KAFKA`/`GRPC`
+    // channels (`campaign_config_snapshot`'s seeded rows), so no test in this file ever actually
+    // calls `RewardRestFallbackClient.submitRewardEntry()` with it.
+    process.env.REWARD_REDEMPTION_REST_TOKEN = 'full-pipeline-e2e-throwaway-token';
 
     // --- gRPC ingress (real mTLS, own ephemeral CA/port) ---
     const ca = TestCertAuthority.build();

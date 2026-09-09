@@ -1,6 +1,19 @@
 /**
- * T-RAP-034. Wires the three-tier reward-dispatch chain (`05-PROCESSING-PIPELINE.md` §7):
- * `OutboxPublisherService` (tiers 1-2) and `RewardDispatchRetryWorker` (tier 3).
+ * T-RAP-034, config-driven transport selection added by T-INT-006. Wires the three-tier
+ * reward-dispatch chain (`05-PROCESSING-PIPELINE.md` §7): `OutboxPublisherService` (tiers 1-2) and
+ * `RewardDispatchRetryWorker` (tier 3, untouched by T-INT-006 — its own hardcoded Kafka-then-gRPC
+ * order is this task's own Scope "Out").
+ *
+ * **T-INT-006** adds two new providers `OutboxPublisherService` now depends on:
+ * `RewardRestFallbackClient` (factory provider, mirroring `RewardGrpcFallbackClient`'s own
+ * options-from-env factory immediately below it) and `RewardDispatchChannelResolverService` (a
+ * plain class provider — every one of its own constructor parameters is `@Optional()`, so Nest's
+ * automatic constructor injection resolves it with zero explicit factory wiring, same convention
+ * this service's sibling resolver, `PortalConfigChannelResolverService`, uses wherever it's
+ * consumed). Neither is in T-INT-006's own "Files owned" list, but wiring a new constructor
+ * dependency into the one `@Module` that constructs `OutboxPublisherService` is an unavoidable,
+ * same-task consequence of that constructor change — disclosed in this task's own completion
+ * report.
  *
  * Imports `ProcessingModule` purely to reuse its exported `PROCESSING_SEQUELIZE` connection pool
  * (`reward-entry-outbox.repository.ts`'s own header: "avoid opening a second Postgres pool for a
@@ -38,6 +51,11 @@ import {
   RewardGrpcFallbackClient,
   loadRewardGrpcFallbackClientOptions,
 } from './reward-grpc-fallback.client';
+import {
+  RewardRestFallbackClient,
+  loadRewardRestFallbackClientOptions,
+} from './reward-rest-fallback.client';
+import { RewardDispatchChannelResolverService } from './reward-dispatch-channel-resolver.service';
 import { OutboxPublisherService } from './outbox-publisher.service';
 import { RewardDispatchRetryWorker } from './reward-dispatch-retry.worker';
 import {
@@ -80,6 +98,18 @@ function readPositiveIntEnv(configService: ConfigService, key: string, fallback:
       useFactory: (): RewardGrpcFallbackClient =>
         new RewardGrpcFallbackClient(loadRewardGrpcFallbackClientOptions()),
     },
+    {
+      // T-INT-006. Same reasoning as the `RewardGrpcFallbackClient` factory immediately above —
+      // `RewardRestFallbackClient`'s own constructor parameter is a plain options interface too.
+      provide: RewardRestFallbackClient,
+      useFactory: (): RewardRestFallbackClient =>
+        new RewardRestFallbackClient(loadRewardRestFallbackClientOptions()),
+    },
+    // T-INT-006. Plain class provider — every constructor parameter on
+    // `RewardDispatchChannelResolverService` is `@Optional()`, so Nest's automatic
+    // constructor-injection resolves it correctly (each optional param to `undefined`, then that
+    // class's own JS-level defaults construct its real `pg.Pool`/clock/TTL) with no factory needed.
+    RewardDispatchChannelResolverService,
     {
       provide: OUTBOX_POLL_INTERVAL_MS,
       inject: [ConfigService],

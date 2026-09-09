@@ -28,6 +28,31 @@
  * incremented by the *caller* (`rule-evaluation-row-handler.service.ts`'s `handle()`), reading
  * `cap_type` off this file's own `deriveCapKey` — not duplicated here, so there is exactly one
  * place that decides what `cap_type` means for a given `CampaignCap`.
+ *
+ * **T-INT-045 update (`reward-service-integration-plan`).** `enforceOneAssignment` used to call
+ * `resolveFixedRewardValue` unconditionally, once per assignment, *before* even matching a
+ * `CampaignCap` — which meant it threw for **every** currently-active tenant-1 campaign in this
+ * environment (no published reward version has a `fixedAmount`, and `PROMO_CODE`/`POINTS` reward
+ * kinds have no fixed amount by design — their real value is resolved downstream, by
+ * `promo-code-service`/`reward-redemption-service`, not by this service). Fixed: a reward's value
+ * is now resolved (`resolveRewardValueIfNeeded`) only when at least one matched cap actually has a
+ * `maxTotalAmount` dimension configured — a `maxOccurrences`-only cap, or no matched cap at all,
+ * never needs it (this task's own TC-1/TC-2). When a matched cap *does* need it and resolution
+ * still fails (an unresolvable reward kind, e.g. `PROMO_CODE`), the amount dimension is treated as
+ * unbounded for that assignment — granted, `checkCeiling` skips the amount check (`rewardValue ===
+ * null`), the count dimension (if configured) still applies normally, and the *recorded* value
+ * (both the `budget_consumption`/`customer_reward_limit_consumption` delta and
+ * `GrantedAssignment.rewardValue`, which `reward_entry.reward_value` — `NOT NULL decimal(18,4)` —
+ * reuses verbatim) is `'0'`, a documented placeholder for "not yet known; the real value is
+ * resolved downstream" rather than a silently invented number (this task's own TC-3). This was a
+ * genuinely ambiguous design gap the task file itself asked the implementing session to resolve
+ * (`AGENT-PROTOCOL.md` §7's own "security or correctness control appears to block a legitimate
+ * requirement" case) — the alternative (hard-fail whenever an amount-based cap applies to a
+ * PROMO_CODE/POINTS reward) would permanently block reward-entry creation for exactly this kind of
+ * reward even when the campaign owner clearly intended it to be grantable; unbounded-for-now is
+ * the option that doesn't invent a number and doesn't block a legitimate grant. Flagged in this
+ * task's own completion report for architect confirmation, same as `resolveFixedRewardValue`'s own
+ * still-open flag below.
  */
 import { createHash } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
@@ -70,7 +95,9 @@ export interface CapEnforcementContext {
 export interface GrantedAssignment {
   reward: BoundRewardProto;
   /** Decimal-as-string, resolved by `resolveFixedRewardValue` — T-RAP-034's own `reward_entry`
-   * insert reuses this value rather than re-resolving it. */
+   * insert reuses this value rather than re-resolving it. **T-INT-045:** `'0'` when no matched cap
+   * actually needed an amount, or when one did but the reward's value could not be resolved (see
+   * this file's own header) — a documented placeholder, not the reward's real earned value. */
   rewardValue: string;
 }
 
@@ -260,18 +287,53 @@ export function resolveFixedRewardValue(reward: BoundRewardProto): string {
   return value;
 }
 
+/** T-INT-045: `true` when at least one matched cap has a `maxTotalAmount` dimension configured —
+ * the only case that ever needs a reward's resolved amount at all (a `maxOccurrences`-only cap, or
+ * no matched cap, never does; see this file's own header and `resolveRewardValueIfNeeded` below). */
+function anyCapNeedsAmount(caps: readonly CampaignCapProto[]): boolean {
+  return caps.some((cap) => Boolean(cap.maxTotalAmount) && cap.maxTotalAmount !== '0');
+}
+
+/** T-INT-045: resolves a reward's fixed amount only when `matchedCaps` actually contains a
+ * `maxTotalAmount`-configured cap (`anyCapNeedsAmount`) — `resolveFixedRewardValue` is never even
+ * called otherwise (this task's own TC-1/TC-2: "no value resolved unnecessarily"). When it *is*
+ * needed but the reward's value still can't be resolved (a `PROMO_CODE`/`POINTS` reward, or any
+ * other non-fixed-amount shape), returns `null` rather than throwing — the amount dimension is
+ * then treated as unbounded for this assignment (`checkCeiling` below), deferring the real value
+ * check to `reward-redemption-service`'s own layer once the value is actually known, per this
+ * task's own documented decision (see the file header for the full reasoning — never silently
+ * invents a number). */
+export function resolveRewardValueIfNeeded(
+  reward: BoundRewardProto,
+  matchedCaps: readonly CampaignCapProto[],
+): string | null {
+  if (!anyCapNeedsAmount(matchedCaps)) {
+    return null;
+  }
+  try {
+    return resolveFixedRewardValue(reward);
+  } catch {
+    return null;
+  }
+}
+
 /** Proto3 zero-values (`''`/`0`) mean "this ceiling is not configured"
  * (`11-BUDGETS-AND-LIMITS.md` §2: "at least one [ceiling] must be set" — never literally "spend
  * nothing"), so an unset dimension is skipped rather than treated as an always-breached zero
  * ceiling. Returns the breach detail for the *first* dimension that fails, or `null` if both
- * (configured) dimensions have headroom. */
+ * (configured) dimensions have headroom.
+ *
+ * **T-INT-045:** `rewardValue === null` means "this assignment's value could not be resolved" —
+ * the amount dimension is skipped entirely in that case (never breached, never checked), same as
+ * when the cap itself has no `maxTotalAmount` configured; the count dimension is unaffected and
+ * still enforced normally. */
 function checkCeiling(
   cap: CampaignCapProto,
   consumedAmount: string,
   consumedCount: number,
-  rewardValue: string,
+  rewardValue: string | null,
 ): BreachDetail | null {
-  if (cap.maxTotalAmount && cap.maxTotalAmount !== '0') {
+  if (rewardValue !== null && cap.maxTotalAmount && cap.maxTotalAmount !== '0') {
     const nextAmount = addDecimalStrings(consumedAmount, rewardValue);
     if (compareDecimalStrings(nextAmount, cap.maxTotalAmount) > 0) {
       return {
@@ -343,8 +405,15 @@ export class CapEnforcementService {
   ): Promise<
     { granted: true; rewardValue: string } | { granted: false; denial: DeniedAssignment }
   > {
-    const rewardValue = resolveFixedRewardValue(reward);
     const matchedCaps = matchCapsForAssignment(reward, context.trackerId, context.caps);
+    // T-INT-045: resolved only if/when a matched cap actually needs an amount — see this file's
+    // own header and `resolveRewardValueIfNeeded`'s doc comment. `null` here means "unresolvable
+    // but granted anyway" (or simply "never needed"), not "zero earned" — `checkCeiling` treats it
+    // as an unbounded amount dimension; only the *recorded* delta/`reward_entry.reward_value`
+    // (below) substitutes the `'0'` placeholder, and only at the point something must actually be
+    // written.
+    const rewardValue = resolveRewardValueIfNeeded(reward, matchedCaps);
+    const recordedRewardValue = rewardValue ?? '0';
 
     // Reserve-then-commit (`01-DATABASE.md` §6): every matched cap on this one assignment must
     // pass before *any* of them is incremented — a partial reservation followed by a later breach
@@ -372,7 +441,7 @@ export class CapEnforcementService {
         if (breach !== null) {
           return { granted: false, denial: await this.handleBreach(context, reward, cap, breach) };
         }
-        reservations.push({ table: 'budget', id: row.id, deltaAmount: rewardValue });
+        reservations.push({ table: 'budget', id: row.id, deltaAmount: recordedRewardValue });
       } else if (cap.capClass === 'limit') {
         const row = await this.customerLimitRepository.lockOrCreate(transaction, {
           tenantId: context.tenantId,
@@ -387,7 +456,7 @@ export class CapEnforcementService {
         if (breach !== null) {
           return { granted: false, denial: await this.handleBreach(context, reward, cap, breach) };
         }
-        reservations.push({ table: 'limit', id: row.id, deltaAmount: rewardValue });
+        reservations.push({ table: 'limit', id: row.id, deltaAmount: recordedRewardValue });
       } else {
         throw new Error(
           `Unsupported CampaignCap.cap_class "${cap.capClass}" (must be "budget" or "limit").`,
@@ -413,7 +482,7 @@ export class CapEnforcementService {
       }
     }
 
-    return { granted: true, rewardValue };
+    return { granted: true, rewardValue: recordedRewardValue };
   }
 
   /**
