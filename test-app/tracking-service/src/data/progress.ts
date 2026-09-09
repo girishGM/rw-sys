@@ -78,11 +78,30 @@ export class ProgressStore {
   /** Appends campaigns this customer has no entry for yet, leaving every existing one (and its
    * accumulated completion state) untouched — `data/campaign-sync.ts`'s own enrollment step, so a
    * campaign the portal activates after this customer was first seen still gets tracked, without
-   * resetting anything already in progress. */
+   * resetting anything already in progress.
+   *
+   * Re-checks `campaignId` against the *current* stored state here, at write time — not just
+   * trusting the caller's own `existingIds` check. `ensureEnrolled` (`campaign-sync.ts`) computes
+   * `campaigns` before an `await` gap (`getCampaignJourney` per missing campaign); two concurrent
+   * calls for the same customer (a real, observed case — a live dashboard poll landing close to
+   * another request) can both see a campaign as "missing" and both reach this method with it still
+   * in their own `campaigns` array. Filtering again here, against a fresh read of `existing`
+   * immediately before the actual write, is the one place that race can't reopen — every other
+   * layer above this has already lost the information needed to close it. */
   addCampaigns(customerId: string, campaigns: readonly CampaignProgress[]): void {
     if (campaigns.length === 0) return;
     const existing = this.byCustomer.get(customerId) ?? [];
-    this.byCustomer.set(customerId, [...existing, ...campaigns]);
+    const existingIds = new Set(existing.map((entry) => entry.campaignId));
+    const seenInThisBatch = new Set<number>();
+    const toAdd = campaigns.filter((campaign) => {
+      if (existingIds.has(campaign.campaignId) || seenInThisBatch.has(campaign.campaignId)) {
+        return false;
+      }
+      seenInThisBatch.add(campaign.campaignId);
+      return true;
+    });
+    if (toAdd.length === 0) return;
+    this.byCustomer.set(customerId, [...existing, ...toAdd]);
   }
 
   /**

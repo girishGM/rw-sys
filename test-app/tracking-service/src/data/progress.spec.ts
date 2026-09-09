@@ -162,5 +162,33 @@ describe('ProgressStore', () => {
       store.addCampaigns('priya-shah', []);
       expect(store.getForCustomer('priya-shah')).toEqual([campaign]);
     });
+
+    it('regression: two racing calls that both computed the same campaign as missing do not both land — a real bug found live on Render (WELCOME_STREAK_LIVE showing twice on the dashboard, priya-shah)', () => {
+      const store = new ProgressStore();
+      // Simulates campaign-sync.ts's ensureEnrolled: two concurrent callers both read
+      // "not yet enrolled" before either had written (the async gap around
+      // getCampaignJourney), so both arrive here with the same campaign in their own list.
+      store.addCampaigns('priya-shah', [campaign]);
+      store.addCampaigns('priya-shah', [campaign]);
+
+      const current = store.getForCustomer('priya-shah');
+      expect(current).toHaveLength(1);
+      expect(current.map((c) => c.campaignId)).toEqual([42]);
+    });
+
+    it('regression: a duplicate within the SAME call is also collapsed, not just across two calls', () => {
+      const store = new ProgressStore();
+      store.addCampaigns('priya-shah', [campaign, campaign]);
+      expect(store.getForCustomer('priya-shah')).toHaveLength(1);
+    });
+
+    it('regression: a racing call still adds a genuinely different campaign alongside an already-stored one', () => {
+      const store = new ProgressStore();
+      store.setForCustomer('priya-shah', [campaign]);
+      store.addCampaigns('priya-shah', [campaign, other]);
+
+      const current = store.getForCustomer('priya-shah');
+      expect(current.map((c) => c.campaignId).sort()).toEqual([42, 43]);
+    });
   });
 });
