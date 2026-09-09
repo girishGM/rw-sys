@@ -45,6 +45,25 @@ function optionalString(value: unknown): string | null {
   return typeof value === 'string' && value.length > 0 ? value : null;
 }
 
+/**
+ * T-INT-050 — `rewardValueUnit` is empty (`''`) by design for a reward kind with no fixed
+ * currency/point unit (`PROMO_CODE`/`POINTS`), so unlike every other `requireNonEmptyString` field
+ * on this DTO it must NOT reject an empty/absent value — only a genuinely wrong *type* (anything
+ * other than a string, `null`, or `undefined`) is a structural failure here. Absent/`null`/`''` all
+ * normalize to `''`; never invents a placeholder unit string. Same fix, same reasoning, as
+ * `reward-redemption-service`'s own `rewardValueUnit` field (T-INT-046), one hop upstream.
+ */
+function optionalRewardValueUnit(body: Record<string, unknown>): string {
+  const value = body.rewardValueUnit;
+  if (value === undefined || value === null) {
+    return '';
+  }
+  if (typeof value !== 'string') {
+    badRequest('rewardValueUnit must be a string when provided');
+  }
+  return value as string;
+}
+
 function optionalNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
@@ -123,7 +142,7 @@ export function parseRewardTrackingIngestRequest(body: unknown): ApplyRewardTrac
   const rewardCode = requireNonEmptyString(b, 'rewardCode');
   const rewardCategory = requireNonEmptyString(b, 'rewardCategory');
   const rewardValue = requireDecimalString(b, 'rewardValue');
-  const rewardValueUnit = requireNonEmptyString(b, 'rewardValueUnit');
+  const rewardValueUnit = optionalRewardValueUnit(b);
   const redeemedAt = requireDate(b, 'redeemedAt');
   const expiresAt = optionalDate(b, 'expiresAt');
   const rewardKind = optionalRewardKind(b);

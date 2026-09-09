@@ -131,6 +131,15 @@ export class InvalidRewardTrackingEventInputError extends Error {
   }
 }
 
+// T-INT-050 — `rewardValueUnit` deliberately removed from this list: it is empty (`''`) by design
+// for a reward kind with no fixed currency/point unit (`PROMO_CODE`/`POINTS`), and each of the
+// three transport adapters (T-RTS-011/012/013, all fixed by T-INT-050 too) now lets an
+// empty/absent value flow through rather than rejecting it before it ever reaches this shared
+// guard — so this guard must not re-reject it here. Not in this task's own "Files owned" list
+// (that names only the three transport-adapter files); extended per `AGENT-PROTOCOL.md`'s
+// "make the best reasonable engineering call" instruction and disclosed here plus in the
+// completion report (R3), same deviation `reward-redemption-service`'s own T-INT-046 made in its
+// sibling `assertWellFormed()`-equivalent guard one hop upstream.
 const REQUIRED_STRING_FIELDS: ReadonlyArray<keyof ApplyRewardTrackingEventInput> = [
   'rewardEntryId',
   'correlationId',
@@ -141,7 +150,6 @@ const REQUIRED_STRING_FIELDS: ReadonlyArray<keyof ApplyRewardTrackingEventInput>
   'rewardCode',
   'rewardCategory',
   'rewardValue',
-  'rewardValueUnit',
 ];
 
 const VALID_RECEIVED_CHANNELS: ReadonlyArray<InboundEventChannel> = ['KAFKA', 'GRPC', 'REST'];

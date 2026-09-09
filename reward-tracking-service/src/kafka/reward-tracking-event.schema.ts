@@ -67,6 +67,26 @@ function isFailure(value: unknown): value is { ok: false; reason: string } {
   return typeof value === 'object' && value !== null && (value as { ok?: unknown }).ok === false;
 }
 
+/**
+ * T-INT-050 — `rewardValueUnit` is empty (`''`)/absent/`null` by design for a reward kind with no
+ * fixed currency/point unit (`PROMO_CODE`/`POINTS`); unlike `requireNonEmptyString`, this never
+ * rejects an empty/absent value — only a genuinely wrong *type* is a validation failure. Same fix,
+ * same reasoning, as `reward-redemption-service`'s own `reward-entry-created.schema.ts`
+ * (T-INT-046), one hop upstream.
+ */
+function optionalRewardValueUnit(
+  body: Record<string, unknown>,
+): string | { ok: false; reason: string } {
+  const value = body.rewardValueUnit;
+  if (value === undefined || value === null || value === '') {
+    return '';
+  }
+  if (typeof value !== 'string') {
+    return { ok: false, reason: 'rewardValueUnit must be a string when provided' };
+  }
+  return value;
+}
+
 function parseRequiredDate(
   body: Record<string, unknown>,
   field: string,
@@ -149,7 +169,7 @@ export function parseRewardTrackingEventMessage(payload: unknown): RewardTrackin
     return { ok: false, reason: `rewardValue "${rewardValue}" is not a valid decimal number` };
   }
 
-  const rewardValueUnit = requireNonEmptyString(body, 'rewardValueUnit');
+  const rewardValueUnit = optionalRewardValueUnit(body);
   if (isFailure(rewardValueUnit)) return rewardValueUnit;
 
   const redeemedAt = parseRequiredDate(body, 'redeemedAt');

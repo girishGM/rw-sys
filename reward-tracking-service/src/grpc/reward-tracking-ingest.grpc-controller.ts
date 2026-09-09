@@ -223,7 +223,11 @@ export class RewardTrackingIngestGrpcController {
     if (Number.isNaN(Number.parseFloat(rewardValue)) || !Number.isFinite(Number(rewardValue))) {
       invalidArgument(`reward_value "${rewardValue}" is not a valid decimal number`);
     }
-    const rewardValueUnit = requireNonEmpty(request.rewardValueUnit, 'reward_value_unit');
+    // T-INT-050 — `reward_value_unit` is empty (`''`)/absent by design for a reward kind with no
+    // fixed currency/point unit (`PROMO_CODE`/`POINTS`); unlike every other `requireNonEmpty` field
+    // above, absent normalizes to `''` rather than rejecting the request. Same fix, same reasoning,
+    // as `reward-redemption-service`'s own `reward_value_unit` field (T-INT-046), one hop upstream.
+    const rewardValueUnit = request.rewardValueUnit ?? '';
 
     const redeemedAt = parseRequiredDate(request.redeemedAt, 'redeemed_at');
     const expiresAt = parseOptionalDate(request.expiresAt, 'expires_at');

@@ -71,7 +71,6 @@ describe('T-RTS-012 — parseRewardTrackingEventMessage', () => {
     'rewardCode',
     'rewardCategory',
     'rewardValue',
-    'rewardValueUnit',
   ])('rejects a body missing required field %s', (field) => {
     const body = validBody();
     delete body[field];
@@ -81,6 +80,32 @@ describe('T-RTS-012 — parseRewardTrackingEventMessage', () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.reason).toContain(field);
+    }
+  });
+
+  // T-INT-050 — TC-3: `rewardValueUnit` empty/absent/null must not be rejected (a `PROMO_CODE`/
+  // `POINTS`-kind reward has no fixed unit by design). Regression for the T-INT-040 evidence.
+  it('TC-3 (T-INT-050): accepts rewardValueUnit as empty string/absent/null, normalized to an empty string', () => {
+    for (const overrides of [
+      { rewardValueUnit: '' },
+      { rewardValueUnit: undefined },
+      { rewardValueUnit: null },
+    ]) {
+      const body = validBody(overrides);
+      if (overrides.rewardValueUnit === undefined) delete body.rewardValueUnit;
+      const result = parseRewardTrackingEventMessage(body);
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.input.rewardValueUnit).toBe('');
+      }
+    }
+  });
+
+  it('TC-4 (T-INT-050 regression): still rejects a non-string rewardValueUnit', () => {
+    const result = parseRewardTrackingEventMessage(validBody({ rewardValueUnit: 42 }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toContain('rewardValueUnit');
     }
   });
 

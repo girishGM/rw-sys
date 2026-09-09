@@ -224,6 +224,43 @@ describe('T-RTS-013 — POST /internal/reward-tracking-events (controller, faked
     expect(applyRewardTrackingEvent).not.toHaveBeenCalled();
   });
 
+  // T-INT-050 — TC-1: `rewardValueUnit` empty/absent/null must not be rejected (a `PROMO_CODE`/
+  // `POINTS`-kind reward has no fixed unit by design). Regression for the T-INT-040 evidence: a
+  // real `400 rewardValueUnit is required` from a payload shaped exactly like this.
+  it('TC-1 (T-INT-050): rewardValueUnit as an empty string is accepted, not rejected as missing', async () => {
+    const response = await request(app.getHttpServer())
+      .post('/internal/reward-tracking-events')
+      .set('Authorization', `Bearer ${TOKEN}`)
+      .send(validBody({ rewardValueUnit: '' }));
+
+    expect(response.status).toBe(200);
+    const [[input]] = applyRewardTrackingEvent.mock.calls as [[ApplyRewardTrackingEventInput]];
+    expect(input.rewardValueUnit).toBe('');
+  });
+
+  it('TC-1 (T-INT-050): rewardValueUnit omitted entirely is accepted, normalized to an empty string', async () => {
+    const { rewardValueUnit: _omit, ...withoutRewardValueUnit } = validBody();
+
+    const response = await request(app.getHttpServer())
+      .post('/internal/reward-tracking-events')
+      .set('Authorization', `Bearer ${TOKEN}`)
+      .send(withoutRewardValueUnit);
+
+    expect(response.status).toBe(200);
+    const [[input]] = applyRewardTrackingEvent.mock.calls as [[ApplyRewardTrackingEventInput]];
+    expect(input.rewardValueUnit).toBe('');
+  });
+
+  it('TC-4 (T-INT-050 regression): a non-string rewardValueUnit is still rejected with 400', async () => {
+    const response = await request(app.getHttpServer())
+      .post('/internal/reward-tracking-events')
+      .set('Authorization', `Bearer ${TOKEN}`)
+      .send(validBody({ rewardValueUnit: 42 }));
+
+    expect(response.status).toBe(400);
+    expect(applyRewardTrackingEvent).not.toHaveBeenCalled();
+  });
+
   it('accepts an optional field explicitly null without rejecting the request', async () => {
     const response = await request(app.getHttpServer())
       .post('/internal/reward-tracking-events')

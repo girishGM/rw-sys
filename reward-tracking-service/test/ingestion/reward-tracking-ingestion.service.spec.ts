@@ -435,6 +435,20 @@ describe('T-RTS-010 — RewardTrackingIngestionService.applyRewardTrackingEvent'
     expect(typeof logRow.payload.customerIdEncrypted).toBe('string');
   });
 
+  // T-INT-050 — deviation: `assertWellFormed()`'s own `REQUIRED_STRING_FIELDS` guard (this file,
+  // not in T-INT-050's own "Files owned" list — see completion report) previously re-rejected an
+  // empty `rewardValueUnit` even after all three transport adapters were fixed to tolerate it,
+  // producing an uncaught `InvalidRewardTrackingEventInputError`/HTTP 500 on the identical shape of
+  // reward T-INT-050 exists to unblock. Regression: this must now succeed end to end.
+  it("T-INT-050: applies successfully with an empty rewardValueUnit, persisting reward_value_unit = ''", async () => {
+    const input = baseInput({ rewardValueUnit: '' });
+
+    const result = await service.applyRewardTrackingEvent(input);
+
+    expect(result.status).toBe('applied');
+    expect(result.rewardFact.reward_value_unit).toBe('');
+  });
+
   it('rejects a malformed input (missing a required field) without writing anything', async () => {
     const input = baseInput({ campaignCode: '' });
 

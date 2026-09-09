@@ -211,6 +211,23 @@ describe('T-RTS-011 — gRPC server (real socket, real Postgres) (e2e)', () => {
     client.close();
   });
 
+  // T-INT-050 — TC-2: `reward_value_unit` empty/absent must not be rejected (a `PROMO_CODE`/
+  // `POINTS`-kind reward has no fixed unit by design). Regression for the T-INT-040 evidence.
+  it("TC-2 (T-INT-050): reward_value_unit as an empty string is accepted, creates a reward_fact row with reward_value_unit = ''", async () => {
+    const client = createTestClient(address);
+    const request = baseRequest({ rewardValueUnit: '' });
+
+    const response = await callIngest(client, request);
+
+    expect(response.status).toBe('applied');
+    const [row] = await db.query<{ reward_value_unit: string }>(
+      'SELECT reward_value_unit FROM reward_tracking.reward_fact WHERE reward_entry_id = :id',
+      { type: QueryTypes.SELECT, replacements: { id: request.rewardEntryId } },
+    );
+    expect(row.reward_value_unit).toBe('');
+    client.close();
+  });
+
   // TC-4
   it('TC-4: customerId never appears in any log line during a call', async () => {
     const captured: string[] = [];
