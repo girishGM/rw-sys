@@ -96,6 +96,14 @@ RUN groupadd --gid 1001 nodeapp \
 COPY --from=prod-deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/package.json ./package.json
+# T-INT-041 fix: `.proto` files are static assets `nest build` never copies into `dist/` on its
+# own (no `nest-cli.json` `assets` entry existed for this project) — every gRPC client/server this
+# service constructs (`campaign-config.client.ts`, `reward-tracking-grpc.client.ts`, the inbound
+# `reward-ingest.controller.ts`) loads its `.proto` file via `protobufjs`'s own synchronous
+# `fs.readFileSync` at module construction, which throws and crash-loops the whole process before
+# `app.listen()` is ever reached if the file isn't here. Confirmed missing and the exact class of
+# bug T-INT-005 already found and fixed for reward-tracking-service's own Dockerfile/nest-cli.json.
+COPY proto ./proto
 
 USER nodeapp
 
