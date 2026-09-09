@@ -61,6 +61,57 @@
 # task only prepares and locally validates the file's shape (there is no `render` CLI dry-run in
 # this repo's toolchain today; a careful read against the two sibling files' own proven shape is
 # the verification this task actually performs).
+#
+# T-INT-047: a SECOND service below, `type: worker`, runs the already-shipped standalone
+# `claim-worker.main.ts` composition root (T-RR-058) unconditionally — this is the real deployment
+# shape for the claim-worker/processing/dispatch pipeline (`ClaimWorkerModule` ->
+# `RedemptionProcessingOrchestrator` -> `RedemptionStateMachineModule` ->
+# `CompletionSweepService`/`OutboxPublisherService`), not the `web` service's own hybrid-bootstrap
+# `CLAIM_WORKER_ENABLED` gate (`src/main.ts`, local/dev convenience only, defaults OFF there). A
+# poll-loop background worker is a different operational profile from an HTTP request/response
+# process (no inbound listener, no `/health` of its own, restarts don't drop in-flight HTTP
+# connections because there are none) — `claim-worker.main.ts`'s own header already recommends this
+# exact shape ("a dedicated Render worker service"), and Render's own `worker` service type exists
+# specifically for this: no `healthCheckPath`, no exposed port, `plan: free` still applies. Reuses
+# the SAME `runtime: docker`/`dockerfilePath`/`dockerContext` as the `web` service above — the
+# `runtime` build stage (Dockerfile) already compiles `dist/modules/processing/claim-worker.main.js`
+# alongside `dist/main.js`, nothing new to build. Needs the same DB/encryption/connector-token env
+# surface as the `web` service (the claim worker constructs virtually the same provider graph:
+# `TenantSchemaCacheModule`, the two real connectors, `DispatchModule`/`NotificationModule` via
+# `RedemptionStateMachineModule`) plus `config.schema.ts`'s own unconditional `GRPC_SERVER_TLS_*`
+# validation (this process's own `ConfigModule` still loads the full schema even though it never
+# starts a gRPC listener) — so this block intentionally duplicates the `web` service's envVars list
+# rather than inventing a narrower one, to avoid a boot-time crash on some var this analysis missed.
+# `CLAIM_WORKER_ENABLED` is deliberately NOT set here — unset defaults to enabled for the standalone
+# process (`claim-worker.module.ts`'s own convention, `.env.example`'s own note), matching "a worker
+# process's whole job is to run this" (task file TC-2).
+#
+# T-INT-053. `PROMO_CODE_KAFKA_REPLY_CONSUMER_ENABLED` (src/main.ts's own hybrid-bootstrap gate,
+# `.env.example`'s own note has the full mechanism) is deliberately NOT added as an envVar to either
+# service below — that gate is local/dev convenience only for a hybrid single-process run, and does
+# NOT need to be (and, per that gate's own hard-`CLAIM_WORKER_ENABLED`-dependency rule, should NOT
+# be) enabled on the `web` service here. On direct investigation, this task found the `web` service
+# never sets `CLAIM_WORKER_ENABLED` and so never constructs the DI graph
+# `PromoCodeServiceConnector`/`requestAndAwaitReply()` lives in at all — the ONLY process on Render
+# that ever resolves that graph is the dedicated `worker` service below (`claim-worker.main.ts`,
+# T-INT-047).
+#
+# **Retry 1 (widened scope, per independent review):** the first attempt at this task fixed only
+# `src/main.ts`'s own gate and left this exact gap open — flagged here at the time, not silently
+# redesigned, but the review correctly found that left the real defect (every real Kafka-primary
+# `rr-to-promo-code` redemption on Render exhausting its retry budget) unfixed in the one topology
+# that matters. This task's own "Files owned" list is now widened to include
+# `claim-worker.main.ts` itself (the `worker` service's own composition root): that file's own
+# `bootstrap()` now also resolves `PromoCodeServiceKafkaClient` from the SAME
+# `INestApplicationContext` it already constructs for the claim worker (never a second, independent
+# context — same in-memory pending-reply-registry reasoning `src/main.ts`'s own header documents in
+# full) and calls the real `.start()` on it, non-fatally (a failure is logged, never crashes the
+# worker process — see that file's own header). No new envVar is needed here for this half of the
+# fix: unlike the opt-in `web`-service gate, the `worker` service's entire purpose is already
+# running this exact pipeline, so there is no unrelated responsibility a default-on reply consumer
+# here could conflict with. This closes the gap the earlier attempt's own "Deviations" section
+# named: the fix now reaches Render's real, deployed `worker`-service topology, not only a local
+# hybrid-bootstrapped process.
 
 services:
   - type: web
@@ -158,3 +209,98 @@ services:
         sync: false
       - key: FIELD_ENCRYPTION_HMAC_KEY
         sync: false
+
+  # ---------------------------------------------------------------------------------------------
+  # T-INT-047. The real, always-on deployment shape for the claim-worker/processing/dispatch
+  # pipeline — see this file's own header comment above for the full reasoning. `dockerCommand`
+  # overrides the `runtime` stage's own default `CMD ["node", "dist/main.js"]` (Dockerfile) with the
+  # claim-worker composition root's own compiled entry point instead; nothing else about the image
+  # changes. No `healthCheckPath` — Render's own `worker` service type has no HTTP listener to probe
+  # (this pipeline's liveness is instead whatever an operator's own log-based/DB-based monitoring
+  # already watches for the claimed-row throughput this task's own evidence describes).
+  # ---------------------------------------------------------------------------------------------
+  - type: worker
+    name: reward-redemption-service-claim-worker
+    runtime: docker
+    plan: free
+    dockerfilePath: Dockerfile
+    dockerContext: .
+    dockerCommand: node dist/modules/processing/claim-worker.main.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+
+      # --- Same GRPC_SERVER_TLS_* placeholders as the `web` service above — this process's own
+      # ConfigModule still loads the full config.schema.ts unconditionally (see this file's own
+      # header comment), even though this process never starts a gRPC listener.
+      - key: GRPC_SERVER_TLS_CA_PATH
+        sync: false
+      - key: GRPC_SERVER_TLS_CERT_PATH
+        sync: false
+      - key: GRPC_SERVER_TLS_KEY_PATH
+        sync: false
+      - key: GRPC_SERVER_ALLOWED_IDENTITIES
+        sync: false
+
+      # --- Database: the SAME `reward_redemption` schema / `rr_app` role the `web` service above
+      # connects as — copy the same three values from that instance's own dashboard.
+      - key: DB_HOST
+        sync: false
+      - key: DB_PORT
+        sync: false
+      - key: DB_NAME
+        sync: false
+      - key: DB_SSL
+        value: "true"
+      - key: DB_APP_USERNAME
+        value: rr_app
+      - key: DB_APP_PASSWORD
+        sync: false
+      - key: DB_MIGRATION_USERNAME
+        sync: false
+      - key: DB_MIGRATION_PASSWORD
+        sync: false
+
+      # --- Kafka: `KAFKA_BROKERS` is required by config.schema.ts unconditionally (see header);
+      # the dispatch leg's own outbound `reward.redemption.completed.v1` producer (T-RR-034) also
+      # reads it for real once a claimed row actually reaches that step.
+      - key: KAFKA_BROKERS
+        sync: false
+
+      # --- Outbound credentials this pipeline calls with for real once a row is claimed (see this
+      # file's own header comment) — same four tokens the `web` service declares, never collapsed.
+      - key: REWARD_ENTRY_INGEST_TOKEN
+        sync: false
+      - key: CACHE_ADMIN_TOKEN
+        sync: false
+      - key: GENERATION_SERVICE_TOKEN
+        sync: false
+      - key: REWARD_TRACKING_REST_TOKEN
+        sync: false
+
+      # --- Portal gRPC client + cached campaign/tracker/reward config feed — this pipeline's own
+      # `TenantSchemaCacheModule`/`RewardSystemConfigModule` dependency chain needs this same feed.
+      - key: PORTAL_CONFIG_TENANT_IDS
+        sync: false
+      - key: PORTAL_GRPC_HOST
+        sync: false
+      - key: PORTAL_GRPC_PORT
+        sync: false
+      - key: PORTAL_GRPC_TIMEOUT_MS
+        sync: false
+      - key: PORTAL_GRPC_TLS_CA_PATH
+        sync: false
+      - key: PORTAL_GRPC_TLS_CERT_PATH
+        sync: false
+      - key: PORTAL_GRPC_TLS_KEY_PATH
+        sync: false
+
+      # --- Field encryption — same required-with-no-default pair as the `web` service above.
+      - key: FIELD_ENCRYPTION_AES_KEY
+        sync: false
+      - key: FIELD_ENCRYPTION_HMAC_KEY
+        sync: false
+
+      # `CLAIM_WORKER_ENABLED` is deliberately NOT listed here — see this file's own header comment
+      # (unset defaults to enabled for this standalone process; a worker process's whole job is to
+      # run this, task file TC-2).

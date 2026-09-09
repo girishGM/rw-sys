@@ -24,6 +24,8 @@ import type { Config } from './config/config.schema';
 import { createGrpcMicroservice } from './grpc/grpc-server.main';
 import { createKafkaConsumerContext } from './messaging/ingest/kafka-consumer.main';
 import { RewardEntryCreatedConsumer } from './messaging/ingest/reward-entry-created.consumer';
+import { createClaimWorkerContext } from './modules/processing/claim-worker.main';
+import { PromoCodeServiceKafkaClient } from './modules/connectors/promo-code-service-kafka.client';
 
 /**
  * T-INT-004. Hybrid bootstrap: the primary HTTP app (`AppModule` — always on, this is Render's
@@ -41,8 +43,69 @@ import { RewardEntryCreatedConsumer } from './messaging/ingest/reward-entry-crea
  * reasoning, as `realtime-activity-processing-service`'s own T-INT-003 (confirmed by direct read of
  * that project's `src/main.ts`).
  *
- * ## Why each of the two gates below defaults OFF here specifically, even though both already
- * ## default ON in their own standalone files/modules when unset
+ * **T-INT-047** adds a third optional composition root, the same shape as the two above: the
+ * claim-worker/processing/dispatch pipeline (`src/modules/processing/claim-worker.main.ts`'s own
+ * exported `createClaimWorkerContext()`, T-RR-058) — before this task, `ClaimWorkerModule` was
+ * never registered in `AppModule` and its own standalone `claim-worker.main.ts` composition root
+ * was never started by anything (`tasks/T-INT-047-*.md`'s own "Evidence" section: a `received` row
+ * sat unclaimed indefinitely against a real, hybrid-bootstrapped local process). This file still
+ * invents no new startup logic for that pipeline either — `createClaimWorkerContext()` is reused
+ * verbatim, exactly like the gRPC/Kafka pattern above. `CLAIM_WORKER_ENABLED` is this new gate's
+ * own env var, same name `claim-worker.module.ts`'s own runtime-config factory already reads for
+ * the standalone process — but, like the two gates below, evaluated independently at *this* call
+ * site with the opposite unset-default (`=== 'true'`, default OFF in the hybrid process) rather
+ * than inheriting `claim-worker.module.ts`'s own "unset = enabled" convention, for the identical
+ * reason the next section documents for gRPC/Kafka: a claim-worker run for real also transitively
+ * spins up `CompletionSweepService`'s own always-on sweep loop
+ * (`src/modules/redemption/completion-sweep.service.ts`, no `enabled` gate of its own), and neither
+ * loop's own dependency chain (the two real connector modules, `RedemptionStateMachineModule`, the
+ * dispatch/notification chain) has ever been exercised inside Render's today-deployed hybrid
+ * process — defaulting this ON in an environment that has never confirmed those config values are
+ * production-correct would risk the same "crash the whole hybrid process, taking `/health` down
+ * with it" failure mode the gRPC/Kafka gates below were already flipped to avoid. See this task's
+ * own completion report for the deployment-topology choice this task made in full (a Render
+ * `worker` service, `render.yaml`, is the actual always-on deployment shape for this pipeline —
+ * this hybrid-process gate exists for local/dev convenience only, matching `claim-worker.main.ts`'s
+ * own header, which already recommended a dedicated worker service as the real deployment shape).
+ *
+ * **T-INT-053** adds a fourth optional gate, `PROMO_CODE_KAFKA_REPLY_CONSUMER_ENABLED`, fixing a
+ * real defect this plan's own T-INT-040 verification pass found live: `PromoCodeServiceKafkaClient`
+ * (`src/modules/connectors/promo-code-service-kafka.client.ts`, T-RR-081) opens the one shared,
+ * long-lived kafkajs consumer for `promo-code.generate.result.v1` that `requestAndAwaitReply()`
+ * needs to ever resolve a pending Kafka request — but nothing in any real running process ever
+ * called its own `.start()` (`tasks/T-INT-053-*.md`'s own "Evidence": five real, independent
+ * request/reply round trips, five genuinely fast successful replies from a real promo-code-service,
+ * and RR's own side never received even one of them, exhausting its full Kafka retry budget every
+ * time). **This gate is deliberately NOT resolved from a brand-new, separately-constructed
+ * application context** the way that might first look symmetrical with the two gates above — the
+ * pending-reply registry `PromoCodeServiceKafkaClient` keeps (`PromoCodeKafkaRequestReplyRegistry`)
+ * is in-memory, per-instance state, and the only caller of `requestAndAwaitReply()` in this whole
+ * service (`PromoCodeServiceConnector`, resolved via `ConnectorRegistry` from inside
+ * `RedemptionProcessingOrchestrator`) only ever runs as part of `ClaimWorkerModule`'s own DI graph
+ * (`claim-worker.module.ts`'s own header confirms `PromoCodeServiceConnectorModule` is imported
+ * there, not anywhere `AppModule` itself reaches). Starting a fresh, second `PromoCodeServiceKafkaClient`
+ * instance in an unrelated context would open a real consumer that faithfully receives every real
+ * reply and then drops every single one as "no pending entry" (`handleResultMessage`'s own documented
+ * behavior) — an even more confusing failure mode than the one this task fixes, since the consumer
+ * would *look* started. Instead, this gate resolves `PromoCodeServiceKafkaClient` **from
+ * `claimWorkerResult.handle`** (the exact same context `createClaimWorkerContext()` already builds
+ * for the `CLAIM_WORKER_ENABLED` gate immediately above), the identical instance
+ * `RedemptionProcessingOrchestrator` itself resolves its own `PromoCodeServiceConnector` from — so
+ * a reply this consumer receives always resolves the correct, still-pending promise. This is why
+ * enabling this gate with `CLAIM_WORKER_ENABLED` left off is treated as a hard failure (a thrown
+ * `Error`, surfaced the same "explicitly enabled, refuses to start" way implementation note 4
+ * already governs below) rather than a silent no-op: a promo-code reply consumer with no orchestrator
+ * in the same process to ever call `requestAndAwaitReply()` would just as silently misdiagnose as
+ * "working" while doing nothing useful. **Known, disclosed gap** (this task's own completion
+ * report, "Deviations"): Render's real, always-on deployment shape for the claim-worker pipeline is
+ * the dedicated `worker` service in `render.yaml` (`claim-worker.main.ts`, T-INT-047), not this
+ * hybrid gate — and `claim-worker.main.ts` is outside this task's own "Files owned" list, so this
+ * fix does not yet reach that topology. This gate covers exactly the same scope
+ * `CLAIM_WORKER_ENABLED` above already covers: local/dev convenience, and the one topology this
+ * task's own evidence was gathered against (a real, hybrid-bootstrapped local process).
+ *
+ * ## Why each of the four gates below defaults OFF here specifically, even though each already
+ * ## defaults ON in its own standalone file/module when unset
  *
  * `grpc-server.config.ts`'s `loadGrpcServerConfig()` treats "unset" as "enabled" (only the literal
  * string `"false"` disables it), and `kafka-consumer.main.ts`'s own `isEnabled()` does the same
@@ -61,7 +124,11 @@ import { RewardEntryCreatedConsumer } from './messaging/ingest/reward-entry-crea
  * the opposite unset-default (`=== 'true'`, not `!== 'false'`) from what each transport's own
  * internal function uses — the identical, already-reviewed T-INT-003 deviation from a literal
  * reading of implementation note 3, recorded here as this task's own instance of that same,
- * disclosed deviation (see this task's own completion report under "Deviations").
+ * disclosed deviation (see this task's own completion report under "Deviations"). T-INT-047's own
+ * `CLAIM_WORKER_ENABLED` gate above follows this exact same convention, for the same reason —
+ * T-INT-053's own `PROMO_CODE_KAFKA_REPLY_CONSUMER_ENABLED` gate does too, though for that one the
+ * default-OFF choice is additionally load-bearing for the "requires CLAIM_WORKER_ENABLED=true in
+ * the same process" hard-failure this file's own header above documents, not just crash-avoidance.
  */
 const logger = new Logger('Bootstrap');
 
@@ -69,6 +136,15 @@ export interface HybridBootstrapResult {
   httpApp: INestApplication;
   grpcApp: INestMicroservice | null;
   kafkaConsumerContext: INestApplicationContext | null;
+  /** T-INT-047. `null` unless `CLAIM_WORKER_ENABLED=true` — see this file's own header above for
+   * why this hybrid-level gate defaults OFF even though `claim-worker.module.ts`'s own runtime
+   * config for the same env var name defaults it ON for the standalone process. */
+  claimWorkerContext: INestApplicationContext | null;
+  /** T-INT-053. `null` unless `PROMO_CODE_KAFKA_REPLY_CONSUMER_ENABLED=true` (and, required, only
+   * ever non-null alongside a non-null `claimWorkerContext` — see this file's own header above).
+   * The started `PromoCodeServiceKafkaClient` instance itself, resolved from `claimWorkerContext`,
+   * not a separate handle of its own kind. */
+  promoCodeKafkaReplyConsumer: PromoCodeServiceKafkaClient | null;
 }
 
 interface TransportFailure {
@@ -152,6 +228,13 @@ export async function startHybridBootstrap(): Promise<HybridBootstrapResult> {
 
   const grpcServerEnabled = process.env.GRPC_SERVER_ENABLED === 'true';
   const kafkaConsumerEnabled = process.env.KAFKA_CONSUMER_ENABLED === 'true';
+  // T-INT-047. Same opposite-of-standalone-default convention as the two gates above — see this
+  // file's own header.
+  const claimWorkerEnabled = process.env.CLAIM_WORKER_ENABLED === 'true';
+  // T-INT-053. Same convention — see this file's own header for why this one additionally requires
+  // `claimWorkerEnabled` to also be true in this same process.
+  const promoCodeKafkaReplyConsumerEnabled =
+    process.env.PROMO_CODE_KAFKA_REPLY_CONSUMER_ENABLED === 'true';
 
   const grpcResult = await attemptOptionalTransport(
     grpcServerEnabled,
@@ -177,15 +260,56 @@ export async function startHybridBootstrap(): Promise<HybridBootstrapResult> {
     },
   );
 
+  // T-INT-047. `createClaimWorkerContext()` (`src/modules/processing/claim-worker.main.ts`) never
+  // returns `null` itself — unlike `createKafkaConsumerContext()`, its own "do I even start"
+  // decision is left entirely to this call site (see that file's own header) — so
+  // `attemptOptionalTransport`'s own `enabled` gate is what determines whether it is ever called
+  // at all in this hybrid process.
+  const claimWorkerResult = await attemptOptionalTransport(
+    claimWorkerEnabled,
+    'claim worker (ClaimWorkerModule / RedemptionProcessingOrchestrator)',
+    async () => createClaimWorkerContext(),
+  );
+
+  // T-INT-053. Fixes the defect this task's own file documents in full above: nothing in any real
+  // running process ever called `.start()` on `PromoCodeServiceKafkaClient`, so
+  // `requestAndAwaitReply()` could never resolve a real, successful reply and every Kafka-primary
+  // `rr-to-promo-code` redemption exhausted its full retry budget instead. Deliberately resolved
+  // FROM `claimWorkerResult.handle` (never a fresh, separately-constructed application context) —
+  // see this file's own header for why any other instance would silently drop every real reply
+  // instead of fixing anything.
+  const promoCodeKafkaReplyConsumerResult = await attemptOptionalTransport(
+    promoCodeKafkaReplyConsumerEnabled,
+    'promo-code.generate.result.v1 Kafka reply consumer (PromoCodeServiceKafkaClient)',
+    async () => {
+      if (!claimWorkerResult.handle) {
+        throw new Error(
+          'PROMO_CODE_KAFKA_REPLY_CONSUMER_ENABLED=true requires CLAIM_WORKER_ENABLED=true in the ' +
+            'same process — this consumer must share the exact DI graph instance that resolves ' +
+            'PromoCodeServiceConnector/calls requestAndAwaitReply() (inside ClaimWorkerModule), ' +
+            'otherwise it can never resolve any pending Kafka reply.',
+        );
+      }
+      const client = claimWorkerResult.handle.get(PromoCodeServiceKafkaClient);
+      await client.start();
+      return client;
+    },
+  );
+
   const result: HybridBootstrapResult = {
     httpApp: app,
     grpcApp: grpcResult.handle,
     kafkaConsumerContext: kafkaResult.handle,
+    claimWorkerContext: claimWorkerResult.handle,
+    promoCodeKafkaReplyConsumer: promoCodeKafkaReplyConsumerResult.handle,
   };
 
-  const failures = [grpcResult.failure, kafkaResult.failure].filter(
-    (failure): failure is TransportFailure => failure !== null,
-  );
+  const failures = [
+    grpcResult.failure,
+    kafkaResult.failure,
+    claimWorkerResult.failure,
+    promoCodeKafkaReplyConsumerResult.failure,
+  ].filter((failure): failure is TransportFailure => failure !== null);
 
   if (failures.length > 0) {
     const labels = failures.map((failure) => failure.label).join(', ');

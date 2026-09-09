@@ -139,3 +139,35 @@ export const RETRY_BATCH_SIZE = Symbol('RETRY_BATCH_SIZE');
 export const RETRY_BACKOFF_BASE_MS = Symbol('RETRY_BACKOFF_BASE_MS');
 export const RETRY_BACKOFF_MAX_MS = Symbol('RETRY_BACKOFF_MAX_MS');
 export const RETRY_WORKER_AUTOSTART = Symbol('RETRY_WORKER_AUTOSTART');
+
+/**
+ * T-INT-051. `dispatch.outbox.maxPreDispatchFailures` — how many consecutive times a
+ * `reward_tracking_dispatch_outbox` row may throw *before any dispatch attempt is even made*
+ * (`OutboxPublisherService.processRowSafely`'s own catch block — a decrypt failure, a
+ * `dispatchResolver.resolve` rejection) before `RewardTrackingOutboxRepository.recordPreDispatchFailure`
+ * flips it to the terminal `'POISONED'` status, permanently excluding it from
+ * `findPendingBatch`'s own FIFO batch query. A **distinct** budget from
+ * `dispatch.kafka.attemptsBeforeFallback` above: that one governs how long a row (which *did*
+ * reach the tier-selection logic) stays on the Kafka channel before falling through to REST; this
+ * one bounds a failure mode that occurs strictly earlier, before either channel is ever
+ * attempted, and that the pre-T-INT-051 code left completely unbounded (this task's own filed
+ * evidence: 24,307 such rows, permanently `PENDING`, permanently starving every real row queued
+ * behind them). Same unseeded-until-a-later-seeding-task, fall-back-loudly discipline as every
+ * other `resolve*` helper in this file.
+ */
+export const DEFAULT_OUTBOX_MAX_PRE_DISPATCH_FAILURES = 5;
+
+export async function resolveOutboxMaxPreDispatchFailures(
+  resolver: DispatchServiceConfigResolver,
+  logger: Logger,
+): Promise<number> {
+  try {
+    return await resolver.resolve('dispatch.outbox.maxPreDispatchFailures', 'int');
+  } catch {
+    logger.warn(
+      'service_config key "dispatch.outbox.maxPreDispatchFailures" is not seeded for this ' +
+        `context — using default ${DEFAULT_OUTBOX_MAX_PRE_DISPATCH_FAILURES}.`,
+    );
+    return DEFAULT_OUTBOX_MAX_PRE_DISPATCH_FAILURES;
+  }
+}

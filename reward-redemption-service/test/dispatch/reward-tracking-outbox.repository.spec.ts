@@ -288,5 +288,112 @@ describe('T-RR-034 — RewardTrackingOutboxRepository', () => {
       const thirdPass = await repository.findPendingBatch(batchSize);
       expect(thirdPass.some((r) => r.id === outboxId)).toBe(false);
     });
+
+    /**
+     * T-INT-051. A real, deterministic, small-scale reproduction of this session's own
+     * 24,307-row starvation scenario (task file's own Definition of Done: "3 poisoned rows + 1
+     * real row"), run against the real Postgres 16 server, not fakes — `recordPreDispatchFailure`
+     * and `findPendingBatch` are exercised exactly as `OutboxPublisherService`'s own real poll
+     * cycle would call them.
+     */
+    describe('T-INT-051: recordPreDispatchFailure / findPoisoned', () => {
+      const MAX_ATTEMPTS_BEFORE_POISON = 3;
+
+      it('TC-1: a row below the threshold stays PENDING and returned by findPendingBatch; once the threshold is reached it flips to POISONED and is excluded — a real row queued behind it is unaffected', async () => {
+        const { outboxId: poisonedId } = await enqueueEntry();
+        const { outboxId: healthyId } = await enqueueEntry();
+        const batchSize = await pendingBatchSizeCoveringAll(migrationDb);
+
+        // Two failures — still below the threshold of 3.
+        const first = await repository.recordPreDispatchFailure(
+          poisonedId,
+          'Malformed ciphertext: too short to contain an IV and an auth tag',
+          MAX_ATTEMPTS_BEFORE_POISON,
+        );
+        expect(first).toEqual({ attempts: 1, poisoned: false });
+        const second = await repository.recordPreDispatchFailure(
+          poisonedId,
+          'Malformed ciphertext: too short to contain an IV and an auth tag',
+          MAX_ATTEMPTS_BEFORE_POISON,
+        );
+        expect(second).toEqual({ attempts: 2, poisoned: false });
+
+        let batch = await repository.findPendingBatch(batchSize);
+        expect(batch.some((r) => r.id === poisonedId)).toBe(true);
+        expect(batch.some((r) => r.id === healthyId)).toBe(true);
+
+        // Third failure crosses the threshold — POISONED.
+        const third = await repository.recordPreDispatchFailure(
+          poisonedId,
+          'Malformed ciphertext: too short to contain an IV and an auth tag',
+          MAX_ATTEMPTS_BEFORE_POISON,
+        );
+        expect(third).toEqual({ attempts: 3, poisoned: true });
+
+        // The actual starvation fix: the poisoned row no longer occupies a FIFO batch slot, and
+        // the genuinely-dispatchable row queued behind it (`healthyId`, unaffected the whole
+        // time) is still returned, on this very next call — no longer starved.
+        batch = await repository.findPendingBatch(batchSize);
+        expect(batch.some((r) => r.id === poisonedId)).toBe(false);
+        expect(batch.some((r) => r.id === healthyId)).toBe(true);
+
+        const [row] = await migrationDb.query<{
+          status: string;
+          attempts: number;
+          last_error: string | null;
+        }>(
+          'SELECT status, attempts, last_error FROM reward_redemption.reward_tracking_dispatch_outbox WHERE id = :id',
+          { type: QueryTypes.SELECT, replacements: { id: poisonedId } },
+        );
+        expect(row.status).toBe('POISONED');
+        expect(row.attempts).toBe(3);
+        expect(row.last_error).toContain('Malformed ciphertext');
+      });
+
+      it('TC-2: a row that fails once (below threshold) then is never called again (the transient cause cleared) stays PENDING, never poisoned', async () => {
+        const { outboxId } = await enqueueEntry();
+
+        const outcome = await repository.recordPreDispatchFailure(
+          outboxId,
+          'transient failure',
+          MAX_ATTEMPTS_BEFORE_POISON,
+        );
+        expect(outcome).toEqual({ attempts: 1, poisoned: false });
+
+        const [row] = await migrationDb.query<{ status: string }>(
+          'SELECT status FROM reward_redemption.reward_tracking_dispatch_outbox WHERE id = :id',
+          { type: QueryTypes.SELECT, replacements: { id: outboxId } },
+        );
+        expect(row.status).toBe('PENDING');
+
+        // Dispatches normally afterward, same as any other still-PENDING row.
+        await repository.markPublished(outboxId);
+        const [published] = await migrationDb.query<{ status: string }>(
+          'SELECT status FROM reward_redemption.reward_tracking_dispatch_outbox WHERE id = :id',
+          { type: QueryTypes.SELECT, replacements: { id: outboxId } },
+        );
+        expect(published.status).toBe('PUBLISHED');
+      });
+
+      it('TC-3: findPoisoned surfaces a poisoned row for operator audit, with its own last_error, and never a still-PENDING row', async () => {
+        const { outboxId: poisonedId } = await enqueueEntry();
+        const { outboxId: pendingId } = await enqueueEntry();
+
+        for (let i = 0; i < MAX_ATTEMPTS_BEFORE_POISON; i += 1) {
+          await repository.recordPreDispatchFailure(
+            poisonedId,
+            'Malformed ciphertext: too short to contain an IV and an auth tag',
+            MAX_ATTEMPTS_BEFORE_POISON,
+          );
+        }
+
+        const poisoned = await repository.findPoisoned(1000);
+        expect(poisoned.some((r) => r.id === poisonedId)).toBe(true);
+        expect(poisoned.some((r) => r.id === pendingId)).toBe(false);
+        const found = poisoned.find((r) => r.id === poisonedId);
+        expect(found?.attempts).toBe(MAX_ATTEMPTS_BEFORE_POISON);
+        expect(found?.lastError).toContain('Malformed ciphertext');
+      });
+    });
   });
 });

@@ -28,6 +28,42 @@
  * message delivered to a differently-timed consumer instance never causes a false positive.
  */
 import 'reflect-metadata';
+
+// T-INT-047. Deliberately BEFORE the `@/main` import below, not merely before
+// `startHybridBootstrap()` is first called — `src/config/config.module.ts`'s own
+// `NestConfigModule.forRoot({ validate: validateConfig, ... })` validates `process.env` **once**,
+// synchronously, the moment `config.module.ts` is first `require`'d (that file's own header,
+// T-RR-004/T-RR-050) — which happens transitively the instant this file's own `import {
+// startHybridBootstrap, ... } from '@/main'` line below is evaluated, i.e. before ANY `it()` body
+// in this file ever runs. `ConfigService.get('PORT', ...)` then always returns that ONE frozen,
+// validated value for the rest of this file's own process lifetime — a later `process.env.PORT =
+// ...` assignment inside `resetEnvToBaseline()` (below) has **no effect on it**, unlike every other
+// env var this file resets, which every consuming module (`grpc-server.config.ts`,
+// `kafka-consumer.main.ts`, `claim-worker.module.ts`, ...) reads directly and live from
+// `process.env` instead (each of those files' own header already documents exactly why, for the
+// identical reason `config.schema.ts` is deliberately NOT the source those files use). Confirmed
+// empirically while implementing T-INT-047: this suite's own real HTTP listener always bound
+// `.env.development`'s literal `PORT=3030`, never whatever `resetEnvToBaseline()` set — invisible
+// as long as only one real-HTTP-listener-binding file existed in this whole suite, and a real,
+// reproducible `EADDRINUSE :::3030` the moment a second one
+// (`test/main/claim-worker-hybrid-gate.e2e-spec.ts`) was added and Jest scheduled both into
+// different parallel workers at the same wall-clock moment.
+//
+// Not literally `PORT=0` — `config.schema.ts`'s own `PORT: z.coerce.number().int().positive()`
+// rejects `0` at this same synchronous validation step (confirmed empirically: "PORT: Number must
+// be greater than 0"), and `app.listen()`'s own real ephemeral-port assignment only happens
+// *after* that validation already ran, so passing 0 through `config.schema.ts` is not an option
+// here the way it would be calling `http.Server.listen(0)` directly. A random, fixed-range port
+// number picked once at module-load time (never `getFreePort()`, which is inherently async and
+// cannot run before a synchronous, module-load-time statement) is this file's own low-collision
+// substitute — this file's own range (`52000-56999`) is disjoint from
+// `test/main/claim-worker-hybrid-gate.e2e-spec.ts`'s own range, so the two real HTTP-listening
+// files this suite now has can never collide with each other, and a collision against any other,
+// unrelated real process on this machine is exceedingly unlikely (never zero, but no worse than
+// `getFreePort()`'s own already-accepted residual TOCTOU risk was for every scenario except the
+// specific two-file case this task's own evidence reproduced).
+process.env.PORT = String(52_000 + Math.floor(Math.random() * 5_000));
+
 import { createConnection } from 'node:net';
 import { readFileSync } from 'node:fs';
 import * as grpc from '@grpc/grpc-js';
@@ -101,8 +137,16 @@ function isPortOpen(port: number, host = '127.0.0.1'): Promise<boolean> {
  * `src/main.ts`'s own header explains why). `.env.development`'s own
  * `FIELD_ENCRYPTION_*`/`PORTAL_CONFIG_TENANT_IDS`/DB/Kafka-broker vars are left exactly as
  * `test/database/env.setup.ts` already loaded them — only what this task's own gates touch is
- * reset here. `PORT` is pinned to a freshly allocated free port so this suite never collides with
- * a real locally-running dev instance on 3030.
+ * reset here.
+ *
+ * **T-INT-047 update.** `PORT` is no longer reset here — it moved to a single, module-load-time
+ * `process.env.PORT = '0'` statement above this file's own `import { startHybridBootstrap, ... }
+ * from '@/main'` line (see that statement's own comment for why: `ConfigService.get('PORT', ...)`
+ * freezes its value the moment `config.module.ts` first loads, so a later per-`it()` reassignment
+ * here had no effect on it). `GRPC_SERVER_PORT` below is unaffected by that same freeze —
+ * `grpc-server.config.ts` reads it directly and live from `process.env`, never through
+ * `ConfigService` (that file's own header) — so resetting it fresh, per test, here is still correct
+ * and still needed (a real gRPC client dials that exact port number by value, TC-2/TC-4 below).
  */
 async function resetEnvToBaseline(): Promise<void> {
   delete process.env.GRPC_SERVER_ENABLED;
@@ -112,8 +156,6 @@ async function resetEnvToBaseline(): Promise<void> {
   process.env.GRPC_SERVER_TLS_CERT_PATH = './dev-certs/server-cert.pem';
   process.env.GRPC_SERVER_TLS_KEY_PATH = './dev-certs/server-key.pem';
   process.env.GRPC_SERVER_ALLOWED_IDENTITIES = 'placeholder-identity:1';
-
-  process.env.PORT = String(await getFreePort());
 }
 
 describe('T-INT-004 — hybrid bootstrap (src/main.ts) (e2e, real Postgres, real Redpanda, real mTLS)', () => {

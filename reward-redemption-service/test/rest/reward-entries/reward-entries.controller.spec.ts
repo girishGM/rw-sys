@@ -194,6 +194,44 @@ describe('T-RR-013 — POST /api/v1/reward-entries (controller, faked domain ser
     expect(ingest).not.toHaveBeenCalled();
   });
 
+  // T-INT-046 TC-1: an empty rewardValueUnit is a well-formed "no unit for this reward kind"
+  // (PROMO_CODE/POINTS), never a 400 — the exact evidence this task's own defect report reproduced.
+  it('T-INT-046: accepts an empty-string rewardValueUnit, passing it through as "" (no unit for this reward kind)', async () => {
+    const response = await request(app.getHttpServer())
+      .post('/api/v1/reward-entries')
+      .set('Authorization', `Bearer ${TOKEN}`)
+      .send(validBody({ rewardValueUnit: '' }));
+
+    expect(response.status).toBe(200);
+    expect(ingest).toHaveBeenCalledTimes(1);
+    const [[dto]] = ingest.mock.calls as [[RewardEntryIngestDto]];
+    expect(dto.rewardValueUnit).toBe('');
+  });
+
+  it('T-INT-046: accepts a body with rewardValueUnit omitted entirely, passing it through as ""', async () => {
+    const { rewardValueUnit: _omit, ...withoutRewardValueUnit } = validBody();
+
+    const response = await request(app.getHttpServer())
+      .post('/api/v1/reward-entries')
+      .set('Authorization', `Bearer ${TOKEN}`)
+      .send(withoutRewardValueUnit);
+
+    expect(response.status).toBe(200);
+    const [[dto]] = ingest.mock.calls as [[RewardEntryIngestDto]];
+    expect(dto.rewardValueUnit).toBe('');
+  });
+
+  it('T-INT-046: accepts a null rewardValueUnit, passing it through as ""', async () => {
+    const response = await request(app.getHttpServer())
+      .post('/api/v1/reward-entries')
+      .set('Authorization', `Bearer ${TOKEN}`)
+      .send(validBody({ rewardValueUnit: null }));
+
+    expect(response.status).toBe(200);
+    const [[dto]] = ingest.mock.calls as [[RewardEntryIngestDto]];
+    expect(dto.rewardValueUnit).toBe('');
+  });
+
   it('accepts a transactionType-only body (no activityCode)', async () => {
     const response = await request(app.getHttpServer())
       .post('/api/v1/reward-entries')

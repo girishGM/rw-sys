@@ -98,6 +98,26 @@ export interface RewardRedemptionEntryRow {
    * version of that config produced this entry. Optional (`?`), same reasoning as its siblings
    * above. */
   promo_code_config_version_no?: number | null;
+  /**
+   * T-INT-049. **Not a persisted column — no migration ever adds one, and `pg`/Sequelize never
+   * returns it.** The one deliberate exception to this file's own header rule ("the shared,
+   * schema-level source of truth for a table's raw row shape ... exactly as Postgres/`pg` returns
+   * it") — `RedemptionProcessingOrchestrator.processClaimedEntry` stamps this in-memory only,
+   * immediately before calling a connector's `redeem()`, from `RewardSystemResolutionService.
+   * resolve()`'s own `bindLevel`/`bindRefId` (`reward-system-resolution.service.ts`'s own header),
+   * so `PromoCodeServiceConnector.buildRequestBody` can send the real bind level/ref id the portal's
+   * own `campaign_promo_config` binding was actually keyed by instead of always guessing `CAMPAIGN`/
+   * `entry.campaign_code` (this task's own defect). Never written back to the database — R5 forbids
+   * this service from persisting a portal-internal numeric id, and there is no legitimate reason to
+   * anyway (it is re-derived fresh on every `processClaimedEntry` call from the portal's own cached
+   * feed). Optional for the identical "several fixture builders across the tree predate this field
+   * and must keep compiling unchanged" reason `expires_at`/`reward_kind` above are optional —
+   * `PromoCodeServiceConnector` treats an absent value identically to the pre-T-INT-049 behaviour.
+   */
+  resolved_bind_level?: 'CAMPAIGN' | 'TRACKER' | 'COMPONENT' | null;
+  /** T-INT-049. Sibling to `resolved_bind_level` immediately above — same in-memory-only, same
+   * optionality, same reasoning. */
+  resolved_bind_ref_id?: number | null;
   created_at: Date;
   updated_at: Date;
 }

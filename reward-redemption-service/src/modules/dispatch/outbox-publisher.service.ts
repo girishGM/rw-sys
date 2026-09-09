@@ -54,6 +54,13 @@
  * batch. See `processRowSafely`'s own header for exactly what does (and deliberately does not)
  * happen to a row that fails this way.
  *
+ * **T-INT-051** (`reward-service-integration-plan/tasks/T-INT-051-*.md`, filed against this exact
+ * `processRowSafely` catch block): T-RR-071 stopped one bad row from aborting the whole batch, but
+ * left the failure mode itself unbounded — this task bounds it. See `processRowSafely`'s own
+ * header for the fix, `dispatch.config.ts`'s own `resolveOutboxMaxPreDispatchFailures` for the
+ * configured threshold, and `reward-tracking-outbox.repository.ts`'s own
+ * `recordPreDispatchFailure`/`findPoisoned` for the new `'POISONED'`-status mechanics.
+ *
  * **T-RR-062** widens `attemptChannel()`/`isChannelEnabled()` into a real three-way switch for the
  * new `'GRPC'` `DispatchChannel` value, alongside the existing `'KAFKA'`/`'REST'` pair —
  * `RewardTrackingGrpcClient` (this task's own new file). A gRPC transport-unreachable condition
@@ -99,6 +106,7 @@ import {
   OUTBOX_BATCH_SIZE,
   OUTBOX_PUBLISHER_AUTOSTART,
   resolveKafkaAttemptsBeforeFallback,
+  resolveOutboxMaxPreDispatchFailures,
   resolveOutboxPollIntervalMs,
   type DispatchServiceConfigResolver,
 } from './dispatch.config';
@@ -225,8 +233,15 @@ export class OutboxPublisherService implements OnModuleInit, OnModuleDestroy {
       this.configResolver,
       this.logger,
     );
+    // T-INT-051: resolved once per cycle, same discipline as attemptsBeforeFallback above — only
+    // ever consulted from `processRowSafely`'s own catch block (a row that throws before any
+    // dispatch attempt is even made), never from the normal tier-selection path.
+    const maxPreDispatchFailures = await resolveOutboxMaxPreDispatchFailures(
+      this.configResolver,
+      this.logger,
+    );
     for (const row of rows) {
-      await this.processRowSafely(row, attemptsBeforeFallback);
+      await this.processRowSafely(row, attemptsBeforeFallback, maxPreDispatchFailures);
     }
   }
 
@@ -234,34 +249,54 @@ export class OutboxPublisherService implements OnModuleInit, OnModuleDestroy {
    * T-RR-071: `processRow` throwing synchronously — e.g. `EncryptionService.decrypt` rejecting a
    * malformed/non-AES-GCM `customerIdEncrypted` (a genuinely corrupt row), or any other unexpected
    * failure before either channel is even attempted (`this.dispatchResolver.resolve` itself
-   * erroring) — must never abort this cycle's remaining rows. Before this fix, `doRunOnce`'s own
+   * erroring) — must never abort this cycle's remaining rows. Before that fix, `doRunOnce`'s own
    * `for` loop had no per-row guard, so one bad row anywhere in `findPendingBatch`'s result poisoned
    * the *entire* batch: every row after it (in `created_at ASC` order) silently never got its own
    * attempt this cycle, and `runOnce()`/`doRunOnce()` itself rejected outward to the caller.
    *
-   * Deliberately does **not** call `markFailed`/`incrementAttempts`/`escalateToRetryTable` here —
-   * this catch cannot distinguish permanent data corruption (which no retry could ever fix) from a
-   * transient collaborator failure (e.g. a momentary `dispatch_channel_config` resolution error),
-   * so it makes no guess either way. The row is simply left exactly as `findPendingBatch` found it
-   * — still `PENDING`, `attempts` untouched — to be tried again from scratch on the next poll cycle,
-   * indistinguishable from any other still-`PENDING` row. (A permanently-corrupt row will keep
-   * failing this same way on every future cycle, occupying one `findPendingBatch` slot each time —
-   * an accepted, bounded cost given this task's own evidence that fixing the *root* leak of such
-   * rows, and/or cleaning up any already-stray ones, is deliberately out of this task's scope: doing
-   * either from here would only mask the underlying poisoning bug, not fix this abort-the-whole-
-   * batch defect.)
+   * **T-INT-051**: T-RR-071 fixed the abort-the-whole-batch defect above but left this failure
+   * mode itself completely unbounded — `attempts` was never touched here, so a row whose failure
+   * is *permanent* (not transient) stayed eligible for `findPendingBatch` forever, and because that
+   * query is a strict `ORDER BY created_at ASC LIMIT $1` FIFO, the very oldest such row(s)
+   * permanently occupied every poll cycle's own limited batch slots — starving every genuinely
+   * dispatchable row queued behind them, no matter how far back the real backlog was (this task's
+   * own filed evidence: 24,307 such rows accumulated in one local dev database). This catch now
+   * calls `recordPreDispatchFailure` — the same atomic increment-and-maybe-poison step regardless
+   * of whether the underlying cause turns out to be transient or permanent (this catch still
+   * cannot distinguish the two, and does not try to): a transient failure that later succeeds
+   * simply never accumulates enough consecutive failures to cross `maxPreDispatchFailures` (TC-2);
+   * a permanent one eventually does, and is moved to the terminal `'POISONED'` status, excluded
+   * from all future `findPendingBatch` batches (TC-1) — bounding the blast radius of *any*
+   * permanently-broken row without needing to know, or guess, its root cause.
    */
   private async processRowSafely(
     row: OutboxPendingRow,
     attemptsBeforeFallback: number,
+    maxPreDispatchFailures: number,
   ): Promise<void> {
     try {
       await this.processRow(row, attemptsBeforeFallback);
     } catch (error) {
+      const reason = describeError(error);
+      const { attempts, poisoned } = await this.outboxRepository.recordPreDispatchFailure(
+        row.id,
+        reason,
+        maxPreDispatchFailures,
+      );
+      if (poisoned) {
+        this.metrics.incrementPoisonedOutboxRow();
+        this.logger.error(
+          `reward_tracking_dispatch_outbox row "${row.id}" (reward_entry "${row.rewardEntryId}") ` +
+            `threw before any dispatch attempt completed on ${attempts} consecutive cycles — ` +
+            `exceeds dispatch.outbox.maxPreDispatchFailures (${maxPreDispatchFailures}), moved to ` +
+            `POISONED and excluded from all future poll cycles: ${reason}`,
+        );
+        return;
+      }
       this.logger.error(
         `reward_tracking_dispatch_outbox row "${row.id}" (reward_entry "${row.rewardEntryId}") ` +
-          `threw before any dispatch attempt completed this cycle — left PENDING, retried on a ` +
-          `later poll: ${describeError(error)}`,
+          `threw before any dispatch attempt completed this cycle (pre-dispatch failure ` +
+          `${attempts}/${maxPreDispatchFailures}) — left PENDING, retried on a later poll: ${reason}`,
       );
     }
   }

@@ -37,6 +37,32 @@
  * whichever of those candidates the cached config actually has a `BoundReward` for — never a direct
  * string comparison against the entry's own `trackerCode`/`trackerComponentCode` (TC-2).
  *
+ * **T-INT-049 (defect fix).** `PromoCodeServiceConnector` (`connectors/promo-code-service.connector.ts`,
+ * own header) always sent `bindLevel: 'CAMPAIGN'`/`bindRefId: entry.campaign_code` — a documented
+ * placeholder, never the real bind identifier the portal's own `campaign_promo_config` binding was
+ * actually keyed by (a numeric id, per `04-REST-CONTRACT.md` §2's own worked example) — because
+ * nothing threaded `BoundReward.level`/`ref_id` (already present on the wire, `campaign-config.
+ * client.ts`'s own `BoundRewardProto`) through to the connector call. `resolve()` below now returns
+ * two additional fields, `bindLevel`/`bindRefId` (kept separate from the pre-existing `level`/`refId`
+ * below, never repurposing them — `RewardSystemResolutionService.spec.ts`'s own TC-1 already locks
+ * in `refId: 0` at campaign level, matching `BoundReward.ref_id`'s own documented "0 at campaign
+ * level" proto convention verbatim; that meaning must not change under this fix). **`bindRefId` is
+ * deliberately NOT the same value as `refId` at `campaign` level**: the real portal-numeric campaign
+ * id a `CAMPAIGN`-level binding is actually keyed by lives one level up, on `CampaignConfigProto.
+ * campaignId`, never on the individual `BoundReward.ref_id` itself (which is always `0` at that
+ * level) — confirmed by T-INT-040's own live evidence (`campaign_promo_config.bind_ref_id='529444'`,
+ * the portal's own numeric id for `WEEKEND_PROMO_BLITZ`, not `0`). At `tracker`/`component` level the
+ * two values are identical (`refId` already *is* the real tracker/component id at those levels) —
+ * `bindRefId` is populated uniformly at every level anyway, so a caller never special-cases which
+ * level it is at to decide which field to read. `bindLevel`/`bindRefId` are optional (`?`), matching
+ * this same interface's own `expiryValue?`/`expiryUnit?` back-compat precedent immediately below:
+ * several fixture builders across the tree (`test/processing/fixtures/concurrent-workers.harness.ts`,
+ * `test/e2e/observability.e2e-spec.ts`, `test/e2e/fixtures/reward-entry.fixtures.ts`, R3) construct a
+ * full `ResolvedRewardSystem` object literal directly and predate these two fields — `Redemption
+ * ProcessingOrchestrator` (this task's own file) and `PromoCodeServiceConnector.buildRequestBody`
+ * both treat an omitted value identically to the pre-T-INT-049 `'CAMPAIGN'`/`entry.campaign_code`
+ * guess, never a hard failure.
+ *
  * **T-RR-065 (defect fix) also lives in this file.** `TenantSchemaEnrichmentService` below is a
  * second, adjacent-in-pipeline-but-unrelated-in-purpose class: `06-CACHING-AND-TENANT-CONFIG.md`
  * §5's claim-time `tenant_code`/`country_code` enrichment step, which must run *before* this file's
@@ -79,6 +105,13 @@ export interface ResolvedRewardSystem {
   unitCode: string;
   level: string;
   refId: number;
+  /**
+   * T-INT-049. The real bind level/ref-id `PromoCodeServiceConnector` (and any future
+   * bind-level-aware connector) should send on the wire — see this file's own header for why these
+   * are a separate pair of fields from `level`/`refId` above, not a repurposing of them.
+   */
+  bindLevel?: 'CAMPAIGN' | 'TRACKER' | 'COMPONENT';
+  bindRefId?: number;
   versionNo: number;
   status: string;
   /**
@@ -144,6 +177,31 @@ function buildCandidates(
   return candidates;
 }
 
+/**
+ * T-INT-049. Maps `BoundReward.level`'s own lowercase proto convention (`'campaign' | 'tracker' |
+ * 'component'`, `campaign-config.proto`'s own comment) to `promo-code-service-plan/01-DATABASE.md`
+ * §3's uppercase `campaign_promo_config.bind_level` CHECK-constraint values — an explicit,
+ * exhaustively-typed switch (R7), never a bare `.toUpperCase()` cast, so a proto value this service
+ * has never seen fails loudly here instead of silently reaching the wire as an invalid `bindLevel`.
+ * Structurally unreachable from `resolve()` below (`match.level` only ever holds a value that was
+ * itself one of `buildCandidates`' own three literals), but still an explicit guard, not an
+ * assumption.
+ */
+function toBindLevel(level: string): 'CAMPAIGN' | 'TRACKER' | 'COMPONENT' {
+  switch (level) {
+    case 'campaign':
+      return 'CAMPAIGN';
+    case 'tracker':
+      return 'TRACKER';
+    case 'component':
+      return 'COMPONENT';
+    default:
+      throw new Error(
+        `Unexpected BoundReward.level "${level}" — expected "campaign", "tracker" or "component".`,
+      );
+  }
+}
+
 function findBoundReward(
   config: CampaignConfigProto,
   rewardCode: string,
@@ -167,6 +225,12 @@ export class RewardSystemResolutionService {
     if (!match) {
       throw new RewardNotFoundInCampaignConfigError(input);
     }
+    // T-INT-049: the real numeric id promo-code-service's own binding is keyed by — `config.
+    // campaignId` at `campaign` level (`BoundReward.ref_id` is always `0` there, this file's own
+    // header), `match.refId` itself at `tracker`/`component` level (already the real numeric id at
+    // those levels).
+    const bindLevel = toBindLevel(match.level);
+    const bindRefId = bindLevel === 'CAMPAIGN' ? config.campaignId : match.refId;
     return {
       systemCode: match.systemCode,
       rewardType: match.rewardType,
@@ -175,6 +239,8 @@ export class RewardSystemResolutionService {
       unitCode: match.unitCode,
       level: match.level,
       refId: match.refId,
+      bindLevel,
+      bindRefId,
       versionNo: match.versionNo,
       status: match.status,
       // T-RR-063. Deliberately `|| null`, not `??` (proto3's `int32`/`string` defaults are always

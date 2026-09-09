@@ -294,6 +294,36 @@ describe('T-RR-011 — RewardIngestController (unit, mocked domain service)', ()
     expect(ingest).toHaveBeenCalledWith(expect.objectContaining({ tenantId: 1 }));
   });
 
+  // T-INT-046 TC-2: an empty reward_value_unit is accepted (not INVALID_ARGUMENT) — some reward
+  // kinds (PROMO_CODE/POINTS) have no fixed currency/point unit by design.
+  it('accepts an empty-string reward_value_unit, passing it through as "" (no unit for this reward kind)', async () => {
+    const ingest = jest.fn().mockResolvedValue(receivedResult);
+    const { controller, identityContext } = buildController(ingest);
+    const call = {};
+    identityContext.set(call, 1);
+
+    const response = await controller.submitRewardEntry(
+      { ...validRequest, rewardValueUnit: '' },
+      undefined,
+      call,
+    );
+
+    expect(ingest).toHaveBeenCalledWith(expect.objectContaining({ rewardValueUnit: '' }));
+    expect(response).toEqual({ rewardEntryId: 'reward-entry-1', status: 'received' });
+  });
+
+  it('accepts a request with reward_value_unit omitted entirely, passing it through as ""', async () => {
+    const ingest = jest.fn().mockResolvedValue(receivedResult);
+    const { controller, identityContext } = buildController(ingest);
+    const call = {};
+    identityContext.set(call, 1);
+    const { rewardValueUnit: _omit, ...withoutRewardValueUnit } = validRequest;
+
+    await controller.submitRewardEntry(withoutRewardValueUnit, undefined, call);
+
+    expect(ingest).toHaveBeenCalledWith(expect.objectContaining({ rewardValueUnit: '' }));
+  });
+
   it('propagates merchant_code verbatim, omitting an empty string as null', async () => {
     const ingest = jest.fn().mockResolvedValue(receivedResult);
     const { controller, identityContext } = buildController(ingest);

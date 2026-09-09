@@ -5,29 +5,39 @@
  * reduces every outcome — transport-level or in-body business rejection — to exactly one of
  * `RedemptionResult`'s three outcomes.
  *
- * **`bindLevel`/`bindRefId` mapping — a documented T-RR-031 decision, not a value this doc pins
- * down.** `04-REST-CONTRACT.md` §2's own worked example shows `bindRefId` as a portal-internal
- * numeric id (confirmed against `promo-code-service-plan/04-API-CONTRACT.md` §2: "portal-sourced
- * ids... `reward_portal`'s own numeric/varchar ids"), and *which* level (`CAMPAIGN`/`TRACKER`/
- * `COMPONENT`) a given reward's promo-code binding was actually made at is recorded only on the
- * portal's own cached feed (`campaign_config.v1.proto`'s `BoundReward.level`/`ref_id`, added by
- * `project-plan/T-047`) — a piece of data `05-PROCESSING-PIPELINE.md` §4's campaign/reward
- * resolution step (T-RR-022, not a dependency of this task and not yet done) does not thread
- * through to `ClaimedRewardEntry` today. `reward_redemption_entry` (`01-DATABASE.md` §1) itself
- * carries no bind-level/portal-ref-id column at all, and R5 forbids this service from storing a
- * portal-internal numeric id even if it did. Rather than block this task on that still-missing
- * plumbing, this connector always sends `bindLevel: 'CAMPAIGN'` and `bindRefId: entry.campaign_code`
- * — the one identifier `ClaimedRewardEntry` always carries that names the right *campaign*, even
- * though it is a code, not the portal's numeric id, and even though a reward actually bound at
- * `TRACKER`/`COMPONENT` level would legitimately fail to resolve on promo-code-service's own side
- * until that plumbing lands. `merchantId` has the identical portal-id/code mismatch (§2's example
- * shows a numeric-looking merchant id; this row only carries `merchant_code`) and is resolved the
- * same way: send the code this service actually has, coerced to `''` when `NULL`. Flagged in this
- * task's own completion report per `AGENT-PROTOCOL.md` §3 ("if you find a genuine design flaw...
- * implement to spec, flag the flaw... let the architect decide") — the real fix is threading
- * `BoundReward.level`/`ref_id` through T-RR-022's resolution step once it lands, not something
- * this connector can invent from data it was never given.
+ * **`bindLevel`/`bindRefId` mapping — fixed by T-INT-049, was a documented T-RR-031 placeholder.**
+ * `04-REST-CONTRACT.md` §2's own worked example shows `bindRefId` as a portal-internal numeric id
+ * (confirmed against `promo-code-service-plan/04-API-CONTRACT.md` §2: "portal-sourced ids...
+ * `reward_portal`'s own numeric/varchar ids"), and *which* level (`CAMPAIGN`/`TRACKER`/`COMPONENT`)
+ * a given reward's promo-code binding was actually made at is recorded only on the portal's own
+ * cached feed (`campaign_config.v1.proto`'s `BoundReward.level`/`ref_id`, added by
+ * `project-plan/T-047`). Originally (T-RR-031), `05-PROCESSING-PIPELINE.md` §4's campaign/reward
+ * resolution step (T-RR-022) did not thread that data through to `ClaimedRewardEntry`, so this
+ * connector always sent `bindLevel: 'CAMPAIGN'`/`bindRefId: entry.campaign_code` unconditionally —
+ * flagged in that task's own completion report as a known gap, later reproduced against a real,
+ * non-synthetic campaign/reward pairing by `reward-service-integration-plan/T-INT-040`'s own live
+ * run (`CONFIG_NOT_BOUND`: the real binding was keyed `bind_ref_id='529444'`, the portal's own
+ * numeric campaign id, never `'WEEKEND_PROMO_BLITZ'`) and filed as `T-INT-049`. Fixed here:
+ * `RedemptionProcessingOrchestrator` (T-RR-024, per its own T-INT-049 header note) now stamps
+ * `resolved_bind_level`/`resolved_bind_ref_id` onto the claimed entry in-memory, from
+ * `RewardSystemResolutionService.resolve()`'s own `bindLevel`/`bindRefId`
+ * (`reward-system-resolution.service.ts`'s own header — `bindRefId` is `CampaignConfigProto.
+ * campaignId` at `CAMPAIGN` level, since `BoundReward.ref_id` itself is always `0` there, and the
+ * matched `BoundReward.ref_id` at `TRACKER`/`COMPONENT` level), before ever calling this connector.
+ * `buildRequestBody` below reads those two fields and falls back to the pre-T-INT-049
+ * `CAMPAIGN`/`entry.campaign_code` guess only when they are absent (a pre-T-INT-049 test fixture
+ * that constructs a `ClaimedRewardEntry` directly, or any future caller that bypasses the
+ * orchestrator) — never a hard failure either way.
  *
+ * **`merchantId` — the identical portal-id/code mismatch, still open, NOT resolved by T-INT-049.**
+ * `04-REST-CONTRACT.md` §2's example shows a numeric-looking merchant id; this row only carries
+ * `merchant_code`, and `BoundReward` itself carries no merchant reference at all (a campaign's bound
+ * merchants live on a separate `MerchantProto[]` list, `campaign-config.client.ts`) — T-INT-049's own
+ * scope was explicitly limited to `BoundReward.level`/`ref_id`, not this. Still sends the code this
+ * service actually has, coerced to `''` when `NULL`, exactly as T-RR-031 originally did. Left as a
+ * separate, still-open item — see T-INT-049's own completion report (TC-3).
+ *
+
  * **`external_system_call_log` double-write — reported as T-RR-067, fixed there.** Implementation
  * note 5 requires this connector to write its own `external_system_call_log` row for every attempt,
  * including `SUCCESS` — still true, unchanged by that fix. `RedemptionStateMachineService
@@ -180,9 +190,13 @@ function buildRequestBody(
   return {
     correlationId: entry.correlation_id,
     tenantId: String(entry.tenant_id),
-    // See this file's own header note on the bindLevel/bindRefId mapping decision.
-    bindLevel: 'CAMPAIGN',
-    bindRefId: entry.campaign_code,
+    // T-INT-049: the real bind level/ref-id `RedemptionProcessingOrchestrator` stamped onto this
+    // entry in-memory (see this file's own header) — falls back to the pre-T-INT-049 `CAMPAIGN`/
+    // `campaign_code` guess only when absent (a caller that bypasses the orchestrator, or a
+    // pre-T-INT-049 test fixture).
+    bindLevel: entry.resolved_bind_level ?? 'CAMPAIGN',
+    bindRefId:
+      entry.resolved_bind_ref_id != null ? String(entry.resolved_bind_ref_id) : entry.campaign_code,
     customerId: decryptedCustomerId,
     merchantId: entry.merchant_code ?? '',
     // T-RR-090. Read off the already-claimed row, never re-resolved (implementation note 1) — `!=
@@ -223,8 +237,8 @@ function toRestRequestBody(request: PromoCodeGenerateRequest): Record<string, un
 /**
  * T-RR-081. Maps the already-built, REST/gRPC-shaped `PromoCodeGenerateRequest` (`buildRequestBody`
  * above) to the Kafka contract's own `data` shape (`promo-code-service-plan/02-KAFKA-CONTRACTS.md`
- * §3) — same field values throughout (this connector still always sends `bindLevel: 'CAMPAIGN'`/
- * `bindRefId: entry.campaign_code`, this file's own header note), only the wire shape differs:
+ * §3) — same field values throughout (T-INT-049: whatever `bindLevel`/`bindRefId`
+ * `buildRequestBody` above resolved, this file's own header note), only the wire shape differs:
  * `metadataJson` (a pre-serialized string, always `'{}'` today) becomes `metadata` (a parsed
  * object), and `correlationId`/`tenantId` are dropped here since the Kafka envelope already carries
  * both (§2). Falls back to `{}` if `metadataJson` were ever something `JSON.parse` rejects — never

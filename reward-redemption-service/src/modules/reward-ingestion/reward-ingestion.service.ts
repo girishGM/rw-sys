@@ -73,8 +73,15 @@ export interface IngestResult {
 }
 
 /** Every DTO field that must be a non-empty string for the DTO to be well-formed. Deliberately
- * excludes `transactionType`/`activityCode` (a documented one-of, either legitimately `null`) and
- * `merchantCode` (documented optional, `01-DATABASE.md` §1). */
+ * excludes `transactionType`/`activityCode` (a documented one-of, either legitimately `null`),
+ * `merchantCode` (documented optional, `01-DATABASE.md` §1), and — as of T-INT-046 —
+ * `rewardValueUnit`: some reward kinds (`PROMO_CODE`/`POINTS`) have no fixed currency/point unit
+ * by design, so an empty string is a well-formed value for this field, not a malformed DTO. Each
+ * of the three transport adapters (T-RR-011/012/013) already normalizes an absent/`null` unit to
+ * `''` before ever calling `ingest()`; this defensive, shared check must not re-reject what the
+ * adapters themselves now consider valid, per T-INT-046's own evidence trail (a wire payload that
+ * passed every transport's own validator was still failing here, uncaught, producing a real `500`
+ * instead of the DoD's own required `200`). */
 const REQUIRED_STRING_FIELDS: ReadonlyArray<keyof RewardEntryIngestDto> = [
   'id',
   'correlationId',
@@ -93,7 +100,6 @@ const REQUIRED_STRING_FIELDS: ReadonlyArray<keyof RewardEntryIngestDto> = [
   'rewardCode',
   'rewardCategory',
   'rewardValue',
-  'rewardValueUnit',
   'ingestionChannel',
 ];
 

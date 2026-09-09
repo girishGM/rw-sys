@@ -388,7 +388,11 @@ describe('T-RR-041 — full pipeline (real gRPC + real Kafka + real REST + real 
         );
         const sentBody = JSON.parse(requestInit.body as string) as Record<string, unknown>;
         expect(sentBody.correlationId).toBe(fixture.correlationId);
-        expect(sentBody.bindRefId).toBe(fixture.campaignCode);
+        // T-INT-049: the real bind level/ref-id `RewardSystemResolutionService.resolve()` resolved
+        // (faked here, `buildResolvedReward`'s own header) — no longer the pre-T-INT-049
+        // `campaign_code` guess.
+        expect(sentBody.bindLevel).toBe('CAMPAIGN');
+        expect(sentBody.bindRefId).toBe('529444');
 
         await backdatePastCompletionSweepGrace(migrationDb, fixture.id);
         await completionSweep.sweepOnce();

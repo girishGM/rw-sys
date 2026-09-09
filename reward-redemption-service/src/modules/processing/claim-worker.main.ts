@@ -47,6 +47,34 @@
  * context. Running this file's own `bootstrap()` for real (as any deployed instance of this process
  * does) is exactly the intended, correct behavior — only an automated *test* of it is unsafe against
  * the shared table.
+ *
+ * **T-INT-053 (retry 1 — widened scope).** The independent review of this task's first attempt
+ * found a real gap: `src/main.ts`'s own `PROMO_CODE_KAFKA_REPLY_CONSUMER_ENABLED` gate (that
+ * task's original fix) never reaches Render's actual deployed topology, because THIS file — not
+ * `src/main.ts` — is the one composition root that ever resolves `PromoCodeServiceConnector`/calls
+ * `requestAndAwaitReply()` in production (`render.yaml`'s own dedicated `worker` service runs
+ * this file; the `web` service running `src/main.ts` never sets `CLAIM_WORKER_ENABLED`, so it
+ * never constructs this DI graph at all). `startPromoCodeKafkaReplyConsumer()` below closes that
+ * gap the same "reuse the exported bootstrap, add one more `.start()` call" way `src/main.ts`'s
+ * own T-INT-053 gate already does — resolving `PromoCodeServiceKafkaClient` from the exact same
+ * `INestApplicationContext` this process already builds (never a second, independently-constructed
+ * context — the same in-memory pending-reply-registry reasoning `src/main.ts`'s own header
+ * documents in full applies identically here, since this IS the process that DI graph reasoning
+ * describes).
+ *
+ * Deliberately **not** gated behind a new env var, unlike `src/main.ts`'s own opt-in gate: this
+ * process's entire purpose is already running exactly this pipeline (`CLAIM_WORKER_ENABLED`
+ * defaults enabled here, `render.yaml`'s own note), so there is no shared, unrelated responsibility
+ * this new consumer could conflict with the way a gate on the multi-purpose `web` process protects
+ * `/health`. It IS, however, non-fatal: `startPromoCodeKafkaReplyConsumer()` catches and logs
+ * rather than throws, so an unreachable/placeholder `KAFKA_BROKERS` value (this Blueprint's own
+ * documented `sync: false` state today, since Render provisions no Kafka cluster — `render.yaml`'s
+ * own header) degrades to "Kafka-primary `rr-to-promo-code` redemptions still time out and retry,
+ * exactly as before this fix" rather than crashing the entire worker process and halting every
+ * redemption regardless of transport — the same "a transport failing to start must not take down
+ * anything else" principle `src/main.ts`'s own `attemptOptionalTransport` already established,
+ * reproduced narrowly here rather than imported from that file (a distinct, `web`-service-only
+ * composition root this file has no reason to depend on).
  */
 import 'reflect-metadata';
 import { loadDotenvFilesIntoProcessEnv } from '@/config/load-dotenv-files';
@@ -60,6 +88,7 @@ import { Module, Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import type { INestApplicationContext } from '@nestjs/common';
 import { ConfigModule } from '@/config/config.module';
+import { PromoCodeServiceKafkaClient } from '@/modules/connectors/promo-code-service-kafka.client';
 import { ClaimWorkerModule } from './claim-worker.module';
 
 @Module({
@@ -80,9 +109,43 @@ export async function createClaimWorkerContext(): Promise<INestApplicationContex
   return NestFactory.createApplicationContext(ClaimWorkerRootModule);
 }
 
+/**
+ * T-INT-053 (retry 1). Resolves `PromoCodeServiceKafkaClient` from the SAME context this process
+ * already built for the claim worker itself (this file's own header has the full "why not a
+ * second context" reasoning) and starts its shared `promo-code.generate.result.v1` reply consumer.
+ * Never throws — a failure here is logged and swallowed so it can never take down the claim
+ * worker's own poll loop, which this file's whole existence is dedicated to keeping running.
+ * Exported (not inlined into `bootstrap()`) so it can be unit-tested directly against a fake
+ * context, without needing a full `.init()`'d real application context
+ * (this file's own header explains why that is unsafe to do in an automated test).
+ */
+export async function startPromoCodeKafkaReplyConsumer(
+  context: INestApplicationContext,
+): Promise<PromoCodeServiceKafkaClient | null> {
+  try {
+    const client = context.get(PromoCodeServiceKafkaClient);
+    await client.start();
+    logger.log(
+      'promo-code.generate.result.v1 Kafka reply consumer (PromoCodeServiceKafkaClient): ' +
+        'started (claim-worker process)',
+    );
+    return client;
+  } catch (error) {
+    logger.error(
+      'promo-code.generate.result.v1 Kafka reply consumer failed to start — Kafka-primary ' +
+        'rr-to-promo-code redemptions will time out and retry exactly as before this fix, but ' +
+        'the claim worker poll loop itself keeps running unaffected (REST/gRPC-primary ' +
+        'redemptions are not impacted by this failure).',
+      error instanceof Error ? error.stack : String(error),
+    );
+    return null;
+  }
+}
+
 export async function bootstrap(): Promise<void> {
-  await createClaimWorkerContext();
+  const context = await createClaimWorkerContext();
   logger.log('Claim worker started (poll loop running via OnApplicationBootstrap)');
+  await startPromoCodeKafkaReplyConsumer(context);
 }
 
 /* istanbul ignore next -- exercised as a real process against the real local Postgres/connector

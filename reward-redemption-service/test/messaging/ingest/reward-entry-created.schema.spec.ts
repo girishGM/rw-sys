@@ -84,6 +84,34 @@ describe('validateRewardEntryCreatedMessage', () => {
     expect(result.dto.merchantCode).toBeNull();
   });
 
+  // T-INT-046 TC-3: an empty rewardValueUnit is a well-formed "no unit for this reward kind"
+  // (PROMO_CODE/POINTS), never a validation failure — normalized to '' for the DTO's own required
+  // (never-nullable) string field.
+  it('treats an empty-string rewardValueUnit as well-formed, not a validation failure', () => {
+    const result = validateRewardEntryCreatedMessage(validBody({ rewardValueUnit: '' }));
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.dto.rewardValueUnit).toBe('');
+  });
+
+  it('treats an absent rewardValueUnit as well-formed, normalized to an empty string', () => {
+    const { rewardValueUnit: _omit, ...withoutRewardValueUnit } = validBody();
+    const result = validateRewardEntryCreatedMessage(withoutRewardValueUnit);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.dto.rewardValueUnit).toBe('');
+  });
+
+  it('treats a null rewardValueUnit as well-formed, normalized to an empty string', () => {
+    const result = validateRewardEntryCreatedMessage(validBody({ rewardValueUnit: null }));
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.dto.rewardValueUnit).toBe('');
+  });
+
   it('accepts a transactionType-only message (no activityCode)', () => {
     const result = validateRewardEntryCreatedMessage(
       validBody({ activityCode: null, transactionType: 'TXN_PURCHASE' }),
@@ -134,7 +162,6 @@ describe('validateRewardEntryCreatedMessage', () => {
     'trackerComponentCode',
     'rewardCode',
     'rewardCategory',
-    'rewardValueUnit',
   ])('rejects a message missing mandatory field %s', (field) => {
     const body = validBody();
     delete body[field];

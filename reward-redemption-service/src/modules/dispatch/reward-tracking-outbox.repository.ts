@@ -39,6 +39,22 @@
  * `realtime-activity-processing-service-plan/tasks/T-RAP-062` lands (still `pending` as of this
  * task) and this service's own Wave 1 ingestion is separately extended to read them; never
  * fabricated in the meantime (T-RR-062's own implementation notes 1a/1b).
+ *
+ * **T-INT-051 extends this same file** with the fix for the poison-row FIFO-starvation defect
+ * (`reward-service-integration-plan/tasks/T-INT-051-*.md`): `OutboxPublisherService.processRowSafely`
+ * catches a row that throws *before* any dispatch attempt is even made (a decrypt failure, a
+ * `dispatchResolver.resolve` rejection) and, until this task, simply left that row `PENDING` with
+ * `attempts` untouched forever — no bound at all, so the very oldest such row(s) permanently
+ * occupied every poll cycle's `FIND_PENDING_BATCH_SQL` batch slots (this session's own live
+ * evidence: 24,307 such rows). `recordPreDispatchFailure` (below) is the new, single atomic
+ * counter-and-maybe-poison operation for exactly that path — increments `attempts`, records
+ * `last_error` for operator visibility (TC-3), and flips `status` to the new terminal
+ * `'POISONED'` value in the same statement once the caller-supplied threshold is reached.
+ * `FIND_PENDING_BATCH_SQL`'s own `WHERE o.status = 'PENDING'` already excludes any non-`'PENDING'`
+ * status, `'POISONED'` included, with no query change needed. `findPoisoned` is this task's own
+ * chosen TC-3 operator-audit mechanism — a plain, narrow read query (over a dedicated admin
+ * endpoint, which is a distinct, heavier unit of work this task's own Scope leaves to the
+ * implementer's discretion, noted in the completion report).
  */
 import { Injectable, OnModuleDestroy, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -194,6 +210,33 @@ interface OutboxPendingRowRaw {
   tenant_id: number;
 }
 
+/** T-INT-051 TC-3. The narrow shape `findPoisoned()` returns — an operator-audit read, not a
+ * dispatch-decision one, so it carries `lastError`/`updatedAt` (when it was poisoned, and why)
+ * rather than `findPendingBatch`'s own dispatch-resolution fields. */
+export interface PoisonedOutboxRow {
+  id: string;
+  rewardEntryId: string;
+  attempts: number;
+  lastError: string | null;
+  updatedAt: Date;
+}
+
+interface PoisonedOutboxRowRaw {
+  id: string;
+  reward_entry_id: string;
+  attempts: number;
+  last_error: string | null;
+  updated_at: Date;
+}
+
+/** T-INT-051. Outcome of a single `recordPreDispatchFailure` call — `attempts` is the
+ * post-increment count, `poisoned` is `true` exactly when this call's own increment pushed the
+ * row across the caller-supplied threshold (i.e. `status` is now `'POISONED'`). */
+export interface PreDispatchFailureOutcome {
+  attempts: number;
+  poisoned: boolean;
+}
+
 const ENQUEUE_SQL = `
   INSERT INTO reward_redemption.reward_tracking_dispatch_outbox (reward_entry_id, payload)
   VALUES ($1, $2)
@@ -207,6 +250,41 @@ const FIND_PENDING_BATCH_SQL = `
     JOIN reward_redemption.reward_redemption_entry e ON e.id = o.reward_entry_id
    WHERE o.status = 'PENDING'
    ORDER BY o.created_at ASC
+   LIMIT $1
+`;
+
+/**
+ * T-INT-051. One atomic increment-and-maybe-poison step for the "threw before any dispatch
+ * attempt was even made" failure path (`OutboxPublisherService.processRowSafely`'s own catch
+ * block) — deliberately a single `UPDATE ... RETURNING`, not a read-then-write pair, so a
+ * concurrent poll cycle (there is only ever one `OutboxPublisherService` instance polling in this
+ * service today, but this repository makes no such assumption for its own callers) can never
+ * observe or produce a torn intermediate state between the increment and the terminal-status
+ * flip. `status = CASE WHEN attempts + 1 >= $3 THEN 'POISONED' ELSE status END` reads `attempts`
+ * pre-increment (the column's value at the time this statement starts), so `+ 1` accounts for the
+ * increment this same statement is about to apply — the returned `attempts` (already
+ * post-increment, per the `SET attempts = attempts + 1` clause) and the returned `status` are
+ * therefore always consistent with each other.
+ */
+const RECORD_PRE_DISPATCH_FAILURE_SQL = `
+  UPDATE reward_redemption.reward_tracking_dispatch_outbox
+     SET attempts = attempts + 1,
+         last_error = $2,
+         status = CASE WHEN attempts + 1 >= $3 THEN 'POISONED' ELSE status END,
+         updated_at = now()
+   WHERE id = $1
+  RETURNING attempts, status
+`;
+
+/** TC-3's own operator-audit read: every currently-`'POISONED'` row, most-recently-poisoned
+ * first, so an operator can see (and, outside this task's own scope, act on) exactly which rows
+ * this bounding mechanism has permanently excluded from `findPendingBatch` and why
+ * (`last_error`). */
+const FIND_POISONED_SQL = `
+  SELECT id, reward_entry_id, attempts, last_error, updated_at
+    FROM reward_redemption.reward_tracking_dispatch_outbox
+   WHERE status = 'POISONED'
+   ORDER BY updated_at DESC
    LIMIT $1
 `;
 
@@ -307,6 +385,46 @@ export class RewardTrackingOutboxRepository implements OnModuleDestroy {
         WHERE id = $1`,
       [id],
     );
+  }
+
+  /**
+   * T-INT-051. Called only from `OutboxPublisherService.processRowSafely`'s own catch block — the
+   * "threw before any dispatch attempt was even made" path (`processRowSafely`'s own header),
+   * never from the normal per-channel-attempt tier-selection flow (`incrementAttempts` remains the
+   * right call there, unchanged). `maxAttemptsBeforePoison` is resolved by the caller once per
+   * poll cycle (`dispatch.config.ts`'s own `resolveOutboxMaxPreDispatchFailures`), not by this
+   * repository, which stays a thin, policy-free data-access layer.
+   */
+  async recordPreDispatchFailure(
+    id: string,
+    lastError: string,
+    maxAttemptsBeforePoison: number,
+  ): Promise<PreDispatchFailureOutcome> {
+    const result = await this.pool.query<{ attempts: number; status: string }>(
+      RECORD_PRE_DISPATCH_FAILURE_SQL,
+      [id, lastError, maxAttemptsBeforePoison],
+    );
+    const row = result.rows[0];
+    if (row === undefined) {
+      throw new Error(
+        `reward_tracking_dispatch_outbox row "${id}" not found while recording a ` +
+          'pre-dispatch failure (structurally unreachable — the caller just read this id off ' +
+          'findPendingBatch).',
+      );
+    }
+    return { attempts: row.attempts, poisoned: row.status === 'POISONED' };
+  }
+
+  /** TC-3. Operator-audit read — see this file's own `FIND_POISONED_SQL` header. */
+  async findPoisoned(limit = 100): Promise<PoisonedOutboxRow[]> {
+    const result = await this.pool.query<PoisonedOutboxRowRaw>(FIND_POISONED_SQL, [limit]);
+    return result.rows.map((row) => ({
+      id: row.id,
+      rewardEntryId: row.reward_entry_id,
+      attempts: row.attempts,
+      lastError: row.last_error,
+      updatedAt: row.updated_at,
+    }));
   }
 
   async onModuleDestroy(): Promise<void> {

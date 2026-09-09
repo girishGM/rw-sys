@@ -114,6 +114,9 @@ function buildFakes(pendingRows: OutboxPendingRow[], resolved: ResolvedDispatchC
       incrementAttempts: jest.fn().mockResolvedValue(undefined),
       markPublished: jest.fn().mockResolvedValue(undefined),
       markFailed: jest.fn().mockResolvedValue(undefined),
+      // T-INT-051: never exercised by this suite (no pre-dispatch throw is ever driven here), but
+      // present so the fake satisfies `OutboxPublisherService`'s own real dependency shape.
+      recordPreDispatchFailure: jest.fn().mockResolvedValue({ attempts: 1, poisoned: false }),
     } as unknown as Fakes['outboxRepository'],
     dispatchResolver: {
       resolve: jest.fn().mockResolvedValue(resolved),
@@ -136,6 +139,11 @@ function buildFakes(pendingRows: OutboxPendingRow[], resolved: ResolvedDispatchC
           return THRESHOLD;
         }
         if (key === 'dispatch.outbox.pollIntervalSeconds') {
+          return 5;
+        }
+        // T-INT-051: resolved unconditionally once per `doRunOnce()` cycle (same as the two keys
+        // above), even though this suite never drives a pre-dispatch throw.
+        if (key === 'dispatch.outbox.maxPreDispatchFailures') {
           return 5;
         }
         throw new Error(`unexpected service_config key "${key}" resolved in this test`);

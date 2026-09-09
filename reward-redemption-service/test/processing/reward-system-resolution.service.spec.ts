@@ -108,6 +108,11 @@ describe('T-RR-022 — RewardSystemResolutionService', () => {
       unitCode: 'VOUCHER_10',
       level: 'campaign',
       refId: 0,
+      // T-INT-049: `bindLevel`/`bindRefId` -- `bindRefId` here is `config.campaignId` (1, this
+      // file's own `buildConfig()` default), NOT `refId` (0) -- see the dedicated T-INT-049
+      // describe block below for the case that actually distinguishes the two.
+      bindLevel: 'CAMPAIGN',
+      bindRefId: 1,
       versionNo: 1,
       status: 'active',
       expiryValue: 15,
@@ -290,5 +295,134 @@ describe('T-RR-022 — RewardSystemResolutionService', () => {
         rewardCode: 'NOT_A_REAL_REWARD',
       }),
     ).rejects.toThrow(RewardNotFoundInCampaignConfigError);
+  });
+
+  describe('T-INT-049 — bindLevel/bindRefId (the real identifier promo-code-service is keyed by)', () => {
+    // TC-1 of T-INT-049's own task file: reproduces T-INT-040's own live evidence — a CAMPAIGN-level
+    // BoundReward's own `ref_id` is always `0` (the proto's own convention), but the real portal
+    // binding was made against the numeric campaign id (`529444` in the live evidence, `CampaignConfigProto.campaignId`
+    // here), never `0` and never the campaign *code*.
+    it('TC-1: campaign-level BoundReward -> bindRefId is config.campaignId, NOT BoundReward.ref_id (always 0) and NOT the campaign code', async () => {
+      const config = buildConfig({
+        campaignId: 529_444,
+        campaignCode: 'WEEKEND_PROMO_BLITZ',
+        rewards: [
+          {
+            rewardId: 10,
+            rewardVersionId: 1,
+            versionNo: 1,
+            systemCode: 'PROMO_CODE_SERVICE',
+            rewardType: 'VOUCHER',
+            deliveryMode: 'API',
+            policiesJson: '{}',
+            unitType: 'voucher',
+            unitCode: 'PROMO_VOUCHER',
+            level: 'campaign',
+            refId: 0,
+            status: 'active',
+            expiryValue: 0,
+            expiryUnit: '',
+          },
+        ],
+      });
+      const { service } = build(config);
+
+      const result = await service.resolve({
+        tenantId: 1,
+        campaignCode: 'WEEKEND_PROMO_BLITZ',
+        trackerCode: 'TRK1',
+        trackerComponentCode: 'COMP1',
+        rewardCode: 'PROMO_CODE_SERVICE',
+      });
+
+      expect(result.level).toBe('campaign');
+      expect(result.refId).toBe(0);
+      expect(result.bindLevel).toBe('CAMPAIGN');
+      expect(result.bindRefId).toBe(529_444);
+    });
+
+    // TC-2 of T-INT-049's own task file: a real TRACKER-level binding (T-INT-040's own evidence
+    // dump names `bind_level='TRACKER', bind_ref_id='12722'`) -- bindRefId must equal the feed's own
+    // numeric trackerId (identical to `refId` at this level), never the campaign's own numeric id.
+    it('TC-2: tracker-level BoundReward -> bindLevel/bindRefId match that level/id, not always CAMPAIGN/campaignId', async () => {
+      const config = buildConfig({
+        campaignId: 529_444,
+        rewards: [
+          {
+            rewardId: 11,
+            rewardVersionId: 1,
+            versionNo: 1,
+            systemCode: 'CORE_BANKING',
+            rewardType: 'CASHBACK',
+            deliveryMode: 'API',
+            policiesJson: '{}',
+            unitType: 'currency',
+            unitCode: 'MYR',
+            level: 'tracker',
+            refId: 12_722,
+            status: 'active',
+            expiryValue: 0,
+            expiryUnit: '',
+          },
+        ],
+        trackers: [
+          {
+            trackerId: 12_722,
+            trackerCode: 'TRK1',
+            name: 'Tracker One',
+            completionLogic: 'all',
+            completionThreshold: 1,
+            status: 'active',
+            components: [],
+          },
+        ],
+      });
+      const { service } = build(config);
+
+      const result = await service.resolve({
+        tenantId: 1,
+        campaignCode: 'CAMP1',
+        trackerCode: 'TRK1',
+        trackerComponentCode: '',
+        rewardCode: 'CORE_BANKING',
+      });
+
+      expect(result.bindLevel).toBe('TRACKER');
+      expect(result.bindRefId).toBe(12_722);
+    });
+
+    it("component-level BoundReward -> bindLevel/bindRefId are COMPONENT/the feed's own componentId", async () => {
+      const config = buildConfig({ campaignId: 529_444 });
+      config.rewards = [
+        {
+          rewardId: 12,
+          rewardVersionId: 1,
+          versionNo: 1,
+          systemCode: 'POINTS_LEDGER',
+          rewardType: 'POINTS',
+          deliveryMode: 'INTERNAL',
+          policiesJson: '{}',
+          unitType: 'points',
+          unitCode: 'PTS',
+          level: 'component',
+          refId: 1000,
+          status: 'active',
+          expiryValue: 0,
+          expiryUnit: '',
+        },
+      ];
+      const { service } = build(config);
+
+      const result = await service.resolve({
+        tenantId: 1,
+        campaignCode: 'CAMP1',
+        trackerCode: 'TRK1',
+        trackerComponentCode: 'COMP1',
+        rewardCode: 'POINTS_LEDGER',
+      });
+
+      expect(result.bindLevel).toBe('COMPONENT');
+      expect(result.bindRefId).toBe(1000);
+    });
   });
 });

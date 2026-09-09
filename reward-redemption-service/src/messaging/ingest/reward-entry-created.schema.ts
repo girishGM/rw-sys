@@ -168,10 +168,12 @@ export function validateRewardEntryCreatedMessage(payload: unknown): SchemaValid
     };
   }
 
-  const rewardValueUnit = body.rewardValueUnit;
-  if (!isNonEmptyString(rewardValueUnit)) {
-    return { ok: false, reason: 'rewardValueUnit is required' };
-  }
+  // T-INT-046: some reward kinds (`PROMO_CODE`/`POINTS`) have no fixed currency/point unit by
+  // design — `null`/absent/`''` all mean "no unit for this reward kind", not malformed, the same
+  // tolerance `optionalString` above already gives `merchantCode`. Unlike `merchantCode`, the DTO
+  // field itself is a required `string` (never nullable), so this normalizes to `''` rather than
+  // `null`. Never invent a placeholder unit string.
+  const rewardValueUnit = isNonEmptyString(body.rewardValueUnit) ? body.rewardValueUnit : '';
 
   const rawRewardEntryDate = body.rewardEntryDate;
   if (!isNonEmptyString(rawRewardEntryDate)) {

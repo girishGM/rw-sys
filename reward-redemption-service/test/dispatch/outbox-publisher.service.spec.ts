@@ -42,6 +42,8 @@ const encryption = new EncryptionService({
 });
 
 const THRESHOLD = 3;
+// T-INT-051.
+const PRE_DISPATCH_POISON_THRESHOLD = 3;
 const AVAILABLE_KAFKA_PRIMARY: ResolvedDispatchChannel = {
   primaryChannel: 'KAFKA',
   fallbackChannel: 'REST',
@@ -105,6 +107,8 @@ interface Fakes {
     incrementAttempts: jest.Mock;
     markPublished: jest.Mock;
     markFailed: jest.Mock;
+    // T-INT-051.
+    recordPreDispatchFailure: jest.Mock;
   };
   dispatchResolver: DispatchChannelResolverService & { resolve: jest.Mock };
   kafkaProducer: RewardTrackingKafkaProducerClient & { publish: jest.Mock };
@@ -118,12 +122,24 @@ function buildFakes(
   pendingRows: OutboxPendingRow[],
   resolved: ResolvedDispatchChannel = AVAILABLE_KAFKA_PRIMARY,
 ): Fakes {
+  // T-INT-051: mirrors the real repository's own stateful, per-row increment-and-maybe-poison
+  // behaviour (`recordPreDispatchFailure`) closely enough for these fakes-only unit tests to drive
+  // a row across the poison threshold over several `runOnce()` calls, exactly like the real
+  // `attempts` column does across real poll cycles.
+  const preDispatchFailureCounts = new Map<string, number>();
   return {
     outboxRepository: {
       findPendingBatch: jest.fn().mockResolvedValue(pendingRows),
       incrementAttempts: jest.fn().mockResolvedValue(undefined),
       markPublished: jest.fn().mockResolvedValue(undefined),
       markFailed: jest.fn().mockResolvedValue(undefined),
+      recordPreDispatchFailure: jest.fn(
+        async (id: string, _lastError: string, maxAttemptsBeforePoison: number) => {
+          const attempts = (preDispatchFailureCounts.get(id) ?? 0) + 1;
+          preDispatchFailureCounts.set(id, attempts);
+          return { attempts, poisoned: attempts >= maxAttemptsBeforePoison };
+        },
+      ),
     } as unknown as Fakes['outboxRepository'],
     dispatchResolver: {
       resolve: jest.fn().mockResolvedValue(resolved),
@@ -147,6 +163,10 @@ function buildFakes(
         }
         if (key === 'dispatch.outbox.pollIntervalSeconds') {
           return 5;
+        }
+        // T-INT-051.
+        if (key === 'dispatch.outbox.maxPreDispatchFailures') {
+          return PRE_DISPATCH_POISON_THRESHOLD;
         }
         throw new Error(`unexpected service_config key "${key}" resolved in this test`);
       }) as unknown as DispatchServiceConfigResolver['resolve'],
@@ -513,12 +533,22 @@ describe('T-RR-034/T-RR-035 — OutboxPublisherService', () => {
       expect(fakes.kafkaProducer.publish.mock.calls[0][1]).toBe('CUST-HEALTHY');
       expect(fakes.outboxRepository.markPublished).toHaveBeenCalledWith('row-healthy');
 
-      // The poisoned row itself is left exactly as `findPendingBatch` found it — this catch makes
-      // no guess about whether the failure is permanent (implementation note in
-      // `outbox-publisher.service.ts`'s own `processRowSafely` header).
+      // The poisoned row itself never reaches the normal tier-selection flow at all — this catch
+      // makes no guess about whether the failure is permanent (implementation note in
+      // `outbox-publisher.service.ts`'s own `processRowSafely` header); it only ever calls
+      // `recordPreDispatchFailure` (T-INT-051), never `incrementAttempts`/`markFailed`, which
+      // remain reserved for the normal per-channel-attempt path.
       expect(fakes.outboxRepository.markPublished).not.toHaveBeenCalledWith('row-poisoned');
       expect(fakes.outboxRepository.markFailed).not.toHaveBeenCalledWith('row-poisoned');
       expect(fakes.outboxRepository.incrementAttempts).not.toHaveBeenCalledWith('row-poisoned');
+      // T-INT-051: this cycle's own single failure is recorded (below the poison threshold, so
+      // this row alone stays eligible for a later poll — see the dedicated T-INT-051 suite below
+      // for the multi-cycle, threshold-crossing case).
+      expect(fakes.outboxRepository.recordPreDispatchFailure).toHaveBeenCalledWith(
+        'row-poisoned',
+        expect.stringContaining('Malformed ciphertext'),
+        PRE_DISPATCH_POISON_THRESHOLD,
+      );
       expect(fakes.retryRepository.create).not.toHaveBeenCalled();
 
       // Logged clearly (row id + reward entry id), never silently swallowed.
@@ -558,6 +588,129 @@ describe('T-RR-034/T-RR-035 — OutboxPublisherService', () => {
 
       expect(fakes.outboxRepository.incrementAttempts).toHaveBeenCalledWith('outbox-row-1');
       expect(fakes.outboxRepository.markPublished).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('T-INT-051: a permanently-poisoned row is bounded and no longer starves the FIFO batch forever', () => {
+    it('TC-1: a row that throws on every cycle is poisoned once it reaches the configured threshold, and a genuinely dispatchable row queued behind it is no longer starved', async () => {
+      const poisoned = fakePendingRow({ id: 'row-poisoned', rewardEntryId: 'entry-poisoned' });
+      poisoned.payload.customerIdEncrypted = 'ciphertext-placeholder';
+      const fakes = buildFakes([poisoned]);
+      // TC-3: `DispatchMetricsService` is real, not faked — same "real collaborator for
+      // observable-state assertions" discipline this spec file's own header already documents —
+      // so the poisoning outcome below is checked against real counter state, not a mock call.
+      const metrics = new DispatchMetricsService();
+      const service = buildService(fakes, metrics);
+
+      // Drive PRE_DISPATCH_POISON_THRESHOLD consecutive poll cycles — the same fakes object (and
+      // therefore the same stateful `recordPreDispatchFailure` counter map) is reused across all
+      // of them, exactly like the real `attempts` column persisting across real poll cycles.
+      for (let cycle = 1; cycle <= PRE_DISPATCH_POISON_THRESHOLD; cycle += 1) {
+        await service.runOnce();
+      }
+
+      expect(fakes.outboxRepository.recordPreDispatchFailure).toHaveBeenCalledTimes(
+        PRE_DISPATCH_POISON_THRESHOLD,
+      );
+      const lastCall =
+        fakes.outboxRepository.recordPreDispatchFailure.mock.results[
+          PRE_DISPATCH_POISON_THRESHOLD - 1
+        ];
+      // The fake mirrors the real repository's own contract: once `attempts` reaches the
+      // threshold, `poisoned: true` is reported back to the caller.
+      await expect(lastCall.value).resolves.toEqual({
+        attempts: PRE_DISPATCH_POISON_THRESHOLD,
+        poisoned: true,
+      });
+      // TC-3: this task's own chosen operator-audit mechanism (alongside
+      // `RewardTrackingOutboxRepository.findPoisoned()`) — a real, observable counter value, not a
+      // change-detector on an internal call.
+      expect(metrics.getPoisonedOutboxRowCount()).toBe(1);
+
+      // Now prove the actual starvation fix: a fresh real row enqueued "behind" the
+      // already-poisoned one (this session's own reproduction: the poisoned row must never
+      // reappear in `findPendingBatch`, freeing every real row queued behind it). Simulate the
+      // next poll cycle's `findPendingBatch` result as the real repository would now return it —
+      // the poisoned row excluded (its status is no longer `'PENDING'`), only the healthy row
+      // present.
+      const healthy = fakePendingRow({
+        id: 'row-healthy-after-poison',
+        rewardEntryId: 'entry-healthy-after-poison',
+        __customerId: 'CUST-AFTER-POISON',
+      });
+      fakes.outboxRepository.findPendingBatch.mockResolvedValueOnce([healthy]);
+      fakes.kafkaProducer.publish.mockResolvedValue(undefined);
+
+      await service.runOnce();
+
+      // The real row dispatches on this very next poll cycle — no longer starved behind the
+      // permanently-broken row, which this cycle's `findPendingBatch` no longer even returns.
+      expect(fakes.kafkaProducer.publish).toHaveBeenCalledTimes(1);
+      expect(fakes.kafkaProducer.publish.mock.calls[0][1]).toBe('CUST-AFTER-POISON');
+      expect(fakes.outboxRepository.markPublished).toHaveBeenCalledWith('row-healthy-after-poison');
+      // The poisoned row was not attempted again once it stopped being returned by
+      // findPendingBatch — its own recordPreDispatchFailure call count is unchanged from before
+      // this last cycle.
+      expect(fakes.outboxRepository.recordPreDispatchFailure).toHaveBeenCalledTimes(
+        PRE_DISPATCH_POISON_THRESHOLD,
+      );
+    });
+
+    it('TC-2: a row that fails once (transient) then succeeds on a later attempt, before the threshold, is dispatched normally — the pre-dispatch failure counter never poisons it', async () => {
+      const row = fakePendingRow({ id: 'row-transient', rewardEntryId: 'entry-transient' });
+      row.payload.customerIdEncrypted = 'ciphertext-placeholder';
+      const fakes = buildFakes([row]);
+      const service = buildService(fakes);
+
+      // First cycle: decrypt throws (simulated by the malformed ciphertext above) — one
+      // pre-dispatch failure recorded, still below PRE_DISPATCH_POISON_THRESHOLD, row stays
+      // PENDING.
+      await service.runOnce();
+      expect(fakes.outboxRepository.recordPreDispatchFailure).toHaveBeenCalledTimes(1);
+
+      // Second cycle: the row is "fixed" (findPendingBatch now returns it with real ciphertext) —
+      // the transient failure never recurs, the row dispatches successfully, and no further
+      // pre-dispatch failure is ever recorded for it.
+      const fixedRow = fakePendingRow({
+        id: 'row-transient',
+        rewardEntryId: 'entry-transient',
+        __customerId: 'CUST-FIXED',
+      });
+      fakes.outboxRepository.findPendingBatch.mockResolvedValueOnce([fixedRow]);
+      fakes.kafkaProducer.publish.mockResolvedValue(undefined);
+
+      await service.runOnce();
+
+      expect(fakes.kafkaProducer.publish).toHaveBeenCalledTimes(1);
+      expect(fakes.outboxRepository.markPublished).toHaveBeenCalledWith('row-transient');
+      // Still only the one pre-dispatch failure ever recorded — never poisoned.
+      expect(fakes.outboxRepository.recordPreDispatchFailure).toHaveBeenCalledTimes(1);
+    });
+
+    it('TC-3: the maxPreDispatchFailures threshold is resolved via service_config, once per poll cycle, and passed through to every row in that cycle', async () => {
+      const rowA = fakePendingRow({ id: 'row-a-poison', rewardEntryId: 'entry-a-poison' });
+      rowA.payload.customerIdEncrypted = 'ciphertext-placeholder';
+      const rowB = fakePendingRow({ id: 'row-b-poison', rewardEntryId: 'entry-b-poison' });
+      rowB.payload.customerIdEncrypted = 'ciphertext-placeholder';
+      const fakes = buildFakes([rowA, rowB]);
+      const service = buildService(fakes);
+
+      await service.runOnce();
+
+      expect(fakes.configResolver.resolve).toHaveBeenCalledWith(
+        'dispatch.outbox.maxPreDispatchFailures',
+        'int',
+      );
+      expect(fakes.outboxRepository.recordPreDispatchFailure).toHaveBeenCalledWith(
+        'row-a-poison',
+        expect.any(String),
+        PRE_DISPATCH_POISON_THRESHOLD,
+      );
+      expect(fakes.outboxRepository.recordPreDispatchFailure).toHaveBeenCalledWith(
+        'row-b-poison',
+        expect.any(String),
+        PRE_DISPATCH_POISON_THRESHOLD,
+      );
     });
   });
 });

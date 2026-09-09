@@ -322,7 +322,19 @@ export function buildCoreBankingConnectorConfig(
   };
 }
 
-export function buildResolvedReward(systemCode: string): ResolvedRewardSystem {
+/**
+ * T-INT-049 addition: `bindLevel`/`bindRefId` default to a fixed, realistic-looking `CAMPAIGN`-level
+ * numeric portal id (this harness fakes `RewardSystemResolutionService.resolve()` wholesale — this
+ * file's own header — so there is no real `CampaignConfigProto.campaignId` to read here) rather than
+ * left absent, so every caller of `buildRealPipeline` exercises the real, fixed T-INT-049 connector
+ * behaviour (send the resolved numeric id) by default, not the pre-T-INT-049 fallback. `overrides`
+ * lets a caller override any field, including these two, e.g. to exercise a `TRACKER`/`COMPONENT`
+ * bind.
+ */
+export function buildResolvedReward(
+  systemCode: string,
+  overrides: Partial<ResolvedRewardSystem> = {},
+): ResolvedRewardSystem {
   return {
     systemCode,
     rewardType: 'CASHBACK',
@@ -331,8 +343,11 @@ export function buildResolvedReward(systemCode: string): ResolvedRewardSystem {
     unitCode: 'TRR041_UNIT',
     level: 'campaign',
     refId: 0,
+    bindLevel: 'CAMPAIGN',
+    bindRefId: 529_444,
     versionNo: 1,
     status: 'active',
+    ...overrides,
   };
 }
 

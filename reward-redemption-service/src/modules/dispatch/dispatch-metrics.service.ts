@@ -33,6 +33,16 @@ export type DispatchTier = 'kafka' | 'rest' | 'grpc' | 'retry_table';
 export class DispatchMetricsService {
   private readonly counts = new Map<DispatchTier, number>();
 
+  /**
+   * T-INT-051 TC-3. A second, standalone counter (not a `DispatchTier` value — poisoning a row is
+   * not a delivery outcome on any tier, it is the outcome of *never* reaching tier selection at
+   * all) for `reward_tracking_dispatch_outbox` rows moved to the terminal `'POISONED'` status by
+   * `RewardTrackingOutboxRepository.recordPreDispatchFailure`. One of this task's own two
+   * operator-audit mechanisms (the other is `findPoisoned()`); see that repository's own header
+   * for why an admin endpoint was left out of this task's scope.
+   */
+  private poisonedOutboxRowCount = 0;
+
   /** Increment `reward_tracking_dispatch_tier_total{tier}` — call only on a genuinely successful
    * dispatch (implementation note 7), never on a failure path. */
   incrementDispatchTier(tier: DispatchTier): void {
@@ -43,5 +53,16 @@ export class DispatchMetricsService {
    * incremented. */
   getDispatchTierCount(tier: DispatchTier): number {
     return this.counts.get(tier) ?? 0;
+  }
+
+  /** T-INT-051. Call exactly once per row the very moment `recordPreDispatchFailure` reports
+   * `poisoned: true` for it — never on every retried-but-not-yet-poisoned pre-dispatch failure. */
+  incrementPoisonedOutboxRow(): void {
+    this.poisonedOutboxRowCount += 1;
+  }
+
+  /** T-INT-051 TC-3. Test/observability accessor for the poisoned-row count above. */
+  getPoisonedOutboxRowCount(): number {
+    return this.poisonedOutboxRowCount;
   }
 }

@@ -83,6 +83,20 @@
  * error, not `buildOutboxPayload`'s generic one) for any real caller that reaches this step
  * without it.
  *
+ * **T-INT-049 (defect fix).** `resolvedReward` was already resolved with real `bindLevel`/`bindRefId`
+ * (`RewardSystemResolutionService`, own header) but that data was discarded before reaching
+ * `connector.redeem()` — `PromoCodeServiceConnector` had no way to see it, and always guessed
+ * `CAMPAIGN`/`entry.campaign_code` instead (that connector's own header). This orchestrator is the
+ * one place both `entry` and `resolvedReward` are simultaneously in scope, so it is the natural
+ * (and, per this task's own "Files owned" note on `reward-system-resolution.service.ts`/
+ * `campaign-config.client.ts`, the only practical) place to bridge them: immediately before calling
+ * `connector.redeem()`, this method now builds a shallow-cloned entry that additionally carries
+ * `resolved_bind_level`/`resolved_bind_ref_id` (`reward-redemption-entry.model.ts`'s own header —
+ * in-memory only, never persisted) from `resolvedReward.bindLevel`/`bindRefId`, and passes *that*
+ * object to the connector instead of the bare claimed/enriched `entry`. Every other reference to
+ * `entry` in this method (the direct `-> completed` path, both state-machine transition calls) is
+ * unaffected — only the object actually handed to `connector.redeem()` changes shape.
+ *
  * **T-RR-067 (defect fix).** `RedemptionStateMachineService.markDispatchedExternal`
  * (`redemption-state-machine.service.ts`) used to insert its own `external_system_call_log` row
  * for the `SUCCESS` branch below, using a thinner `request_summary` this orchestrator built itself.
@@ -194,11 +208,21 @@ export class RedemptionProcessingOrchestrator {
     // = 3 means the third retry") and `05-PROCESSING-PIPELINE.md` §7's `total_attempts` field.
     const attemptNumber = entry.retry_count + 1;
 
+    // T-INT-049: stamp the resolved real bind level/ref-id onto a shallow clone of `entry` — never
+    // mutating `entry` itself, and never persisted (`reward-redemption-entry.model.ts`'s own header)
+    // — so `connector.redeem()` can send the actual portal-bound identifier instead of always
+    // guessing `CAMPAIGN`/`entry.campaign_code` (this file's own header note above).
+    const entryForConnector: RewardRedemptionEntryRow = {
+      ...entry,
+      resolved_bind_level: resolvedReward.bindLevel ?? null,
+      resolved_bind_ref_id: resolvedReward.bindRefId ?? null,
+    };
+
     // `05-PROCESSING-PIPELINE.md` §3/§8's emphatic rule: no transaction or advisory lock is open
     // across this call. Everything above this line is a cached lookup (no DB write of its own);
     // everything below opens its own fresh, short transaction (inside the state-machine methods
     // this orchestrator calls into) only after this call has already resolved (TC-6).
-    const result: RedemptionResult = await connector.redeem(entry, connectorConfig);
+    const result: RedemptionResult = await connector.redeem(entryForConnector, connectorConfig);
 
     if (result.outcome === 'SUCCESS') {
       // T-RR-067 (defect fix): no `attemptNumber`/`requestSummary`/`responseSummary`/`latencyMs`

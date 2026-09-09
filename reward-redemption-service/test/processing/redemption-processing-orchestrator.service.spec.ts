@@ -268,6 +268,50 @@ describe('T-RR-024 — RedemptionProcessingOrchestrator', () => {
     expect(metrics.getCounterValue('reward_redemptions_failed_total')).toBe(0);
   });
 
+  it('T-INT-049: connector.redeem is called with the resolved bindLevel/bindRefId stamped onto the entry, in-memory only', async () => {
+    const { orchestrator, resolutionService, connector } = buildHarness();
+    resolutionService.resolve.mockResolvedValue(
+      buildResolvedReward({ bindLevel: 'TRACKER', bindRefId: 12_722 }),
+    );
+    connector.redeem.mockResolvedValue({
+      outcome: 'SUCCESS',
+      externalReferenceId: 'PROMO-ABC123',
+      responseSummary: { status: 'SUCCESS' },
+    });
+    const entry = buildEntry({ retry_count: 0 });
+
+    await orchestrator.processClaimedEntry(entry);
+
+    expect(connector.redeem).toHaveBeenCalledTimes(1);
+    const [connectorCallEntry] = connector.redeem.mock.calls[0] as [RewardRedemptionEntryRow];
+    expect(connectorCallEntry.resolved_bind_level).toBe('TRACKER');
+    expect(connectorCallEntry.resolved_bind_ref_id).toBe(12_722);
+    // Never mutates the row this method itself returns/uses downstream — only the object handed to
+    // the connector carries the stamped fields.
+    expect(entry.resolved_bind_level).toBeUndefined();
+  });
+
+  it('T-INT-049: when resolutionService resolves no bindLevel/bindRefId (a pre-T-INT-049 fixture), the connector receives null for both, never undefined-vs-absent ambiguity', async () => {
+    const { orchestrator, resolutionService, connector } = buildHarness();
+    const {
+      bindLevel: _bindLevel,
+      bindRefId: _bindRefId,
+      ...withoutBindFields
+    } = buildResolvedReward();
+    resolutionService.resolve.mockResolvedValue(withoutBindFields);
+    connector.redeem.mockResolvedValue({
+      outcome: 'SUCCESS',
+      externalReferenceId: 'PROMO-ABC123',
+      responseSummary: { status: 'SUCCESS' },
+    });
+
+    await orchestrator.processClaimedEntry(buildEntry({ retry_count: 0 }));
+
+    const [connectorCallEntry] = connector.redeem.mock.calls[0] as [RewardRedemptionEntryRow];
+    expect(connectorCallEntry.resolved_bind_level).toBeNull();
+    expect(connectorCallEntry.resolved_bind_ref_id).toBeNull();
+  });
+
   it('TC-2: no active connector config resolves -> markCompletedDirect directly, connector never called', async () => {
     const { orchestrator, configResolver, connectorRegistry, stateMachine, connector, metrics } =
       buildHarness();

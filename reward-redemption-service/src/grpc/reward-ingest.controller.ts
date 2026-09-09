@@ -172,7 +172,12 @@ export class RewardIngestController {
     if (!isValidDecimalString(rewardValue)) {
       invalidArgument(`reward_value "${rewardValue}" is not a valid decimal number`);
     }
-    const rewardValueUnit = requireNonEmpty(data.rewardValueUnit, 'reward_value_unit');
+    // T-INT-046: some reward kinds (`PROMO_CODE`/`POINTS`) have no fixed currency/point unit by
+    // design — proto3's own "empty means absent" convention (the same one already used for
+    // `transaction_type`/`activity_code`/`merchant_code` above) applies here too, not
+    // `requireNonEmpty`. Never invent a placeholder unit string; `''`/absent both pass through as
+    // `''`.
+    const rewardValueUnit = data.rewardValueUnit ?? '';
 
     const rawRewardEntryDate = requireNonEmpty(data.rewardEntryDate, 'reward_entry_date');
     const rewardEntryDate = parseIsoDateWithOffset(rawRewardEntryDate);

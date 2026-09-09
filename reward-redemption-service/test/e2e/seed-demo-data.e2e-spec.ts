@@ -19,10 +19,38 @@
  * like `db:migrate` against an already-migrated schema).
  */
 import 'reflect-metadata';
+import type { ConfigService } from '@nestjs/config';
 import { Sequelize } from 'sequelize-typescript';
 import { QueryTypes } from 'sequelize';
 import { createMigrationConnection } from '@/database/migration-connection';
 import { createSeedMigrator } from '@/database/seeds/seed-migrator';
+import type { Config } from '@/config/config.schema';
+import { ExternalRewardSystemConfigRepository } from '@/modules/tenant-schema-cache/external-reward-system-config.repository';
+import { ExternalRewardSystemConfigCache } from '@/modules/tenant-schema-cache/external-reward-system-config.cache';
+import { ExternalRewardSystemConfigResolver } from '@/modules/reward-system-config/external-reward-system-config.resolver';
+import { ServiceConfigRepository } from '@/modules/service-config/service-config.repository';
+import { ServiceConfigResolverService } from '@/modules/service-config/service-config-resolver.service';
+import { ServiceConfigCache } from '@/modules/tenant-schema-cache/service-config.cache';
+
+/** Same substitution idiom as `campaign-config-ttl-seed.migration.spec.ts`'s own
+ * `realDbConfigService()` — a minimal, real (non-mocked) `ConfigService` stand-in carrying only
+ * the `rr_app` least-privilege runtime credentials `ExternalRewardSystemConfigRepository`/
+ * `ServiceConfigRepository` themselves read, so this file's own T-INT-048 test below constructs
+ * and exercises the *actual* production resolver classes against the real seeded row, not a
+ * fixture standing in for them. */
+function realDbConfigService(): ConfigService<Config, true> {
+  const values: Partial<Config> = {
+    DB_HOST: process.env.DB_HOST,
+    DB_PORT: Number(process.env.DB_PORT),
+    DB_NAME: process.env.DB_NAME,
+    DB_SSL: process.env.DB_SSL === 'true',
+    DB_APP_USERNAME: process.env.DB_APP_USERNAME,
+    DB_APP_PASSWORD: process.env.DB_APP_PASSWORD,
+  } as Partial<Config>;
+  return {
+    get: ((key: keyof Config) => values[key]) as ConfigService<Config, true>['get'],
+  } as ConfigService<Config, true>;
+}
 
 describe('T-RR-046 — demo/seed data (src/database/seeds/**)', () => {
   let sequelize: Sequelize;
@@ -73,6 +101,9 @@ describe('T-RR-046 — demo/seed data (src/database/seeds/**)', () => {
     // tenant code shaped like this plan's own design-doc examples, not a generic literal.
     expect(tenant.tenant_code).not.toMatch(/^test-tenant|^foo$/i);
 
+    // T-INT-048: resolution is keyed by the reward's own system_code (`PROMO_VOUCHER`, the real
+    // `reward_config.reward_systems.system_code` this plan's seeded `WEEKEND_PROMO_BLITZ`
+    // campaign's reward actually carries) — not the connector's own name.
     const [connector] = await sequelize.query<{
       system_code: string;
       tenant_id: number | null;
@@ -85,11 +116,11 @@ describe('T-RR-046 — demo/seed data (src/database/seeds/**)', () => {
       `SELECT system_code, tenant_id, connector_type, endpoint_url, auth_secret_ref,
               retryable_error_codes, status
        FROM reward_redemption.external_reward_system_config
-       WHERE system_code = 'PROMO_CODE_SERVICE' AND tenant_id IS NULL`,
+       WHERE system_code = 'PROMO_VOUCHER' AND tenant_id IS NULL`,
       { type: QueryTypes.SELECT },
     );
     expect(connector).toMatchObject({
-      system_code: 'PROMO_CODE_SERVICE',
+      system_code: 'PROMO_VOUCHER',
       tenant_id: null,
       connector_type: 'PROMO_CODE_SERVICE',
       auth_secret_ref: 'GENERATION_SERVICE_TOKEN',
@@ -139,6 +170,50 @@ describe('T-RR-046 — demo/seed data (src/database/seeds/**)', () => {
     expect(dispatchGlobalRows).toHaveLength(1);
   });
 
+  // T-INT-048 TC-2/TC-3. Exercises the real, unmocked production resolution stack
+  // (`ExternalRewardSystemConfigRepository` -> `ExternalRewardSystemConfigCache` ->
+  // `ExternalRewardSystemConfigResolver`, the exact classes
+  // `RewardSystemResolutionService`/`RedemptionProcessingOrchestrator` call in production) against
+  // the real seeded row — not just a raw SQL SELECT (TC-4/TC-6 above) and not a mocked fixture
+  // (every other `external-reward-system-config.*.spec.ts` in this service). This is the test that
+  // would have caught T-INT-048's own defect: before the fix, `resolve('PROMO_VOUCHER', null)`
+  // returned `null` (no active config, correctly, but for the wrong reason — the seed's
+  // `system_code` never matched any real reward), which is indistinguishable, from the caller's
+  // side, from a reward that genuinely has no external system configured.
+  it('TC-2: the real ExternalRewardSystemConfigResolver resolves an active config for system_code="PROMO_VOUCHER" (WEEKEND_PROMO_BLITZ\'s real reward) — proves resolution, not just the raw row', async () => {
+    const seeder = createSeedMigrator(sequelize);
+    await seeder.up();
+
+    const repository = new ExternalRewardSystemConfigRepository(realDbConfigService());
+    const serviceConfigRepository = new ServiceConfigRepository(realDbConfigService());
+    const serviceConfigResolver = new ServiceConfigResolverService(serviceConfigRepository);
+    const serviceConfigCache = new ServiceConfigCache(
+      serviceConfigResolver,
+      serviceConfigRepository,
+    );
+    const cache = new ExternalRewardSystemConfigCache(repository, serviceConfigCache);
+    const resolver = new ExternalRewardSystemConfigResolver(cache);
+
+    try {
+      const resolved = await resolver.resolve('PROMO_VOUCHER', null);
+      expect(resolved).not.toBeNull();
+      expect(resolved).toMatchObject({
+        system_code: 'PROMO_VOUCHER',
+        connector_type: 'PROMO_CODE_SERVICE',
+        status: 'active',
+      });
+
+      // TC-3 (regression, same real stack): a system_code with genuinely no seeded row still
+      // resolves to null — this fix must not make every reward resolve a connector
+      // unconditionally.
+      const unresolved = await resolver.resolve('T_INT_048_NO_SUCH_REWARD_SYSTEM', null);
+      expect(unresolved).toBeNull();
+    } finally {
+      await repository.onModuleDestroy();
+      await serviceConfigRepository.onModuleDestroy();
+    }
+  });
+
   it("TC-5: the seed script's own rollback removes exactly the demo rows it inserted, nothing else", async () => {
     const seeder = createSeedMigrator(sequelize);
     await seeder.up();
@@ -162,7 +237,7 @@ describe('T-RR-046 — demo/seed data (src/database/seeds/**)', () => {
 
     const connectorRows = await sequelize.query(
       `SELECT id FROM reward_redemption.external_reward_system_config
-       WHERE system_code = 'PROMO_CODE_SERVICE' AND tenant_id IS NULL`,
+       WHERE system_code = 'PROMO_VOUCHER' AND tenant_id IS NULL`,
       { type: QueryTypes.SELECT },
     );
     expect(connectorRows).toHaveLength(0);

@@ -81,7 +81,12 @@ const requestSchema = z
     rewardCode: z.string().min(1, 'rewardCode is required'),
     rewardCategory: z.string().min(1, 'rewardCategory is required'),
     rewardValue: decimalStringSchema,
-    rewardValueUnit: z.string().min(1, 'rewardValueUnit is required'),
+    // T-INT-046: some reward kinds (`PROMO_CODE`/`POINTS`) have no fixed currency/point unit by
+    // design — an empty string or an absent field both mean "no unit for this reward kind", not a
+    // malformed request, the same tolerance this schema already gives
+    // `transactionType`/`activityCode`/`merchantCode`. Never invent a placeholder unit string
+    // (task's own "Scope" section) — `''`/absent both normalize to `''` below.
+    rewardValueUnit: z.string().nullable().optional(),
     rewardEntryDate: isoDateSchema,
     completionCycle: z
       .number({ invalid_type_error: 'completionCycle is required and must be an integer' })
@@ -133,6 +138,10 @@ export function parseRewardEntryRequest(input: unknown): RewardEntryRequestDto {
     transactionType: result.data.transactionType ?? null,
     activityCode: result.data.activityCode ?? null,
     merchantCode: result.data.merchantCode ?? null,
+    // T-INT-046: `rewardValueUnit` is a required `string` (never nullable) on
+    // `RewardEntryRequestDto`/`RewardEntryIngestDto` — normalize `null`/absent to `''`, the same
+    // "no unit for this reward kind" convention the gRPC/Kafka legs also use.
+    rewardValueUnit: result.data.rewardValueUnit ?? '',
   };
 }
 

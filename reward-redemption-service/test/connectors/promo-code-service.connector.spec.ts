@@ -477,6 +477,53 @@ describe('T-RR-031 — PromoCodeServiceConnector', () => {
     expect(loggedText).not.toContain(PLAINTEXT_CUSTOMER_ID);
   });
 
+  it('T-INT-049 TC-1: sends the real resolved bindLevel/bindRefId (stamped by the orchestrator) as bindLevel/bindRefId, not CAMPAIGN/campaign_code', async () => {
+    let sentBody: Record<string, unknown> | undefined;
+    fetchSpy.mockImplementation(async (_url: string, init: RequestInit) => {
+      sentBody = JSON.parse(init.body as string) as Record<string, unknown>;
+      return jsonResponse(200, successBody());
+    });
+
+    await connector.redeem(
+      buildEntry({ resolved_bind_level: 'CAMPAIGN', resolved_bind_ref_id: 529_444 }),
+      buildConnectorConfig(),
+    );
+
+    expect(sentBody?.bindLevel).toBe('CAMPAIGN');
+    // Sent as a string, matching every other numeric-typed field this request already coerces
+    // (`tenantId`) — `PromoCodeGenerateRequest.bindRefId` is `string`, per this file's own header.
+    expect(sentBody?.bindRefId).toBe('529444');
+  });
+
+  it('T-INT-049 TC-2: a TRACKER-level resolution sends bindLevel=TRACKER/bindRefId=the tracker id, never CAMPAIGN', async () => {
+    let sentBody: Record<string, unknown> | undefined;
+    fetchSpy.mockImplementation(async (_url: string, init: RequestInit) => {
+      sentBody = JSON.parse(init.body as string) as Record<string, unknown>;
+      return jsonResponse(200, successBody());
+    });
+
+    await connector.redeem(
+      buildEntry({ resolved_bind_level: 'TRACKER', resolved_bind_ref_id: 12_722 }),
+      buildConnectorConfig(),
+    );
+
+    expect(sentBody?.bindLevel).toBe('TRACKER');
+    expect(sentBody?.bindRefId).toBe('12722');
+  });
+
+  it('T-INT-049 regression: an entry with no resolved bind fields (a pre-T-INT-049 fixture) still sends CAMPAIGN/campaign_code, the original T-RR-031 behaviour', async () => {
+    let sentBody: Record<string, unknown> | undefined;
+    fetchSpy.mockImplementation(async (_url: string, init: RequestInit) => {
+      sentBody = JSON.parse(init.body as string) as Record<string, unknown>;
+      return jsonResponse(200, successBody());
+    });
+
+    await connector.redeem(buildEntry(), buildConnectorConfig());
+
+    expect(sentBody?.bindLevel).toBe('CAMPAIGN');
+    expect(sentBody?.bindRefId).toBe('CAMP_T_RR_031');
+  });
+
   it('TC-14: no sequelize/pg transaction wraps the HTTP call (05-PROCESSING-PIPELINE.md §3)', () => {
     const source = readFileSync(
       path.join(

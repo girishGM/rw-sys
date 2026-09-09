@@ -210,6 +210,22 @@ describe('T-RR-010 — RewardIngestionService', () => {
     expect(repository.calls).toHaveLength(0);
   });
 
+  // T-INT-046: some reward kinds (PROMO_CODE/POINTS) have no fixed currency/point unit — an empty
+  // `rewardValueUnit` must be treated as well-formed here too, not just at each transport's own
+  // wire validator (which already normalizes an absent/null unit to ''). Before this fix, this
+  // shared `assertWellFormed()` check still rejected it, uncaught, even after all three transport
+  // adapters had been fixed to accept it — reproducing T-INT-046's own live evidence (a wire
+  // payload that passed transport validation still failed downstream).
+  it('T-INT-046: ingest() a DTO with an empty rewardValueUnit succeeds, persisting reward_value_unit as ""', async () => {
+    const dto = baseDto({ rewardValueUnit: '' });
+
+    const result = await service.ingest(dto);
+
+    expect(result).toEqual({ rewardEntryId: dto.id, status: 'received' });
+    expect(repository.calls).toHaveLength(1);
+    expect(repository.calls[0].reward_value_unit).toBe('');
+  });
+
   it('TC-6: no log line emitted during ingest() contains the raw customerId value used in the fixture', async () => {
     const dto = baseDto({ customerId: 'a-very-distinctive-raw-customer-id-9f3c1a' });
 
