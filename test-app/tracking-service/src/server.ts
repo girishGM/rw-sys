@@ -28,9 +28,11 @@ async function main(): Promise<void> {
   console.info(
     rapClient
       ? 'realtime-activity-processing-service forwarding: enabled — every submitted activity ' +
-          "will also be sent to RAP's real SubmitActivity gRPC endpoint (best-effort; RAP does " +
-          'not need to be running for this app to work — see rap-client/client.ts)'
-      : 'realtime-activity-processing-service forwarding: disabled (RAP_GRPC_ENABLED=false or misconfigured)',
+          "will also be sent to RAP's real SubmitActivity endpoint, REST or gRPC per " +
+          'RAP_ACTIVITY_TRANSPORT_PRIMARY (best-effort, with automatic fallback to the other ' +
+          'transport; RAP does not need to be running for this app to work — see ' +
+          'rap-client/configurable.client.ts)'
+      : 'realtime-activity-processing-service forwarding: disabled (RAP_GRPC_ENABLED=false and RAP_ACTIVITY_REST_TOKEN unset)',
   );
 
   const rewardTrackingClient = createRewardTrackingClientFromEnv();

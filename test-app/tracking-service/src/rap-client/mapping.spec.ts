@@ -8,8 +8,10 @@ describe('toSubmitActivityRequest', () => {
       activityType: 'Grocery Purchase',
       merchant: 'ACME',
       amount: 12.5,
+      tenantId: 1,
     });
 
+    expect(result.tenantId).toBe(1);
     expect(result.customerId).toBe('priya-shah');
     expect(result.activityCode).toBe('Grocery Purchase');
     expect(result.activityType).toBe('Grocery Purchase');
@@ -29,9 +31,24 @@ describe('toSubmitActivityRequest', () => {
       activityType: 'Refer a Friend',
       merchant: null,
       amount: null,
+      tenantId: 1,
     });
 
     expect(result.activityValue).toBe('0');
     expect(result.merchantCode).toBeUndefined();
+  });
+
+  // T-INT-054
+  it('omits tenantId when no real campaign was resolvable (tenantId: null)', () => {
+    const result = toSubmitActivityRequest({
+      activityId: 'a1a1a1a1-0000-4000-8000-000000000003',
+      customerId: 'priya-shah',
+      activityType: 'Grocery Purchase',
+      merchant: null,
+      amount: null,
+      tenantId: null,
+    });
+
+    expect(result.tenantId).toBeUndefined();
   });
 });

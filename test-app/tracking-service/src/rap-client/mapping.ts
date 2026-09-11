@@ -31,10 +31,19 @@ export interface ActivityForRap {
   readonly activityType: string;
   readonly merchant: string | null;
   readonly amount: number | null;
+  /** T-INT-054 — this app's own real portal `tenantId` (`PortalCampaign.tenantId`), resolved by
+   * `routes/activities.ts` from whichever real campaign is already on hand for this call, same
+   * "no per-customer tenant id anywhere in this app's own model" sourcing `rap-progress-client`'s
+   * `routes/dashboard.ts` call site already established for the identical problem. `null` when no
+   * real campaign is currently resolvable — `toSubmitActivityRequest` below simply omits
+   * `tenantId` in that case, which only matters if the REST transport ends up selected (gRPC never
+   * reads it); see `rest.client.ts`'s own local validation for what happens then. */
+  readonly tenantId: number | null;
 }
 
 export function toSubmitActivityRequest(activity: ActivityForRap): SubmitActivityRequest {
   return {
+    tenantId: activity.tenantId ?? undefined,
     customerId: activity.customerId,
     customerIdType: RAP_CUSTOMER_ID_TYPE,
     // Full ISO-8601 with an explicit "Z" offset — Date#toISOString always produces one, satisfying

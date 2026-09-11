@@ -9,6 +9,17 @@
  */
 
 export interface SubmitActivityRequest {
+  /**
+   * T-INT-054 — required for the new REST transport (`rest.client.ts`), unused (and never sent on
+   * the wire, `mapping.ts`'s own header) by the gRPC transport (`client.ts`), which resolves its own
+   * tenant from the caller's mTLS client-certificate identity instead
+   * (`activity-ingest-request.dto.ts`'s own header, RAP's own side of this contract, explains why
+   * REST has no equivalent identity-to-tenant mapping and needs the caller to state this directly).
+   * Optional here so every pre-existing gRPC-only construction of this type keeps compiling
+   * unchanged; `RapActivityRestClient.submitActivity` throws `RapServiceValidationError` locally,
+   * before any network call, if this is missing.
+   */
+  readonly tenantId?: number;
   readonly customerId: string;
   readonly customerIdType: string;
   /** Full ISO-8601 with an explicit zone offset, e.g. `"2026-09-01T10:15:30Z"` — RAP's own
@@ -40,4 +51,12 @@ export interface SubmitActivityResponse {
    * proto comment: this RPC is fire-and-forget beyond acknowledgment of receipt). */
   readonly status: string;
   readonly matchedTrackerComponents: readonly string[];
+}
+
+/** T-INT-054 — the one interface every transport (`RapActivityClient` (gRPC), `RapActivityRestClient`)
+ * and the configurable selector (`ConfigurableRapActivityClient`) implement, mirroring
+ * `rap-progress-client/types.ts`'s own `RapProgressReader` precedent — so `from-env.ts`,
+ * `routes/activities.ts` and tests can treat all three identically. */
+export interface RapActivitySubmitter {
+  submitActivity(request: SubmitActivityRequest): Promise<SubmitActivityResponse>;
 }

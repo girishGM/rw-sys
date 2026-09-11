@@ -192,7 +192,8 @@ export function createActivitiesRouter(state: AppState): Router {
       state.activities.addEntry(historyEntry);
 
       // Best-effort, fire-and-forget forward to realtime-activity-processing-service's real
-      // `SubmitActivity` gRPC endpoint — RAP runs its own independent, real rule-evaluation/
+      // `SubmitActivity` endpoint (gRPC and/or, since T-INT-054, REST — see
+      // `rap-client/configurable.client.ts`) — RAP runs its own independent, real rule-evaluation/
       // reward-issuance pipeline against this same activity, purely additive to (never a
       // replacement for) this service's own in-memory engine above. Deliberately NOT awaited
       // before responding: this endpoint's own response/behaviour for its own caller must never
@@ -202,13 +203,22 @@ export function createActivitiesRouter(state: AppState): Router {
       // same "an optional integration must never break the demo" contract this app's own
       // promo-code-client integration already established (see engine/reward.ts's
       // resolvePromoCode).
+      //
+      // T-INT-054: `tenantId` is resolved the same way `routes/dashboard.ts`'s own
+      // `resolveTenantId` already does for the sibling rap-progress-client leg — this app has no
+      // per-customer tenant id anywhere in its own model, only whichever real campaigns the portal
+      // currently reports. Only the REST transport actually reads this field (gRPC resolves tenant
+      // from its own mTLS client-certificate identity instead) — see `rap-client/types.ts`'s own
+      // header on `SubmitActivityRequest.tenantId`.
       if (state.rap) {
+        const tenantId = realCampaigns[0]?.tenantId ?? null;
         const rapRequest = toSubmitActivityRequest({
           activityId,
           customerId,
           activityType,
           merchant,
           amount,
+          tenantId,
         });
         state.rap
           .submitActivity(rapRequest)

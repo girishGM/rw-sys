@@ -9,7 +9,7 @@ import type { ProgressStore } from '../data/progress';
 import type { RewardsStore } from '../data/rewards';
 import type { PortalDataSource } from '../engine';
 import type { PromoCodeClient } from '../promo-code-client';
-import type { RapActivityClient } from '../rap-client';
+import type { RapActivitySubmitter } from '../rap-client';
 import type { RapProgressReader } from '../rap-progress-client';
 import type { RewardTrackingClient } from '../reward-tracking-client';
 import type { SseHub } from './events';
@@ -25,12 +25,13 @@ export interface AppState {
    * `PROMO_CODE_SERVICE_GENERATION_TOKEN` are unset — see `promo-code-client/from-env.ts` and
    * `engine/reward.ts`'s fallback behaviour when this is `null`. */
   readonly promoCode: PromoCodeClient | null;
-  /** The real realtime-activity-processing-service gRPC client, or `null` when
-   * `RAP_GRPC_ENABLED=false` or misconfigured — see `rap-client/from-env.ts`. Every submitted
-   * activity is also forwarded to RAP's real `SubmitActivity` RPC as a best-effort, additive side
-   * call (`routes/activities.ts`); this can never affect this app's own in-memory engine result or
-   * this endpoint's response — see that route's own comment on why. */
-  readonly rap: RapActivityClient | null;
+  /** The real realtime-activity-processing-service caller (gRPC and/or, since T-INT-054, REST — see
+   * `rap-client/configurable.client.ts`), or `null` when both transports are disabled/misconfigured
+   * — see `rap-client/from-env.ts`. Every submitted activity is also forwarded to RAP's real
+   * `SubmitActivity` endpoint as a best-effort, additive side call (`routes/activities.ts`); this
+   * can never affect this app's own in-memory engine result or this endpoint's response — see that
+   * route's own comment on why. */
+  readonly rap: RapActivitySubmitter | null;
   /** T-INT-022 — the real reward-tracking-service caller for a customer's *confirmed* reward
    * summary (leg 7), or `null` when `CUSTOMER_API_AUTH_SECRET` is unset — see
    * `reward-tracking-client/from-env.ts`. `null` here means `routes/rewards.ts`'s own

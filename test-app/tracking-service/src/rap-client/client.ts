@@ -38,7 +38,7 @@ import {
   RapServiceUnreachableError,
   RapServiceValidationError,
 } from './errors';
-import type { SubmitActivityRequest, SubmitActivityResponse } from './types';
+import type { RapActivitySubmitter, SubmitActivityRequest, SubmitActivityResponse } from './types';
 
 export const DEFAULT_RAP_GRPC_PORT = 50071;
 /** This task's own "2-3 seconds" requirement — generous enough for a real local network hop, short
@@ -137,7 +137,10 @@ export function validateSubmitActivityRequest(request: SubmitActivityRequest): s
   return null;
 }
 
-export class RapActivityClient {
+/** T-INT-054 — the gRPC transport option (`RapActivitySubmitter`, `types.ts`); `rest.client.ts`'s
+ * `RapActivityRestClient` is the new REST option, and `configurable.client.ts`'s
+ * `ConfigurableRapActivityClient` selects between the two. */
+export class RapActivityClient implements RapActivitySubmitter {
   private readonly client: RawActivityIngestServiceClient;
   private readonly timeoutMs: number;
   private readonly target: string;
