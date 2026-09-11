@@ -58,6 +58,7 @@ export interface RawJourneyComponent {
   readonly description: string | null;
   readonly activityId: number | null;
   readonly activityName: string | null;
+  readonly activityCode: string | null;
   readonly sequenceOrder: number;
   readonly isMandatory: boolean;
   readonly status: string;
@@ -127,6 +128,7 @@ function toJourneyComponent(raw: RawJourneyComponent): PortalJourneyComponent {
     description: raw.description,
     activityId: raw.activityId,
     activityName: raw.activityName,
+    activityCode: raw.activityCode,
     sequenceOrder: raw.sequenceOrder,
     isMandatory: raw.isMandatory,
     status: raw.status,

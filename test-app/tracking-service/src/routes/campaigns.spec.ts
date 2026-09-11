@@ -94,6 +94,7 @@ describe('GET /api/campaigns', () => {
               description: null,
               activityId: 601,
               activityName: 'New Activity',
+              activityCode: 'NEW_ACTIVITY',
               sequenceOrder: 1,
               isMandatory: true,
               status: 'active',

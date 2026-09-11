@@ -70,6 +70,7 @@ function toEvaluableTracker(
         completed: component.completed,
         activityId: journeyComponent?.activityId ?? null,
         activityName: journeyComponent?.activityName ?? null,
+        activityCode: journeyComponent?.activityCode ?? null,
       };
     }),
   };
@@ -106,6 +107,11 @@ export function createActivitiesRouter(state: AppState): Router {
 
       const progressDeltas: ProgressDelta[] = [];
       const newRewards: RewardLedgerEntry[] = [];
+      // T-INT — the real activityCode of whichever component this submission actually matched
+      // (first match wins), forwarded to RAP below instead of the free-text activityType label.
+      // Stays null if nothing matched, or if the matched component has none — the RAP forward
+      // then falls back to the label exactly as it did before this field existed.
+      let matchedActivityCode: string | null = null;
 
       for (const campaign of campaignsProgress) {
         const journey = await state.portal.getCampaignJourney(campaign.campaignId);
@@ -116,6 +122,13 @@ export function createActivitiesRouter(state: AppState): Router {
 
           const result = evaluateTrackerActivity(evaluable, activityType);
           if (result.matchedComponentId === null) continue;
+
+          if (matchedActivityCode === null) {
+            const matchedComponent = evaluable.components.find(
+              (component) => component.componentId === result.matchedComponentId,
+            );
+            matchedActivityCode = matchedComponent?.activityCode ?? null;
+          }
 
           const updatedTracker = state.progress.setComponentCompletion(
             customerId,
@@ -216,6 +229,7 @@ export function createActivitiesRouter(state: AppState): Router {
           activityId,
           customerId,
           activityType,
+          activityCode: matchedActivityCode,
           merchant,
           amount,
           tenantId,

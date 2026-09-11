@@ -47,6 +47,7 @@ function componentsOf(
     description: null,
     activityId: 9,
     activityName: 'Activity',
+    activityCode: 'ACTIVITY',
     sequenceOrder: i + 1,
     isMandatory: false,
     status: 'active',

@@ -8,11 +8,14 @@
  * (`customerIdType`, `activityCategory`, `activityValueUnit`, `channel`, `activityPerformedEnv`) —
  * RAP's real controller (`activity-ingest.controller.ts`) rejects an empty string for every one of
  * them with `INVALID_ARGUMENT`, so each is filled with a fixed, documented constant below rather
- * than left blank. `activityType` (this app's one real, human-entered field) is reused for both
- * `activityCode` and `activityName` — this app has no separate machine-code vs. display-name pair,
- * only the one string a caller of `POST /api/activities` actually supplies (the same reasoning
- * `engine/evaluate.ts`'s own `findComponentToComplete` already documents for why it matches by
- * name rather than a numeric `activityId`).
+ * than left blank. `activityType` (this app's one real, human-entered field) is always sent as
+ * `activityName`; `activityCode` prefers the real, machine-readable code
+ * (`routes/activities.ts`'s `matchedActivityCode`, sourced from the portal's own
+ * `reward_config.activities.activity_code` via `portal-client`) once this submission actually
+ * matched a real component, and only falls back to `activityType` when nothing matched yet (no
+ * real code is known) — RAP's own campaign cache matches on the real code, not the display label,
+ * so sending the label there was a genuine bug (found live: RAP received every activity but
+ * matched nothing, even once its cache held the real campaign data).
  */
 import type { SubmitActivityRequest } from './types';
 
@@ -29,6 +32,9 @@ export interface ActivityForRap {
   readonly activityId: string;
   readonly customerId: string;
   readonly activityType: string;
+  /** The real, machine-readable code of whichever component this submission actually matched
+   * (`routes/activities.ts`'s `matchedActivityCode`), or `null` if nothing matched yet. */
+  readonly activityCode: string | null;
   readonly merchant: string | null;
   readonly amount: number | null;
   /** T-INT-054 — this app's own real portal `tenantId` (`PortalCampaign.tenantId`), resolved by
@@ -49,7 +55,7 @@ export function toSubmitActivityRequest(activity: ActivityForRap): SubmitActivit
     // Full ISO-8601 with an explicit "Z" offset — Date#toISOString always produces one, satisfying
     // RAP's own "must carry an explicit offset" requirement without any extra formatting here.
     activityPerformedDate: new Date().toISOString(),
-    activityCode: activity.activityType,
+    activityCode: activity.activityCode ?? activity.activityType,
     activityType: activity.activityType,
     activityCategory: RAP_ACTIVITY_CATEGORY,
     activityValue: activity.amount !== null ? String(activity.amount) : '0',

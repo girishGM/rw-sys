@@ -23,6 +23,10 @@ export interface EvaluableComponent {
   readonly completed: boolean;
   readonly activityId: number | null;
   readonly activityName: string | null;
+  /** T-INT — carried through so `routes/activities.ts` can forward the real, machine-readable
+   * code to realtime-activity-processing-service once a component actually matches, instead of
+   * substituting `activityName`'s human display label (see `rap-client/mapping.ts`). */
+  readonly activityCode: string | null;
 }
 
 /** Same shape as {@link TrackerProgress}, with `components` swapped for the activity-aware

@@ -526,6 +526,10 @@ export class CampaignsService {
               component.activityId === null
                 ? null
                 : (activities.get(component.activityId)?.name ?? null),
+            activityCode:
+              component.activityId === null
+                ? null
+                : (activities.get(component.activityId)?.activityCode ?? null),
             sequenceOrder: link.sequenceOrder,
             isMandatory: link.isMandatory,
             status: component.status,

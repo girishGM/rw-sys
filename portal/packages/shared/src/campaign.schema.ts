@@ -570,6 +570,11 @@ export const componentSchema = z
     description: z.string().nullable(),
     activityId: z.number().int().nullable(),
     activityName: z.string().nullable(),
+    /** T-INT — the real, machine-readable activity code (`reward_config.activities.activity_code`)
+     * a REST/gRPC caller matches against, alongside `activityName`'s human display label. Added so
+     * a consumer like `test-app/tracking-service` can forward the real code to
+     * `realtime-activity-processing-service` instead of substituting `activityName` for it. */
+    activityCode: z.string().nullable(),
     sequenceOrder: z.number().int(),
     isMandatory: z.boolean(),
     status: z.string(),

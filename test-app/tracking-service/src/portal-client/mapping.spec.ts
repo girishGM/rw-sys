@@ -48,6 +48,7 @@ describe('toPortalCampaignJourney', () => {
               description: null,
               activityId: 5,
               activityName: 'Activity',
+              activityCode: 'ACTIVITY',
               sequenceOrder: 1,
               isMandatory: true,
               status: 'active',

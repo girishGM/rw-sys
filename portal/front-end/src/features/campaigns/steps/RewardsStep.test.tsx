@@ -122,6 +122,7 @@ const JOURNEY: Journey = {
           description: null,
           activityId: 5,
           activityName: 'Purchase',
+          activityCode: 'PURCHASE',
           sequenceOrder: 1,
           isMandatory: true,
           status: 'active',

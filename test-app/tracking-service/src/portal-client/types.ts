@@ -58,6 +58,11 @@ export interface PortalJourneyComponent {
   readonly description: string | null;
   readonly activityId: number | null;
   readonly activityName: string | null;
+  /** T-INT — the real, machine-readable activity code the portal's own config carries alongside
+   * `activityName`'s human display label. `rap-client/mapping.ts` needs this exact string to match
+   * against realtime-activity-processing-service's own synced campaign config — sending
+   * `activityName` there is a display label, not the code that service actually matches on. */
+  readonly activityCode: string | null;
   readonly sequenceOrder: number;
   readonly isMandatory: boolean;
   readonly status: string;

@@ -19,6 +19,7 @@ function allTracker(overrides: Partial<EvaluableTracker> = {}): EvaluableTracker
         completed: false,
         activityId: 501,
         activityName: 'Grocery Purchase',
+        activityCode: 'GROCERY_PURCHASE',
       },
       {
         componentId: 3002,
@@ -27,6 +28,7 @@ function allTracker(overrides: Partial<EvaluableTracker> = {}): EvaluableTracker
         completed: false,
         activityId: 502,
         activityName: 'Weekend Transaction',
+        activityCode: 'WEEKEND_TRANSACTION',
       },
     ],
     ...overrides,
@@ -48,6 +50,7 @@ function nOfTracker(overrides: Partial<EvaluableTracker> = {}): EvaluableTracker
         completed: false,
         activityId: 503,
         activityName: 'Refer a Friend',
+        activityCode: 'REFER_A_FRIEND',
       },
       {
         componentId: 3004,
@@ -56,6 +59,7 @@ function nOfTracker(overrides: Partial<EvaluableTracker> = {}): EvaluableTracker
         completed: false,
         activityId: 503,
         activityName: 'Refer a Friend',
+        activityCode: 'REFER_A_FRIEND',
       },
       {
         componentId: 3005,
@@ -64,6 +68,7 @@ function nOfTracker(overrides: Partial<EvaluableTracker> = {}): EvaluableTracker
         completed: false,
         activityId: 503,
         activityName: 'Refer a Friend',
+        activityCode: 'REFER_A_FRIEND',
       },
     ],
     ...overrides,
