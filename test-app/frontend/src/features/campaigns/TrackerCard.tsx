@@ -8,8 +8,18 @@
  * every component this tracker has and its own reward card regardless of `completionLogic` or
  * component count, so a campaign with multiple trackers or `n_of` logic renders sensibly rather
  * than only working for the demo data's `all`-logic trackers (implementation notes).
+ *
+ * T-INT-055 — `summary` (when present) now carries real, realtime-activity-processing-service
+ * ("RAP")-sourced completion state, not an invented `ProgressStore` flag, and RAP can genuinely be
+ * unreachable — a third render state, `progressUnknown`, on top of the existing complete/
+ * in-progress two, exactly mirroring `TrackerRow`'s own three states on the Dashboard (T-INT-021).
+ * Checked first, before either `completed` or `completedCount`, so a customer who has genuinely
+ * made no progress yet is never shown identically to one whose real progress just couldn't be
+ * fetched this request. The `deriveTrackerProgress` fallback path (no `summary` at all — a
+ * structural gap, not a RAP failure) always has real, known progress, so it's normalized to
+ * `progressUnknown: false` rather than gaining a fourth state.
  */
-import { CheckCircleIcon } from '../../components/icons';
+import { AlertTriangleIcon, CheckCircleIcon } from '../../components/icons';
 import { ProgressBar } from '../../components/ProgressBar';
 import type { CampaignDetailTracker, RewardAssignment, TrackerProgressSummary } from '../../types';
 import { completionLogicCopy } from './completionLogicCopy';
@@ -26,8 +36,9 @@ export interface TrackerCardProps {
 }
 
 export function TrackerCard({ tracker, summary, campaignRewards }: TrackerCardProps) {
-  const stats = summary ?? deriveTrackerProgress(tracker);
-  const percent = stats.threshold > 0 ? (stats.completedCount / stats.threshold) * 100 : 0;
+  const stats = summary ?? { ...deriveTrackerProgress(tracker), progressUnknown: false as const };
+  const completedCount = stats.progressUnknown ? 0 : (stats.completedCount ?? 0);
+  const percent = stats.threshold > 0 ? (completedCount / stats.threshold) * 100 : 0;
   const reward = tracker.rewards[0] ?? campaignRewards[0] ?? null;
 
   return (
@@ -58,7 +69,11 @@ export function TrackerCard({ tracker, summary, campaignRewards }: TrackerCardPr
             )}
           </p>
         </div>
-        {stats.completed ? (
+        {stats.progressUnknown ? (
+          <span className="font-body text-xs font-semibold text-ink-muted">
+            ?/{stats.threshold}
+          </span>
+        ) : stats.completed ? (
           <div className="flex items-center gap-1.5 text-accent-strong">
             <CheckCircleIcon className="h-4 w-4" />
             <span className="font-body text-xs font-semibold">Complete</span>
@@ -70,8 +85,17 @@ export function TrackerCard({ tracker, summary, campaignRewards }: TrackerCardPr
         )}
       </div>
 
-      {!stats.completed && (
-        <ProgressBar value={percent} aria-label={`${tracker.trackerName} progress`} />
+      {stats.progressUnknown ? (
+        <div className="flex items-center gap-1.5 text-ink-muted">
+          <AlertTriangleIcon className="h-4 w-4" />
+          <span className="font-body text-xs font-semibold">
+            Progress unavailable right now — check back soon.
+          </span>
+        </div>
+      ) : (
+        !stats.completed && (
+          <ProgressBar value={percent} aria-label={`${tracker.trackerName} progress`} />
+        )
       )}
 
       {tracker.components.length > 0 && (
@@ -82,7 +106,7 @@ export function TrackerCard({ tracker, summary, campaignRewards }: TrackerCardPr
         </ul>
       )}
 
-      <RewardCard reward={reward} earned={stats.completed} />
+      <RewardCard reward={reward} earned={Boolean(stats.completed)} />
     </div>
   );
 }

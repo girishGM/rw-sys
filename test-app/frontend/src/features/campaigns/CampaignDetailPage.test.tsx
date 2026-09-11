@@ -116,6 +116,7 @@ function summerSummary(completedCount: 1 | 3): CampaignSummary {
           completedCount,
           threshold: 3,
           completed: completedCount === 3,
+          progressUnknown: false,
         },
       ],
     },

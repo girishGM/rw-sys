@@ -9,15 +9,42 @@ import {
 } from '../test-support/fixtures';
 import type { PortalCampaign, PortalCampaignJourney } from '../portal-client/types';
 import type { PortalDataSource } from '../engine';
+import {
+  RapProgressRequestError,
+  RapProgressUnreachableError,
+  type GetCampaignProgressParams,
+  type GetTrackerProgressParams,
+  type RapCampaignProgress,
+  type RapProgressReader,
+} from '../rap-progress-client';
 import { SseHub, type AppState } from './index';
 
-function buildState(portalOverride?: PortalDataSource): AppState {
+interface BuildStateOverrides {
+  readonly portal?: PortalDataSource;
+  readonly rapProgress?: RapProgressReader | null;
+}
+
+function buildState(overrides: BuildStateOverrides = {}): AppState {
   const stores = buildFixtureStores();
   return {
     customers: CUSTOMERS,
     ...stores,
-    ...(portalOverride ? { portal: portalOverride } : {}),
+    ...(overrides.portal ? { portal: overrides.portal } : {}),
+    ...(overrides.rapProgress !== undefined ? { rapProgress: overrides.rapProgress } : {}),
     sse: new SseHub(),
+  };
+}
+
+/** A {@link RapProgressReader} whose `getCampaignProgress` is fully controlled by the test — same
+ * shape `routes/dashboard.spec.ts` (T-INT-021) already uses for the identical need. */
+function fakeRapProgressReader(
+  impl: (params: GetCampaignProgressParams) => Promise<RapCampaignProgress>,
+): RapProgressReader {
+  return {
+    getCampaignProgress: impl,
+    getTrackerProgress: (_params: GetTrackerProgressParams): Promise<never> => {
+      throw new Error('fakeRapProgressReader: getTrackerProgress is not exercised by campaigns.ts');
+    },
   };
 }
 
@@ -42,13 +69,19 @@ describe('GET /api/campaigns', () => {
     const allCampaign = response.body.data.find(
       (c: { campaignCode: string }) => c.campaignCode === 'FIXTURE_ALL',
     );
+    // Structural fields always merge from `ProgressStore`, regardless of RAP; fixtures' own
+    // default `rapProgress` is `null` ("unconfigured"), so completion state genuinely cannot be
+    // determined yet — reported as unknown, never a fake `0` (T-INT-055, mirroring T-INT-021's own
+    // contract). See the dedicated "RAP-sourced tracker progress" describe block below for the
+    // real-progress/unreachable/completed cases.
     expect(allCampaign.progress.trackers).toEqual([
       expect.objectContaining({
         trackerCode: 'ALL_TRACKER',
         completionLogic: 'all',
-        completedCount: 0,
         threshold: 2,
-        completed: false,
+        completedCount: null,
+        completed: null,
+        progressUnknown: true,
       }),
     ]);
   });
@@ -109,9 +142,18 @@ describe('GET /api/campaigns', () => {
     it('a campaign activated after this customer was first seen appears with zero progress', async () => {
       const originalPortal = new FakePortalDataSource();
       const state = buildState({
-        getCampaigns: async () => [...FIXTURE_CAMPAIGNS, NEW_CAMPAIGN],
-        getCampaignJourney: async (id: number) =>
-          id === NEW_CAMPAIGN_ID ? NEW_JOURNEY : originalPortal.getCampaignJourney(id),
+        portal: {
+          getCampaigns: async () => [...FIXTURE_CAMPAIGNS, NEW_CAMPAIGN],
+          getCampaignJourney: async (id: number) =>
+            id === NEW_CAMPAIGN_ID ? NEW_JOURNEY : originalPortal.getCampaignJourney(id),
+        },
+        // RAP reached, but this brand-new campaign has no materialized progress on it yet — a
+        // real, legitimate zero (RAP's own contract), never "unknown".
+        rapProgress: fakeRapProgressReader(async (params) => ({
+          customerId: params.customerId,
+          campaignCode: params.campaignCode,
+          trackers: [],
+        })),
       });
 
       const response = await request(createApp(state)).get('/api/campaigns?customerId=priya-shah');
@@ -125,6 +167,7 @@ describe('GET /api/campaigns', () => {
           trackerCode: 'NEW_TRACKER',
           completedCount: 0,
           completed: false,
+          progressUnknown: false,
         }),
       );
     });
@@ -132,11 +175,13 @@ describe('GET /api/campaigns', () => {
     it('a campaign no longer active stops appearing, even with existing progress on it', async () => {
       const originalPortal = new FakePortalDataSource();
       const state = buildState({
-        getCampaigns: async () =>
-          FIXTURE_CAMPAIGNS.map((c) =>
-            c.campaignCode === 'FIXTURE_ALL' ? { ...c, status: 'paused' } : c,
-          ),
-        getCampaignJourney: (id: number) => originalPortal.getCampaignJourney(id),
+        portal: {
+          getCampaigns: async () =>
+            FIXTURE_CAMPAIGNS.map((c) =>
+              c.campaignCode === 'FIXTURE_ALL' ? { ...c, status: 'paused' } : c,
+            ),
+          getCampaignJourney: (id: number) => originalPortal.getCampaignJourney(id),
+        },
       });
 
       const response = await request(createApp(state)).get('/api/campaigns?customerId=priya-shah');
@@ -144,6 +189,129 @@ describe('GET /api/campaigns', () => {
       expect(
         response.body.data.find((c: { campaignCode: string }) => c.campaignCode === 'FIXTURE_ALL'),
       ).toBeUndefined();
+    });
+  });
+
+  describe('GET /api/campaigns — RAP-sourced tracker progress (T-INT-055, extending T-INT-021 to Campaign Detail)', () => {
+    it('TC-1/TC-3: a real, partial RAP progress response is reflected verbatim, joined by trackerCode', async () => {
+      const state = buildState({
+        rapProgress: fakeRapProgressReader(async (params) => {
+          if (params.campaignCode === 'FIXTURE_ALL') {
+            return {
+              customerId: params.customerId,
+              campaignCode: params.campaignCode,
+              trackers: [
+                {
+                  trackerCode: 'ALL_TRACKER',
+                  completionLogic: 'all',
+                  isCompleted: false,
+                  completedAt: null,
+                  componentsRequiredCount: 2,
+                  componentsCompletedCount: 1,
+                  components: [],
+                },
+              ],
+            };
+          }
+          return {
+            customerId: params.customerId,
+            campaignCode: params.campaignCode,
+            trackers: [
+              {
+                trackerCode: 'NOF_TRACKER',
+                completionLogic: 'n_of',
+                isCompleted: true,
+                completedAt: '2026-02-01T00:00:00.000Z',
+                componentsRequiredCount: 2,
+                componentsCompletedCount: 3,
+                components: [],
+              },
+            ],
+          };
+        }),
+      });
+
+      const response = await request(createApp(state)).get('/api/campaigns?customerId=priya-shah');
+
+      const allCampaign = response.body.data.find(
+        (c: { campaignCode: string }) => c.campaignCode === 'FIXTURE_ALL',
+      );
+      const nofCampaign = response.body.data.find(
+        (c: { campaignCode: string }) => c.campaignCode === 'FIXTURE_NOF',
+      );
+      expect(allCampaign.progress.trackers[0]).toMatchObject({
+        completedCount: 1,
+        threshold: 2,
+        completed: false,
+        progressUnknown: false,
+      });
+      // TC-3: threshold met → "completed" state, matching RAP's own `isCompleted` flag verbatim
+      // (`n_of` threshold is 2, RAP reports 3 components completed — still just `completed: true`,
+      // not a different shape).
+      expect(nofCampaign.progress.trackers[0]).toMatchObject({
+        completedCount: 3,
+        threshold: 2,
+        completed: true,
+        progressUnknown: false,
+      });
+    });
+
+    it('TC-2: RAP entirely unreachable degrades every tracker to progressUnknown, never a fake 0/5xx', async () => {
+      const state = buildState({
+        rapProgress: fakeRapProgressReader(async () => {
+          throw new RapProgressUnreachableError(
+            'REST',
+            'http://rap.test',
+            new Error('ECONNREFUSED'),
+          );
+        }),
+      });
+
+      const response = await request(createApp(state)).get('/api/campaigns?customerId=priya-shah');
+
+      expect(response.status).toBe(200);
+      const allCampaign = response.body.data.find(
+        (c: { campaignCode: string }) => c.campaignCode === 'FIXTURE_ALL',
+      );
+      expect(allCampaign.progress.trackers[0]).toMatchObject({
+        completedCount: null,
+        completed: null,
+        progressUnknown: true,
+      });
+    });
+
+    it('a real rejected request (bad auth/config) also degrades to progressUnknown, never a 5xx', async () => {
+      const state = buildState({
+        rapProgress: fakeRapProgressReader(async () => {
+          throw new RapProgressRequestError('REST', 401, 'invalid token');
+        }),
+      });
+
+      const response = await request(createApp(state)).get('/api/campaigns?customerId=priya-shah');
+
+      expect(response.status).toBe(200);
+      expect(
+        response.body.data.every(
+          (c: { progress: { trackers: Array<{ progressUnknown: boolean }> } | null }) =>
+            c.progress === null || c.progress.trackers.every((t) => t.progressUnknown === true),
+        ),
+      ).toBe(true);
+    });
+
+    it('no RAP fetch happens (and no crash) when no customerId is given', async () => {
+      let called = false;
+      const state = buildState({
+        rapProgress: fakeRapProgressReader(async (params) => {
+          called = true;
+          return { customerId: params.customerId, campaignCode: params.campaignCode, trackers: [] };
+        }),
+      });
+
+      const response = await request(createApp(state)).get('/api/campaigns');
+
+      expect(response.status).toBe(200);
+      expect(called).toBe(false);
+      expect(response.body.data.every((c: { progress: null }) => c.progress === null)).toBe(true);
     });
   });
 });

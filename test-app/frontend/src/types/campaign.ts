@@ -2,6 +2,14 @@
  * T-006 — mirrors `tracking-service`'s campaign/tracker/component response shapes
  * (`routes/campaigns.ts`), themselves built from `portal-client/types.ts`'s real portal DTOs plus
  * this app's own invented per-customer completion state layered on top.
+ *
+ * T-INT-055 — `TrackerProgressSummary.completedCount`/`completed` widened to nullable, and
+ * `progressUnknown` added: `GET /api/campaigns`'s per-tracker summary now sources these two fields
+ * from realtime-activity-processing-service's real progress API (the same join
+ * `DashboardTrackerProgress` already used, T-INT-021), not an invented `ProgressStore` flag — see
+ * `routes/campaigns.ts`'s own header for the full three-outcome contract this type now carries.
+ * `TrackerCard`'s own "progress unavailable" state depends on `progressUnknown` being present and
+ * checked before either of the other two fields, exactly like `TrackerRow` on the Dashboard.
  */
 import type { TrackerCompletionLogic } from './tracker';
 
@@ -28,9 +36,15 @@ export interface TrackerProgressSummary {
   readonly trackerCode: string;
   readonly trackerName: string;
   readonly completionLogic: TrackerCompletionLogic;
-  readonly completedCount: number;
+  /** `null` only when `progressUnknown` is `true` — real RAP-sourced progress otherwise. */
+  readonly completedCount: number | null;
   readonly threshold: number;
-  readonly completed: boolean;
+  /** `null` only when `progressUnknown` is `true` — real RAP-sourced progress otherwise. */
+  readonly completed: boolean | null;
+  /** `true` when RAP's real progress genuinely could not be determined this request (not
+   * configured, or every attempted transport unreachable) — never conflate with a real, legitimate
+   * zero (`completedCount: 0`). */
+  readonly progressUnknown: boolean;
 }
 
 /** One row of `GET /api/campaigns` — `progress` is `null` whenever the request had no

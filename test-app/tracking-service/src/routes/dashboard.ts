@@ -30,25 +30,34 @@
  *     structural, not completion state), so the UI can still show "?/N" rather than losing the
  *     denominator too.
  *
- * **Known, disclosed limitation of this task's own scope** (see this task's completion report's
- * "Deviations from spec"): `routes/activities.ts` and `routes/campaigns.ts` also read
- * `ProgressStore`'s own invented completion flags (for this app's own local, synchronous
- * demo-completion/reward-mint flow and for the Campaigns page, respectively) and are **not** in
- * this task's own "Files owned" list — `ProgressStore` therefore cannot be fully retired by this
- * task alone; it remains in place, still real and still used by those two call sites.
+ * **Known, disclosed limitation of T-INT-021's own scope** (see that task's completion report's
+ * "Deviations from spec"): `routes/activities.ts` also reads `ProgressStore`'s own invented
+ * completion flags (for this app's own local, synchronous demo-completion/reward-mint flow) and
+ * was **not** in that task's own "Files owned" list — `ProgressStore` therefore could not be fully
+ * retired by that task alone. `routes/campaigns.ts`'s own Campaign Detail summary has since moved
+ * off `ProgressStore`-derived completion too (T-INT-055); `activities.ts` remains the one real
+ * caller left after that.
+ *
+ * ## T-INT-055 — the RAP join itself now lives in `data/rap-tracker-progress.ts`
+ *
+ * `toDashboardTrackerProgress` below now delegates to that shared module's
+ * `joinRapTrackerProgress`/`fetchRapProgress`/`resolveTenantId`, the same functions
+ * `routes/campaigns.ts` calls for the Campaign Detail page's own tracker summary — extracted so
+ * the two routes can never independently drift on what counts as "unknown" vs. "a real zero" (see
+ * that module's own header for the full three-outcome contract). This file's own behavior is
+ * unchanged; only the join logic's *location* moved.
  */
 import { Router } from 'express';
 import type { AppState } from './app-state';
 import { requireCustomerId } from './validation';
 import { ensureEnrolled } from '../data/campaign-sync';
-import { trackerThreshold, type CampaignProgress, type TrackerProgress } from '../data/progress';
+import type { CampaignProgress, TrackerProgress } from '../data/progress';
 import {
-  RapProgressRequestError,
-  RapProgressTransportNotAvailableError,
-  RapProgressUnavailableError,
-  RapProgressUnreachableError,
-  type RapCampaignProgress,
-} from '../rap-progress-client';
+  fetchRapProgress as fetchRapProgressJoin,
+  joinRapTrackerProgress,
+  resolveTenantId,
+} from '../data/rap-tracker-progress';
+import type { RapCampaignProgress } from '../rap-progress-client';
 
 /** Invented — no design doc names an exact "expiring soon" window; 7 days is the common
  * e-commerce/loyalty-program convention and matches the "ends-soon" pill `UI-UX-DESIGN.md`
@@ -72,57 +81,15 @@ export interface DashboardTrackerProgress {
   readonly progressUnknown: boolean;
 }
 
-/** This app has exactly one portal `tenant_admin` login, so every campaign it ever sees belongs to
- * the same tenant — the same "resolved from whichever real campaign is on hand" sourcing
- * `reward-tracking-client`'s own `routes/rewards.ts` (T-INT-022) already established for the
- * identical problem (there is no per-customer tenant id anywhere in this app's own model). `null`
- * only when the portal has reported zero campaigns at all. */
-function resolveTenantId(realCampaigns: readonly { tenantId: number }[]): number | null {
-  return realCampaigns[0]?.tenantId ?? null;
-}
-
-/** Fetches this campaign's real progress from RAP, or `null` when it genuinely cannot be
- * determined right now (not configured, or every attempted transport unreachable) — never throws,
- * per Implementation note 4's "degrade gracefully, don't crash the page" contract. A
- * reached-but-rejected request (`RapProgressRequestError` — a real auth/config problem) is logged
- * more loudly than a plain unreachable, since that one likely needs a human to fix a secret/config
- * mismatch rather than just "RAP isn't running locally right now". */
-async function fetchRapProgress(
+/** Thin wrapper over the shared `data/rap-tracker-progress.ts` fetch, binding this route's own
+ * `state.rapProgress` — see that module for the full "never throws, degrades to `null`" contract. */
+function fetchRapProgress(
   state: AppState,
   tenantId: number | null,
   customerId: string,
   campaignCode: string,
 ): Promise<RapCampaignProgress | null> {
-  if (!state.rapProgress || tenantId === null) return null;
-
-  try {
-    return await state.rapProgress.getCampaignProgress({ customerId, tenantId, campaignCode });
-  } catch (error) {
-    if (
-      error instanceof RapProgressUnreachableError ||
-      error instanceof RapProgressUnavailableError ||
-      error instanceof RapProgressTransportNotAvailableError
-    ) {
-      console.warn(
-        `rap-progress-client: progress unavailable for customer=${customerId} ` +
-          `campaign=${campaignCode} (rendering as unknown): ${error.message}`,
-      );
-    } else if (error instanceof RapProgressRequestError) {
-      console.warn(
-        `rap-progress-client: RAP rejected the progress request for customer=${customerId} ` +
-          `campaign=${campaignCode} (rendering as unknown — check PROGRESS_API_AUTH_SECRET/` +
-          `tenant config): ${error.message}`,
-      );
-    } else {
-      console.warn(
-        `rap-progress-client: unexpected error fetching progress for customer=${customerId} ` +
-          `campaign=${campaignCode} (rendering as unknown): ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-      );
-    }
-    return null;
-  }
+  return fetchRapProgressJoin(state.rapProgress, tenantId, customerId, campaignCode);
 }
 
 function toDashboardTrackerProgress(
@@ -130,8 +97,7 @@ function toDashboardTrackerProgress(
   tracker: TrackerProgress,
   rapProgress: RapCampaignProgress | null,
 ): DashboardTrackerProgress {
-  const threshold = trackerThreshold(tracker);
-  const base = {
+  return {
     campaignId: campaign.campaignId,
     campaignCode: campaign.campaignCode,
     campaignName: campaign.campaignName,
@@ -139,23 +105,7 @@ function toDashboardTrackerProgress(
     trackerCode: tracker.trackerCode,
     trackerName: tracker.trackerName,
     completionLogic: tracker.completionLogic,
-    threshold,
-  };
-
-  if (rapProgress === null) {
-    return { ...base, completedCount: null, completed: null, progressUnknown: true };
-  }
-
-  // A tracker this customer has no materialized RAP progress on yet is a real, legitimate zero
-  // (RAP's own contract: "Empty trackers is a normal response") — never treated as unknown.
-  const rapTracker = rapProgress.trackers.find(
-    (entry) => entry.trackerCode === tracker.trackerCode,
-  );
-  return {
-    ...base,
-    completedCount: rapTracker?.componentsCompletedCount ?? 0,
-    completed: rapTracker?.isCompleted ?? false,
-    progressUnknown: false,
+    ...joinRapTrackerProgress(tracker, rapProgress),
   };
 }
 
