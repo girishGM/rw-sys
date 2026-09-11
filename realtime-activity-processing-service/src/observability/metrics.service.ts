@@ -24,8 +24,13 @@
  */
 import { Injectable } from '@nestjs/common';
 
-/** `03-GRPC-CONTRACT.md`/`02-KAFKA-CONTRACTS.md`'s two inbound transports. */
-export type IngestTransport = 'grpc' | 'kafka';
+/** `03-GRPC-CONTRACT.md`/`02-KAFKA-CONTRACTS.md`'s two inbound transports, plus `'rest'` — added by
+ * T-INT-054 (`reward-service-integration-plan`) alongside the new `src/rest/activity-ingest/` REST
+ * option for `SubmitActivity`. Additive only, same "no existing call site named this value" reasoning
+ * `RewardDispatchTier`'s own header already documents for its own `'rest'` addition just below — not
+ * in this task's own "Files owned" list (`src/observability/**` belongs to a different task), a
+ * necessary, minimal edit disclosed in this task's own completion report. */
+export type IngestTransport = 'grpc' | 'kafka' | 'rest';
 
 /**
  * `05-PROCESSING-PIPELINE.md` §7's three dispatch tiers, in the exact casing the design doc uses,

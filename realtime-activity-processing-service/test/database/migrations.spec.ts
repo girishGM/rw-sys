@@ -18,6 +18,7 @@ import { Sequelize } from 'sequelize-typescript';
 import { QueryTypes } from 'sequelize';
 import { createMigrationConnection } from '@/database/migration-connection';
 import { createMigrator } from '@/database/umzug';
+import * as migration018 from '@/database/migrations/018_widen_activity_logs_source_transport_check';
 
 const TENANT_ID = 900_000 + Math.floor(Math.random() * 99_999);
 
@@ -251,6 +252,61 @@ describe('T-RAP-002 — realtime_activity_processing schema migrations', () => {
     ).rejects.toMatchObject({
       name: 'SequelizeUniqueConstraintError',
       parent: expect.objectContaining({ constraint: 'uc_reward_entry_completion' }),
+    });
+  });
+
+  // T-INT-054: migration 018 widens activity_logs_source_transport_check to also accept 'REST'
+  // (the new src/rest/activity-ingest/ transport) — a real INSERT is the only thing that actually
+  // proves the DB-level constraint, not just the TypeScript SourceTransport/ActivitySourceTransport
+  // type unions this same task also widened.
+  it('T-INT-054: accepts a REST source_transport row (migration 018)', async () => {
+    await expect(insertActivityLog(sequelize, { source_transport: 'REST' })).resolves.toEqual(
+      expect.any(String),
+    );
+  });
+
+  // Adjacent behaviour: the constraint still rejects anything outside the three legal values —
+  // widening it to include 'REST' must not have accidentally dropped enforcement entirely.
+  it('T-INT-054: still rejects an unrecognised source_transport value', async () => {
+    await expect(insertActivityLog(sequelize, { source_transport: 'SMS' })).rejects.toMatchObject({
+      name: 'SequelizeDatabaseError',
+      parent: expect.objectContaining({
+        constraint: 'activity_logs_source_transport_check',
+      }),
+    });
+  });
+
+  // T-INT-054 retry 1/3 — review finding: "Migration 018 down is not transactional and breaks
+  // once a REST row exists in activity_logs table." This is the regression test for that exact
+  // finding: calling migration 018's own down() directly (not through Umzug, which would also
+  // untrack it from the migrations table — this only needs to prove the DDL is atomic) while a
+  // real 'REST' row exists must fail loudly on the Postgres constraint violation, and — the part
+  // the original, non-transactional version got wrong — must leave the table's own CHECK
+  // constraint completely unchanged afterward: still the three-value constraint, 'REST' inserts
+  // still working, an invalid value still rejected. Before the fix, this same sequence left the
+  // table with NO source_transport CHECK constraint at all (DROP committed independently of the
+  // ADD that failed after it) — a silently broken table, not a loud, safe failure.
+  it('T-INT-054 retry 1/3: migration 018 down() is atomic — a REST row present fails the rollback without leaving the constraint broken', async () => {
+    await insertActivityLog(sequelize, { source_transport: 'REST' });
+
+    // down() must reject with the real Postgres constraint-violation error, not silently succeed
+    // and not throw some other, unrelated error.
+    await expect(migration018.down({ context: sequelize })).rejects.toMatchObject({
+      name: 'SequelizeDatabaseError',
+      parent: expect.objectContaining({ code: '23514' }), // Postgres check_violation
+    });
+
+    // The load-bearing assertion: the constraint itself must be exactly as before the failed
+    // down() call — still widened to accept 'REST' (not dropped-and-never-restored) — and must
+    // still actually enforce something (not silently missing).
+    await expect(insertActivityLog(sequelize, { source_transport: 'REST' })).resolves.toEqual(
+      expect.any(String),
+    );
+    await expect(insertActivityLog(sequelize, { source_transport: 'SMS' })).rejects.toMatchObject({
+      name: 'SequelizeDatabaseError',
+      parent: expect.objectContaining({
+        constraint: 'activity_logs_source_transport_check',
+      }),
     });
   });
 });

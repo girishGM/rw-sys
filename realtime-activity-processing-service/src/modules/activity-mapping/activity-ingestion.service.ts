@@ -231,10 +231,13 @@ export class ActivityIngestionService {
     });
   }
 
-  /** `03-GRPC-CONTRACT.md`/`02-KAFKA-CONTRACTS.md`'s two inbound transports, mapped onto
-   * `MetricsService`'s own `IngestTransport` label values (`06-CONFIGURABILITY-AND-OBSERVABILITY.md`
-   * §3's `activities_ingested_total{transport}`). */
+  /** This service's three inbound transports, mapped onto `MetricsService`'s own `IngestTransport`
+   * label values (`06-CONFIGURABILITY-AND-OBSERVABILITY.md` §3's
+   * `activities_ingested_total{transport}`). T-INT-054 added the `'REST'` -> `'rest'` branch
+   * alongside the new `src/rest/activity-ingest/` transport. */
   private toIngestTransport(sourceTransport: SourceTransport): IngestTransport {
-    return sourceTransport === 'GRPC' ? 'grpc' : 'kafka';
+    if (sourceTransport === 'GRPC') return 'grpc';
+    if (sourceTransport === 'REST') return 'rest';
+    return 'kafka';
   }
 }

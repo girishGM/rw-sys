@@ -14,8 +14,10 @@
  * instead, derived downstream of this module, not by it).
  */
 
-/** Which transport this activity arrived on — persisted verbatim as `activity_logs.source_transport`. */
-export type SourceTransport = 'GRPC' | 'KAFKA';
+/** Which transport this activity arrived on — persisted verbatim as `activity_logs.source_transport`.
+ * T-INT-054 added `'REST'` (`src/rest/activity-ingest/`) — migration `018` widens the matching DB
+ * CHECK constraint to accept it. */
+export type SourceTransport = 'GRPC' | 'KAFKA' | 'REST';
 
 export interface InboundActivity {
   /**

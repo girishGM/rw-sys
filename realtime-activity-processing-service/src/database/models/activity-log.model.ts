@@ -8,7 +8,9 @@
  * `decimal(18,4)` comes back from `pg` as a string by default, and re-parsing it to a JS `number`
  * risks silent precision loss on a money/quantity value.
  */
-export type ActivitySourceTransport = 'KAFKA' | 'GRPC';
+// T-INT-054: 'REST' added alongside the pre-existing 'KAFKA'/'GRPC' values — migration `018`
+// widens this column's own database-level CHECK constraint to match.
+export type ActivitySourceTransport = 'KAFKA' | 'GRPC' | 'REST';
 export type ActivityLogStatus =
   'pending' | 'processing' | 'processed' | 'error' | 'skipped_duplicate';
 

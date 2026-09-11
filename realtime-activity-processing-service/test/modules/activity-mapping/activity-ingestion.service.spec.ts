@@ -396,6 +396,17 @@ describe('ActivityIngestionService.ingest — observability (T-RAP-058)', () => 
     expect(metrics.getCounterValue('activities_ingested_total', { transport: 'kafka' })).toBe(1);
   });
 
+  // T-INT-054: the new REST transport (src/rest/activity-ingest/) must be labelled 'rest', not
+  // silently folded into the 'kafka' bucket the pre-T-INT-054 two-branch mapping would have used.
+  it("T-INT-054: labels a REST-sourced activity 'rest', not 'kafka'", async () => {
+    const { service, metrics } = buildHarness({ matches: [component()] });
+
+    await service.ingest(buildActivity({ sourceTransport: 'REST' }));
+
+    expect(metrics.getCounterValue('activities_ingested_total', { transport: 'rest' })).toBe(1);
+    expect(metrics.getCounterValue('activities_ingested_total', { transport: 'kafka' })).toBe(0);
+  });
+
   it('increments activities_ingested_total even when the activity matches nothing (still "ingested")', async () => {
     const { service, metrics } = buildHarness({ matches: [] });
 
