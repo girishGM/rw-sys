@@ -24,6 +24,36 @@
  * this component passes" — every *active* `RuleRef` bound to the component must pass (an
  * `Array.prototype.every` over an empty list is vacuously `true`: a component with no bound rules
  * at all always "passes", there being nothing to fail).
+ *
+ * **T-RAP-063 update (Phase 1 of the rule-expression binding fix — see
+ * `realtime-activity-processing-service-plan/brain-storm/T-RAP-063-rule-expression-binding-diagnosis.md`
+ * for the full evidence base).** The grammar above was validated only against this service's own
+ * seed fixtures, never against a real portal-authored `rule_master.expression` — which is a
+ * **template** carrying literal, unbound `:placeholder` tokens (`:value`, `:currency`,
+ * `:windowType`, ...) resolved at bind time from `rule.boundValuesJson`, not a ready-to-parse
+ * `field op literal` triple. Two changes, both scoped to this task:
+ *  1. **A binding/substitution step now runs before `CONDITION_PATTERN` ever sees a clause** —
+ *     any `:placeholder` token present as a simple (string/number) key in `rule.boundValuesJson`
+ *     is substituted with its real value first (`resolveClauseCondition`, module-scope, pure).
+ *  2. **A clause this service cannot fully resolve today no longer throws and rolls back the
+ *     whole claimed transaction.** Whether the gap is a placeholder with nothing on the wire to
+ *     resolve it (e.g. `:operator` — not in `boundValuesJson`, and not even settable through the
+ *     portal's own API for an unversioned binding, diagnosis doc §5), or a placeholder that *does*
+ *     resolve to a literal value but the fully-substituted clause still doesn't fit the supported
+ *     `activity.<field> <op> <literal>` grammar (e.g. `:windowType`'s natural-language "within the
+ *     ... window" phrasing — real resolver dispatch, `T-RAP-064`, not a regex extension here) —
+ *     both are classified as "unresolved", not "malformed": `evaluate()` logs a warning naming the
+ *     rule and the unresolved placeholder(s), evaluates that one rule as **not passed**, and never
+ *     throws. A clause with **zero** `:placeholder` tokens that still fails to parse is unchanged
+ *     — that is a genuine configuration defect (a real bug, not a template gap) and still throws,
+ *     exactly as before this task.
+ *  This is a deliberate behavioral choice (diagnosis doc §8, open question 1): a misconfigured/
+ *  not-yet-wireable rule now silently evaluates false rather than raising a batch-poisoning error,
+ *  because one bad rule anywhere in a tenant's campaign graph must never stall every activity
+ *  behind it in the claim queue. This task's own scope stops at "never throws, correctly binds
+ *  whatever's on the wire today" — it does **not** make `RULE_ACTIVITY_VALUE_001`/
+ *  `RULE_ACTIVITY_WINDOW_001` evaluate to the business-correct answer (that needs the wire-contract
+ *  extension `T-175` plus the resolver-dispatch mechanism `T-RAP-064`).
  */
 import { Injectable, Logger } from '@nestjs/common';
 import type { ActivityLogRow } from '@/database/models/activity-log.model';
@@ -90,6 +120,106 @@ function parseCondition(clause: string): ParsedCondition {
   return { field, operator: operator as ComparisonOperator, literal: parseLiteral(rawLiteral) };
 }
 
+// T-RAP-063: matches a `:placeholder` template token — `:` followed by an identifier, the same
+// shape every real portal-authored `rule_master.expression` template uses (`:value`, `:currency`,
+// `:operator`, `:windowType`, ...). A fresh `RegExp` per call (never a shared module-scope `g`
+// instance) so callers can safely use `matchAll`/`replace` without any shared `lastIndex` state.
+function placeholderPattern(): RegExp {
+  return /:([a-zA-Z_][a-zA-Z0-9_]*)/g;
+}
+
+/**
+ * The raw `:placeholder` tokens present in a clause, ignoring anything inside a quoted string
+ * literal (so a real literal like `"SIGNUP:BONUS"` is never mistaken for a template token) —
+ * order-preserving, de-duplicated.
+ */
+function extractPlaceholders(clause: string): string[] {
+  const withoutQuotedLiterals = clause.replace(/"[^"]*"|'[^']*'/g, '');
+  const seen = new Set<string>();
+  for (const match of withoutQuotedLiterals.matchAll(placeholderPattern())) {
+    seen.add(match[1]);
+  }
+  return Array.from(seen);
+}
+
+/** A `boundValuesJson` value this service knows how to splice into an expression as a literal —
+ * `undefined` for anything else (object, array, `null`, `undefined`), which callers treat exactly
+ * like "no value present" (the value exists on the wire but this service cannot safely stringify
+ * it into the comparison grammar, so it's just as unresolved as a missing key). */
+function formatBoundValueAsLiteral(value: unknown): string | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return String(value);
+  }
+  if (typeof value === 'string') {
+    return JSON.stringify(value);
+  }
+  return undefined;
+}
+
+type ClauseResolution =
+  | { kind: 'condition'; condition: ParsedCondition }
+  | { kind: 'unresolved'; placeholders: string[] };
+
+/**
+ * T-RAP-063. Pure — no row access, no logging — so it's independently testable from the
+ * row/rule-code-aware warning logic `evaluate()` layers on top. Substitutes every `:placeholder`
+ * token found in `clause` from `boundValues` where a simple (string/number) value is present, then
+ * attempts to parse the result as a normal `activity.<field> <op> <literal>` condition.
+ *
+ * A clause with **no** placeholder tokens at all is parsed exactly as before this task — a parse
+ * failure there is a genuine configuration defect, not a template gap, and `parseCondition`'s own
+ * throw is left to propagate.
+ *
+ * A clause **with** placeholder tokens never throws from this function: any token missing from
+ * `boundValues` (or present with a value this service can't format as a literal) is reported back
+ * as `unresolved`; and even when every token *did* resolve, a `parseCondition` failure on the
+ * fully-substituted text (e.g. `:windowType`'s natural-language clause shape — real resolver
+ * dispatch, not a regex extension, is `T-RAP-064`'s job) is *also* reported as `unresolved` rather
+ * than allowed to throw — both are "a clause this service cannot resolve today", not "a genuinely
+ * malformed expression".
+ */
+function resolveClauseCondition(
+  clause: string,
+  boundValues: Readonly<Record<string, unknown>>,
+): ClauseResolution {
+  const rawPlaceholders = extractPlaceholders(clause);
+  if (rawPlaceholders.length === 0) {
+    return { kind: 'condition', condition: parseCondition(clause) };
+  }
+
+  const missing: string[] = [];
+  let substituted = clause;
+  for (const placeholder of rawPlaceholders) {
+    const hasValue = Object.prototype.hasOwnProperty.call(boundValues, placeholder);
+    const literal = hasValue ? formatBoundValueAsLiteral(boundValues[placeholder]) : undefined;
+    if (literal === undefined) {
+      missing.push(placeholder);
+      continue;
+    }
+    substituted = substituted.replace(new RegExp(`:${placeholder}\\b`, 'g'), literal);
+  }
+  if (missing.length > 0) {
+    return { kind: 'unresolved', placeholders: missing };
+  }
+
+  try {
+    return { kind: 'condition', condition: parseCondition(substituted) };
+  } catch {
+    return { kind: 'unresolved', placeholders: rawPlaceholders };
+  }
+}
+
+function splitExpressionClauses(expression: string): string[] {
+  const clauses = expression
+    .split('&&')
+    .map((clause) => clause.trim())
+    .filter((clause) => clause.length > 0);
+  if (clauses.length === 0) {
+    throw new Error('Empty rule expression');
+  }
+  return clauses;
+}
+
 function resolveActivityField(row: ActivityLogRow, field: string): unknown {
   const record = row as unknown as Record<string, unknown>;
   if (!(field in record)) {
@@ -140,16 +270,58 @@ export class RuleEvaluatorService {
   private readonly logger = new Logger(RuleEvaluatorService.name);
 
   /**
-   * Evaluates every *active* `RuleRef` bound to the claimed row's own tracker component. Pure:
-   * throws (never returns) for a malformed/unsupported expression or field, since that is a
-   * genuine configuration defect (`05-PROCESSING-PIPELINE.md` §5 point 3's own "reserve 'error'
-   * for genuine failures ... not for 'the activity didn't satisfy the rule'" — a rule that cannot
-   * even be parsed is the former, not the latter).
+   * Evaluates every *active* `RuleRef` bound to the claimed row's own tracker component. Pure
+   * except for `this.logger.warn` on the T-RAP-063 "unresolved placeholder" path below (no other
+   * side effect, no DB/cache access): throws (never returns) only for a malformed/unsupported
+   * expression that carries **no** `:placeholder` template token — a genuine configuration defect
+   * (`05-PROCESSING-PIPELINE.md` §5 point 3's own "reserve 'error' for genuine failures ... not for
+   * 'the activity didn't satisfy the rule'" — a rule that cannot even be parsed is the former, not
+   * the latter) — or for an unknown `activity.<field>` reference, same as before this task.
+   *
+   * T-RAP-063: a clause that *does* carry a `:placeholder` token this service cannot resolve today
+   * (missing from `boundValuesJson`, or resolvable to a literal but still not a supported
+   * `activity.<field> <op> <literal>` shape once substituted) no longer throws — see this file's
+   * own header. That rule is evaluated as **not passed**, with a warning naming the exact
+   * unresolved placeholder(s) and the rule code, and every other rule bound to this same component
+   * (and every other row in the claimed queue) proceeds completely unaffected.
    */
   evaluate(row: ActivityLogRow, ruleRefs: readonly BoundRuleProto[]): RuleEvaluationOutcome {
     const activeRules = ruleRefs.filter((rule) => rule.status === 'active');
     for (const rule of activeRules) {
-      if (!this.evaluateExpression(row, rule.expression)) {
+      const boundValues = this.parseBoundValuesJson(rule);
+      const clauses = splitExpressionClauses(rule.expression);
+      let unresolvedPlaceholders: string[] | null = null;
+      let clausesPassed = true;
+      for (const clause of clauses) {
+        const resolution = resolveClauseCondition(clause, boundValues);
+        if (resolution.kind === 'unresolved') {
+          unresolvedPlaceholders = resolution.placeholders;
+          break;
+        }
+        if (!compare(resolveActivityField(row, resolution.condition.field), resolution.condition)) {
+          clausesPassed = false;
+          break;
+        }
+      }
+
+      if (unresolvedPlaceholders !== null) {
+        for (const placeholder of unresolvedPlaceholders) {
+          this.logger.warn(
+            `rule ${rule.ruleCode} on tracker_component ${row.tracker_component_code}: ` +
+              `cannot resolve :${placeholder} (not present on this event's rule metadata) — ` +
+              'evaluating as not-passed',
+          );
+        }
+        return {
+          passed: false,
+          failedRuleCode: rule.ruleCode,
+          comment:
+            `Rule "${rule.ruleCode}" could not be evaluated: unresolved placeholder(s) ` +
+            `${unresolvedPlaceholders.map((p) => `:${p}`).join(', ')} in expression ` +
+            `"${rule.expression}" for activity_logs row ${row.id} — evaluated as not passed.`,
+        };
+      }
+      if (!clausesPassed) {
         return {
           passed: false,
           failedRuleCode: rule.ruleCode,
@@ -189,22 +361,7 @@ export class RuleEvaluatorService {
   }
 
   private extractRequiredCountOverride(rule: BoundRuleProto): number | undefined {
-    if (!rule.boundValuesJson) {
-      return undefined;
-    }
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(rule.boundValuesJson);
-    } catch {
-      this.logger.warn(
-        `Rule "${rule.ruleCode}" has malformed boundValuesJson (${JSON.stringify(rule.boundValuesJson)}) — ignored for required-count resolution.`,
-      );
-      return undefined;
-    }
-    if (typeof parsed !== 'object' || parsed === null) {
-      return undefined;
-    }
-    const record = parsed as Record<string, unknown>;
+    const record = this.parseBoundValuesJson(rule);
     for (const key of REQUIRED_COUNT_KEYS) {
       const value = record[key];
       if (typeof value === 'number' && Number.isInteger(value) && value > 0) {
@@ -214,17 +371,30 @@ export class RuleEvaluatorService {
     return undefined;
   }
 
-  private evaluateExpression(row: ActivityLogRow, expression: string): boolean {
-    const clauses = expression
-      .split('&&')
-      .map((clause) => clause.trim())
-      .filter((clause) => clause.length > 0);
-    if (clauses.length === 0) {
-      throw new Error(`Empty rule expression`);
+  /**
+   * `rule.boundValuesJson` parsed to a plain object, or `{}` when absent/malformed/not an object —
+   * shared by `extractRequiredCountOverride` (pre-dates this task) and, as of T-RAP-063, by
+   * `evaluate()`'s own `:placeholder` substitution step. A malformed value is logged once and
+   * treated as "no bound values at all", never thrown — same discipline both callers already
+   * relied on for `boundValuesJson`, which is a convenience channel, not load-bearing config the
+   * way `expression` itself is.
+   */
+  private parseBoundValuesJson(rule: BoundRuleProto): Record<string, unknown> {
+    if (!rule.boundValuesJson) {
+      return {};
     }
-    return clauses.every((clause) => {
-      const condition = parseCondition(clause);
-      return compare(resolveActivityField(row, condition.field), condition);
-    });
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(rule.boundValuesJson);
+    } catch {
+      this.logger.warn(
+        `Rule "${rule.ruleCode}" has malformed boundValuesJson (${JSON.stringify(rule.boundValuesJson)}) — ignored.`,
+      );
+      return {};
+    }
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      return {};
+    }
+    return parsed as Record<string, unknown>;
   }
 }

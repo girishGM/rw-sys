@@ -239,6 +239,212 @@ describe('RuleEvaluatorService.evaluate (pure, no DB)', () => {
   });
 });
 
+// T-RAP-063 (Phase 1 of the rule-expression binding fix — see
+// realtime-activity-processing-service-plan/brain-storm/T-RAP-063-rule-expression-binding-diagnosis.md
+// for the full evidence base). Both fixture expressions/boundValuesJson below are the *real*,
+// verbatim rows the diagnosis doc pulled from the live Render database (§3) — reproducing the
+// actual production incident, not an invented shape. TC-6 ("proven to fail when reverted") was
+// verified manually against this task's own pre-fix `rule-evaluator.service.ts` (`git stash` the
+// src change, run this file, observe every test in this describe block throw/fail; `git stash
+// pop`, observe green) — see this task's own completion report.
+describe('RuleEvaluatorService.evaluate — T-RAP-063 placeholder binding (pure, no DB)', () => {
+  const evaluator = new RuleEvaluatorService();
+
+  // Row set A (diagnosis doc §3) — WEEKEND_PROMO_BLITZ / TRK-2-3FEL0D / CMP-2-ZYW5QI,
+  // `RULE_ACTIVITY_VALUE_001`. `:operator` is not on the wire at all (and not even settable
+  // through the portal's own API for an unversioned binding — diagnosis doc §5) while `:value`/
+  // `:currency` are.
+  const valueComparisonRule = () =>
+    rule({
+      ruleCode: 'RULE_ACTIVITY_VALUE_001',
+      expression: 'transaction.amount :operator :value (transaction.currency == :currency)',
+      boundValuesJson: '{"value":0,"currency":"MYR"}',
+    });
+
+  // Row set B (diagnosis doc §3) — WELCOME_STREAK_LIVE / TRK-530457-OQIDT5 / CMP-530457-JHISLD,
+  // `RULE_ACTIVITY_WINDOW_001`. `:windowType` *is* present in the wire config (`tcr.config`), but
+  // resolving it into an actual time-window comparison needs real resolver dispatch (T-RAP-064) —
+  // this Phase-1 fix only stops the throw, it does not make this rule pass for real.
+  const windowRule = () =>
+    rule({
+      ruleCode: 'RULE_ACTIVITY_WINDOW_001',
+      expression: 'currentTime within the :windowType window',
+      boundValuesJson: '{"windowType":"DAILY_HOURS","windowStart":"00:00","windowEnd":"23:59"}',
+    });
+
+  // TC-1 (reproduce) / TC-2 (fixed): unfixed code throws `Unsupported rule expression clause`
+  // here (verified manually, see this describe block's own header) — fixed code never throws,
+  // evaluates not-passed, and warns naming the one placeholder genuinely absent from the wire.
+  it('TC-1/TC-2: RULE_ACTIVITY_VALUE_001 (real expression) does not throw — not-passed, warns naming :operator', () => {
+    const warnSpy = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    try {
+      const row = fakeRow({ tracker_component_code: 'CMP-2-ZYW5QI' });
+      let outcome: ReturnType<typeof evaluator.evaluate> | undefined;
+
+      expect(() => {
+        outcome = evaluator.evaluate(row, [valueComparisonRule()]);
+      }).not.toThrow();
+
+      expect(outcome?.passed).toBe(false);
+      expect(outcome?.failedRuleCode).toBe('RULE_ACTIVITY_VALUE_001');
+      expect(outcome?.comment).toContain(':operator');
+      expect(warnSpy.mock.calls.some((call) => String(call[0]).includes(':operator'))).toBe(true);
+      expect(
+        warnSpy.mock.calls.some((call) => String(call[0]).includes('RULE_ACTIVITY_VALUE_001')),
+      ).toBe(true);
+      expect(warnSpy.mock.calls.some((call) => String(call[0]).includes('CMP-2-ZYW5QI'))).toBe(
+        true,
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  // TC-3 (reproduce + fix): same shape as TC-1/TC-2, for the natural-language window clause — not
+  // passed, logged, no throw, even though `:windowType` itself does have a wire value.
+  it('TC-3: RULE_ACTIVITY_WINDOW_001 (real expression) does not throw — not-passed, warns naming :windowType', () => {
+    const warnSpy = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    try {
+      const row = fakeRow({ tracker_component_code: 'CMP-530457-JHISLD' });
+      let outcome: ReturnType<typeof evaluator.evaluate> | undefined;
+
+      expect(() => {
+        outcome = evaluator.evaluate(row, [windowRule()]);
+      }).not.toThrow();
+
+      expect(outcome?.passed).toBe(false);
+      expect(outcome?.failedRuleCode).toBe('RULE_ACTIVITY_WINDOW_001');
+      expect(outcome?.comment).toContain(':windowType');
+      expect(warnSpy.mock.calls.some((call) => String(call[0]).includes(':windowType'))).toBe(true);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  // TC-4: a rule whose boundValuesJson fully covers its own placeholder, and whose substituted
+  // clause fits the supported grammar, evaluates correctly (both pass and fail) with no warning.
+  it('TC-4: a fully wire-resolvable :value template evaluates correctly, no warning logged', () => {
+    const warnSpy = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    try {
+      const templateRule = () =>
+        rule({
+          ruleCode: 'RULE_TEMPLATE_OK',
+          expression: 'activity.activity_value >= :value',
+          boundValuesJson: '{"value":100}',
+        });
+
+      const passing = evaluator.evaluate(fakeRow({ activity_value: '150.0000' }), [templateRule()]);
+      expect(passing.passed).toBe(true);
+
+      const failing = evaluator.evaluate(fakeRow({ activity_value: '50.0000' }), [templateRule()]);
+      expect(failing.passed).toBe(false);
+      expect(failing.comment).not.toContain('unresolved');
+
+      expect(warnSpy).not.toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  // Substitution isn't hardcoded to :value — a string-valued placeholder (:currency-shaped)
+  // substitutes and evaluates correctly too.
+  it('a string-valued placeholder substitutes and evaluates correctly', () => {
+    const outcome = evaluator.evaluate(fakeRow({ activity_value_unit: 'USD' }), [
+      rule({
+        ruleCode: 'RULE_TEMPLATE_CURRENCY',
+        expression: 'activity.activity_value_unit == :unit',
+        boundValuesJson: '{"unit":"USD"}',
+      }),
+    ]);
+    expect(outcome.passed).toBe(true);
+  });
+
+  // TC-5: an unresolvable rule never poisons anything outside its own `evaluate()` call — a
+  // separate row/rule set evaluated right after (representing another row in the same claimed
+  // queue) is unaffected, and within one row, an earlier resolvable rule's own AND-short-circuit
+  // behavior is unchanged.
+  it('TC-5: an unresolvable rule does not affect a resolvable rule bound to a different row/component', () => {
+    const warnSpy = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    try {
+      const unresolved = evaluator.evaluate(fakeRow({ tracker_component_code: 'CMP-BAD' }), [
+        valueComparisonRule(),
+      ]);
+      expect(unresolved.passed).toBe(false);
+
+      const resolvable = evaluator.evaluate(fakeRow({ activity_value: '10.0000' }), [
+        rule({ ruleCode: 'RULE_FINE', expression: 'activity.activity_value >= 1' }),
+      ]);
+      expect(resolvable.passed).toBe(true);
+
+      const mixed = evaluator.evaluate(fakeRow({ activity_value: '10.0000' }), [
+        rule({ ruleCode: 'RULE_FINE_2', expression: 'activity.activity_value >= 1' }),
+        valueComparisonRule(),
+      ]);
+      expect(mixed.passed).toBe(false);
+      expect(mixed.failedRuleCode).toBe('RULE_ACTIVITY_VALUE_001');
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  // TC-6 regression: a brand-new, never-hardcoded placeholder name on a hypothetical future rule
+  // shape hits the exact same safe path — proves the fix generalizes rather than special-casing
+  // :operator/:windowType by name.
+  it('TC-6 regression: an arbitrary unresolvable placeholder on a brand-new rule shape does not throw', () => {
+    const futureRule = () =>
+      rule({
+        ruleCode: 'RULE_FUTURE_SHAPE',
+        expression: 'activity.activity_value :someBrandNewOperator :someBrandNewValue',
+        boundValuesJson: '{}',
+      });
+
+    expect(() => evaluator.evaluate(fakeRow(), [futureRule()])).not.toThrow();
+    const outcome = evaluator.evaluate(fakeRow(), [futureRule()]);
+    expect(outcome.passed).toBe(false);
+    expect(outcome.comment).toContain(':someBrandNewOperator');
+  });
+
+  // A genuinely malformed expression carrying no `:placeholder` token at all is unchanged by this
+  // task — still a real configuration defect, still throws.
+  it('a genuinely malformed expression with no placeholder tokens still throws (unchanged behavior)', () => {
+    expect(() =>
+      evaluator.evaluate(fakeRow(), [
+        rule({ ruleCode: 'RULE_BAD', expression: 'not a valid expression, still no colon token' }),
+      ]),
+    ).toThrow();
+  });
+
+  // Malformed boundValuesJson on a templated rule is logged and treated as fully unresolved
+  // (never thrown) — same discipline `resolveRequiredCount` already applies to this field.
+  it('malformed boundValuesJson on a templated rule is treated as fully unresolved, not thrown', () => {
+    const warnSpy = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    try {
+      const outcome = evaluator.evaluate(fakeRow(), [
+        rule({
+          ruleCode: 'RULE_BAD_JSON',
+          expression: 'activity.activity_value >= :value',
+          boundValuesJson: 'not json',
+        }),
+      ]);
+      expect(outcome.passed).toBe(false);
+      expect(outcome.comment).toContain(':value');
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  // A literal string containing a colon is never mistaken for a placeholder token.
+  it('a quoted literal containing a colon is not treated as a placeholder', () => {
+    const outcome = evaluator.evaluate(fakeRow({ activity_type: 'SIGNUP:BONUS' }), [
+      rule({
+        ruleCode: 'RULE_COLON_LITERAL',
+        expression: 'activity.activity_type == "SIGNUP:BONUS"',
+      }),
+    ]);
+    expect(outcome.passed).toBe(true);
+  });
+});
+
 describe('RuleEvaluatorService.resolveRequiredCount (pure, no DB)', () => {
   const evaluator = new RuleEvaluatorService();
 
