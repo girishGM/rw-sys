@@ -85,6 +85,15 @@ RUN groupadd --gid 1001 nodeapp \
 COPY --from=prod-deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/package.json ./package.json
+# Third occurrence of the same bug class already fixed for reward-redemption-service and
+# reward-tracking-service's own Dockerfiles: `nest build` never copies `.proto` files into
+# `dist/` on its own (no `nest-cli.json` exists for this project at all), and every gRPC
+# client/server this service constructs (campaign-config.client.ts, the inbound activity-ingest
+# gRPC server, reward-ingest dispatch) loads its `.proto` file via protobufjs's synchronous
+# `fs.readFileSync` at module construction — throws and crash-loops the whole process before
+# `app.listen()` if the file isn't here. Confirmed missing via live Render logs (ENOENT on
+# /app/proto/campaign_config.proto) after redeploying to pick up T-INT-054's new env vars.
+COPY proto ./proto
 
 USER nodeapp
 
