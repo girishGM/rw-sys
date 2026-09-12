@@ -75,6 +75,7 @@ import {
 // T-171 — `reward_portal`, not `reward_config` (R1 forbids new DDL there); hence the second
 // import rather than an addition to the barrel above.
 import { ActivityExternalCode } from '@/database/portal-models';
+import { parseJsonColumn } from '@/database/util/json-text.util';
 import { calendarDateOf } from '@/modules/campaigns/campaign-date';
 import { ROW_ACTIVE } from './grpc.constants';
 import { IncompleteConfigError } from './grpc.errors';
@@ -138,6 +139,17 @@ export interface BoundRulePayload {
   readonly boundValuesJson: string;
   readonly trackerComponentId: number;
   readonly status: string;
+  /** T-175 — `tracker_component_rules.operator`, the maker's comparison for THIS binding. Read
+   * off its own column, never out of `config` (which feeds `boundValuesJson`). `''` when unset. */
+  readonly operator: string;
+  /** T-175 — the resolver wiring of the version this binding resolved to (`ruleVersionId`
+   * above): `rule_versions.resolver_id` / `resolver_config` / `default_operators` (T-103's
+   * columns, never projected onto this message before). `0` / `''` / `[]` when the version has
+   * no resolver wired **or** when no version resolved at all — the empty case is meaningful
+   * ("no resolver configured") and is never replaced by a guess. */
+  readonly resolverId: number;
+  readonly resolverConfig: string;
+  readonly defaultOperators: readonly string[];
 }
 
 export interface BoundRewardPayload {
@@ -567,8 +579,62 @@ export class ConfigSnapshotBuilder {
         boundValuesJson: JSON.stringify(binding.config ?? {}),
         trackerComponentId: binding.trackerComponentId,
         status: binding.status,
+        // T-175 — `operator` is its own column on the binding; the three resolver fields come off
+        // the SAME `version` the `expression` above was read from (pinned, else resolved as at the
+        // pin date), so an expression and the wiring needed to bind it can never disagree. With no
+        // version at all they are the zero values, and so they are for a version with no resolver.
+        operator: binding.operator ?? '',
+        resolverId: version?.resolverId ?? 0,
+        resolverConfig: this.resolverConfigOf(version, campaign),
+        defaultOperators: this.defaultOperatorsOf(version, campaign),
       };
     });
+  }
+
+  /**
+   * T-175 — `rule_versions.resolver_config` is a `text` column holding JSON (T-103), read verbatim
+   * by the model. It is parsed with the same tolerant helper the REST `RuleVersionDto` uses
+   * (`version-response.dto.ts`, T-109) and re-serialised, so the wire carries canonical JSON the
+   * way `boundValuesJson` already does. `NULL`/empty reads as "not wired" (`''`); malformed content
+   * — impossible through the portal's own write path, which stores from a validated object — is
+   * also `''`, but logged, because silently serving a resolver id with no config would look like a
+   * legitimate "resolver configured, empty config" to the runtime.
+   */
+  private resolverConfigOf(version: RuleVersion | null, campaign: TenantCampaign): string {
+    const raw = version?.resolverConfig ?? null;
+    if (raw === null || raw === '') return '';
+    const parsed = parseJsonColumn<unknown>(raw, null);
+    if (parsed === null) {
+      this.logger.warn(
+        `campaign ${campaign.campaignCode}: rule_version ${version?.id ?? 0} holds malformed ` +
+          'resolver_config; serving it as empty',
+      );
+      return '';
+    }
+    return JSON.stringify(parsed);
+  }
+
+  /**
+   * T-175 — `rule_versions.default_operators` is JSON-array text of `rule_operators.operator_code`
+   * values (`rule-version.model.ts`). Served as `repeated string`, in stored order; anything that is
+   * not an array of strings is served as `[]` and logged, on the same reasoning as
+   * {@link resolverConfigOf}.
+   */
+  private defaultOperatorsOf(
+    version: RuleVersion | null,
+    campaign: TenantCampaign,
+  ): readonly string[] {
+    const raw = version?.defaultOperators ?? null;
+    if (raw === null || raw === '') return [];
+    const parsed = parseJsonColumn<unknown>(raw, null);
+    if (!Array.isArray(parsed) || !parsed.every((entry) => typeof entry === 'string')) {
+      this.logger.warn(
+        `campaign ${campaign.campaignCode}: rule_version ${version?.id ?? 0} holds ` +
+          'default_operators that is not a JSON array of strings; serving it as empty',
+      );
+      return [];
+    }
+    return parsed as string[];
   }
 
   /** REWARDS — the three attachment levels, with units, and never `connector_config` (§6). */

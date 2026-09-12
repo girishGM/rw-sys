@@ -184,6 +184,32 @@ message BoundRule {
   string bound_values_json   = 7;  // the DYNAMIC VALUES the maker supplied for THIS campaign
   int32  tracker_component_id = 8;
   string status              = 9;
+
+  // Added by T-175, appended at the next free numbers — 1-9 above are untouched (rule 1).
+  //
+  // `expression` (field 5) is a TEMPLATE with named placeholders (`:operator`, `:value`,
+  // `:windowType`, ...). `bound_values_json` fills the value-shaped ones; the four fields below
+  // carry the rest of what the engine needs to bind it, all of which the portal database already
+  // held but never projected onto this message (T-RAP-063 diagnosis).
+  //
+  // `operator` is the maker's chosen comparison for THIS binding
+  // (`tracker_component_rules.operator`) — a separate column from `bound_values_json`'s source,
+  // never folded into it. Empty when the maker set none.
+  string operator = 10;
+
+  // The resolver wiring frozen on the rule version this binding resolves to (fields 2/3):
+  // `rule_versions.resolver_id` / `resolver_config` / `default_operators`. A version with no
+  // resolver wired serves `0` / empty / empty, and so does a binding that resolves to no version
+  // at all (`rule_version_id = 0`) — **the empty case is real information** ("no resolver
+  // configured"), never a fabricated default, and a consumer must keep it distinct from "resolver
+  // configured, but with an empty config".
+  //
+  // `resolver_config` is a JSON document as a string, the same treatment as `bound_values_json`.
+  // `resolver_id` names a row of the portal's `rule_resolvers` registry (e.g. 5 = SCHEDULE_CONTEXT
+  // on the seeded registry); the registry itself is not served here.
+  int32  resolver_id     = 11;
+  string resolver_config = 12;
+  repeated string default_operators = 13;  // the operator codes this version permits
 }
 
 // A reward as attached to a campaign, tracker or component, with its version pinned.

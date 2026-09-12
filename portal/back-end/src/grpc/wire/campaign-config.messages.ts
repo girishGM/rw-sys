@@ -91,6 +91,12 @@ export const BoundRuleMessage: MessageDescriptor = {
     { name: 'bound_values_json', no: 7, type: 'string' },
     { name: 'tracker_component_id', no: 8, type: 'int32' },
     { name: 'status', no: 9, type: 'string' },
+    // T-175 — transcribed from the `.proto`, which is the contract. Appended at the next free
+    // numbers; 1-9 above are untouched.
+    { name: 'operator', no: 10, type: 'string' },
+    { name: 'resolver_id', no: 11, type: 'int32' },
+    { name: 'resolver_config', no: 12, type: 'string' },
+    { name: 'default_operators', no: 13, type: 'string', repeated: true },
   ],
 };
 

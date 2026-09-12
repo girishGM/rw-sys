@@ -1387,7 +1387,15 @@ describe('load (TC-27, TC-28, TC-45)', () => {
 
   it('TC-28 — exceeding the per-identity rate limit is RESOURCE_EXHAUSTED', async () => {
     const { ServiceRateLimiter } = await import('@/grpc/rate-limit');
-    const limiter = app.get(ServiceRateLimiter) as InstanceType<typeof ServiceRateLimiter>;
+    const { GrpcModule } = await import('@/grpc/grpc.module');
+    // T-175 — resolved from `GrpcModule` explicitly, not via a container-wide `app.get()`. Since
+    // T-INT-010 the REST mirror (`CampaignConfigApiModule`) re-provides `ServiceRateLimiter` as a
+    // second DI instance, and a non-strict lookup may hand back *that* one — leaving the gRPC
+    // path's limiter unmocked and this call answered with OK. The instance the gRPC listener
+    // actually consults is the one `GrpcModule` owns.
+    const limiter = app
+      .select(GrpcModule)
+      .get(ServiceRateLimiter, { strict: true }) as InstanceType<typeof ServiceRateLimiter>;
     const spy = jest.spyOn(limiter, 'consume').mockImplementation(() => {
       const { RateLimitExceededError } = jest.requireActual('@/grpc/rate-limit.ts') as never;
       void RateLimitExceededError;

@@ -135,6 +135,11 @@ describe('proto-codec — decoding', () => {
       boundValuesJson: '',
       trackerComponentId: 0,
       status: '',
+      // T-175 — fields 10-13. A repeated field's default is the empty list, never `undefined`.
+      operator: '',
+      resolverId: 0,
+      resolverConfig: '',
+      defaultOperators: [],
     });
   });
 
@@ -211,6 +216,11 @@ describe('proto-codec — round trips', () => {
           boundValuesJson: '{"minSpend":150}',
           trackerComponentId: 11,
           status: 'active',
+          // T-175 — fields 10-13.
+          operator: '>=',
+          resolverId: 1,
+          resolverConfig: '{"path":"$.amount"}',
+          defaultOperators: ['>=', '>'],
         },
       ],
       rewards: [
