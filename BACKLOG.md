@@ -36,6 +36,26 @@ one other real clause type without this landing first).
 
 ---
 
+## RS-06 · `merchant_code` is routinely NULL on real activity submissions — is that acceptable?
+
+**Status:** decision-needed · **Raised:** 2026-09-12 (live Render testing via test-app)
+
+Confirmed by direct code read, not a bug: `test-app/frontend/src/features/activity-simulator/
+ActivityForm.tsx` treats merchant as a deliberately optional free-text input (no merchant catalog
+exists in test-app's model to populate a picker from — a prior, T-010-era decision). Both test-app's
+own submission mapping (`rap-client/mapping.ts`) and RAP's ingestion
+(`activity-mapping/activity-ingestion.service.ts`) correctly pass through whatever merchant was
+typed (or wasn't) — a blank `merchant_code` on `realtime_activity_processing.activity_logs` simply
+means no merchant was entered for that submission, exactly as designed today.
+
+**What's needed**: a product decision on whether this is fine for the demo (optional, sometimes
+NULL) or whether merchant should become required/defaulted per activity type for more realistic
+demo data (and, if so, whether that needs a real merchant catalog in test-app rather than free
+text). No task filed pending this decision — filing one before the shape is agreed would guess at
+the answer.
+
+---
+
 ## RS-01 · Campaign owner contact — schema location
 
 **Status:** decision-needed · **Raised:** 2026-09-07 (reward-tracking-service brainstorm review)
