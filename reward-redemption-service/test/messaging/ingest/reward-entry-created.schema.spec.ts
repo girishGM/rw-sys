@@ -259,6 +259,53 @@ describe('validateRewardEntryCreatedMessage', () => {
     });
   });
 
+  // T-INT-058
+  it('T-INT-058 TC-2: propagates rewardKind/promoCodeConfigId/promoCodeConfigVersionNo verbatim when present', () => {
+    const result = validateRewardEntryCreatedMessage(
+      validBody({
+        rewardKind: 'PROMO_CODE',
+        promoCodeConfigId: 'PCC-001',
+        promoCodeConfigVersionNo: 3,
+      }),
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.dto.rewardKind).toBe('PROMO_CODE');
+    expect(result.dto.promoCodeConfigId).toBe('PCC-001');
+    expect(result.dto.promoCodeConfigVersionNo).toBe(3);
+  });
+
+  it('T-INT-058 TC-4: an old-shaped message omitting rewardKind/promoCodeConfigId/promoCodeConfigVersionNo still validates, all three null', () => {
+    const result = validateRewardEntryCreatedMessage(validBody());
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.dto.rewardKind).toBeNull();
+    expect(result.dto.promoCodeConfigId).toBeNull();
+    expect(result.dto.promoCodeConfigVersionNo).toBeNull();
+  });
+
+  it("T-INT-058: explicit null rewardKind/promoCodeConfigId/promoCodeConfigVersionNo (RAP's own buildOutboxPayload shape) validate as null", () => {
+    const result = validateRewardEntryCreatedMessage(
+      validBody({ rewardKind: null, promoCodeConfigId: null, promoCodeConfigVersionNo: null }),
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.dto.rewardKind).toBeNull();
+    expect(result.dto.promoCodeConfigId).toBeNull();
+    expect(result.dto.promoCodeConfigVersionNo).toBeNull();
+  });
+
+  it('T-INT-058: an unrecognized rewardKind value degrades to null, never a validation failure', () => {
+    const result = validateRewardEntryCreatedMessage(validBody({ rewardKind: 'NOT_A_REAL_KIND' }));
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.dto.rewardKind).toBeNull();
+  });
+
   it('never expects/validates country, tenantCode, or rewardProcessedEnv (never on this wire)', () => {
     // A message that only carries these three plus the real mandatory fields must still validate
     // successfully — their presence or absence is never inspected.

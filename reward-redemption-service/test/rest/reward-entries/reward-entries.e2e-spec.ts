@@ -181,6 +181,66 @@ describe('T-RR-013 — POST /api/v1/reward-entries (real AppModule, real Postgre
     expect(await countRows(body.id as string)).toBe(0);
   });
 
+  // T-INT-058 TC-6: full local re-run of T-INT-056's own scenario, real Postgres — a PROMO_CODE
+  // reward's reward_kind/promo_code_config_id/promo_code_config_version_no are actually persisted,
+  // not silently dropped as they were before this fix (root-cause note 2/3, this task's own header).
+  it('T-INT-058 TC-6: a PROMO_CODE-kind reward entry persists reward_kind/promo_code_config_id/promo_code_config_version_no for real', async () => {
+    const body = baseBody({
+      rewardCode: 'RWD-PROMO-VOUCHER',
+      rewardCategory: 'PROMO',
+      rewardValue: '0',
+      rewardValueUnit: '',
+      rewardKind: 'PROMO_CODE',
+      promoCodeConfigId: 'PCC-CFG-001',
+      promoCodeConfigVersionNo: 7,
+    });
+
+    const response = await request(app.getHttpServer())
+      .post('/api/v1/reward-entries')
+      .set('Authorization', `Bearer ${TOKEN}`)
+      .send(body);
+
+    expect(response.status).toBe(200);
+
+    const rows = await db.query<{
+      reward_kind: string | null;
+      promo_code_config_id: string | null;
+      promo_code_config_version_no: number | null;
+    }>(
+      `SELECT reward_kind, promo_code_config_id, promo_code_config_version_no
+       FROM reward_redemption.reward_redemption_entry WHERE id = :id`,
+      { type: QueryTypes.SELECT, replacements: { id: body.id } },
+    );
+    expect(rows[0].reward_kind).toBe('PROMO_CODE');
+    expect(rows[0].promo_code_config_id).toBe('PCC-CFG-001');
+    expect(rows[0].promo_code_config_version_no).toBe(7);
+  });
+
+  // T-INT-058 TC-4 (real Postgres): an old-shaped body persists all three as NULL, never fabricated.
+  it('T-INT-058 TC-4: an old-shaped body (no reward_kind/promo_code_config_id/promo_code_config_version_no) persists all three as NULL', async () => {
+    const body = baseBody();
+
+    const response = await request(app.getHttpServer())
+      .post('/api/v1/reward-entries')
+      .set('Authorization', `Bearer ${TOKEN}`)
+      .send(body);
+
+    expect(response.status).toBe(200);
+
+    const rows = await db.query<{
+      reward_kind: string | null;
+      promo_code_config_id: string | null;
+      promo_code_config_version_no: number | null;
+    }>(
+      `SELECT reward_kind, promo_code_config_id, promo_code_config_version_no
+       FROM reward_redemption.reward_redemption_entry WHERE id = :id`,
+      { type: QueryTypes.SELECT, replacements: { id: body.id } },
+    );
+    expect(rows[0].reward_kind).toBeNull();
+    expect(rows[0].promo_code_config_id).toBeNull();
+    expect(rows[0].promo_code_config_version_no).toBeNull();
+  });
+
   // TC-7
   it("TC-7: a duplicate id already resolved to status 'failed' returns 200 reporting 'failed'", async () => {
     const body = baseBody();

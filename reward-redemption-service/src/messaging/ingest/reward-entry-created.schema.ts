@@ -21,8 +21,20 @@
  * **`country`/`tenantCode`/`rewardProcessedEnv` are never expected on this wire**
  * (`ARCHITECTURE.md` §6's reconciliation table, implementation note 6) — this validator does not
  * look for them, and their absence is never a validation failure.
+ *
+ * **T-INT-058.** `rewardKind`/`promoCodeConfigId`/`promoCodeConfigVersionNo` (RAP's own
+ * `buildOutboxPayload`, `null` when not applicable, never omitted per that file's own header) are
+ * read here too, using the same shared, never-throwing normalizers
+ * (`parseRewardKind`/`parsePromoCodeConfigVersionNo`) the gRPC/REST legs also use — absent,
+ * `null`, or an unrecognized value all degrade to `null`, never a validation failure, since this
+ * metadata is descriptive-only (RAP's own proto comment).
  */
-import { isValidDecimalString, parseIsoDateWithOffset } from '@/grpc/reward-ingest.validation';
+import {
+  isValidDecimalString,
+  parseIsoDateWithOffset,
+  parsePromoCodeConfigVersionNo,
+  parseRewardKind,
+} from '@/grpc/reward-ingest.validation';
 import type { RewardEntryIngestDto } from '@/modules/reward-ingestion/reward-entry-ingest.dto';
 
 export type SchemaValidationResult =
@@ -192,6 +204,12 @@ export function validateRewardEntryCreatedMessage(payload: unknown): SchemaValid
     return { ok: false, reason: 'completionCycle is required and must be an integer' };
   }
 
+  // T-INT-058: descriptive-only, never mandatory — an old-shaped message with none of these three
+  // fields at all must keep validating successfully (implementation note per this task's TC-4).
+  const rewardKind = parseRewardKind(body.rewardKind);
+  const promoCodeConfigId = optionalString(body.promoCodeConfigId);
+  const promoCodeConfigVersionNo = parsePromoCodeConfigVersionNo(body.promoCodeConfigVersionNo);
+
   return {
     ok: true,
     dto: {
@@ -221,6 +239,9 @@ export function validateRewardEntryCreatedMessage(payload: unknown): SchemaValid
       rewardEntryDate,
       completionCycle,
       ingestionChannel: 'KAFKA',
+      rewardKind,
+      promoCodeConfigId,
+      promoCodeConfigVersionNo,
     },
   };
 }

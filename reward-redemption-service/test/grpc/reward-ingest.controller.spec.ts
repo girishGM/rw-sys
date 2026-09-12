@@ -339,6 +339,87 @@ describe('T-RR-011 — RewardIngestController (unit, mocked domain service)', ()
     expect(ingest).toHaveBeenCalledWith(expect.objectContaining({ merchantCode: 'MERCH1' }));
   });
 
+  // T-INT-058 TC-1/TC-4: reward_kind/promo_code_config_id/promo_code_config_version_no.
+  it('T-INT-058 TC-1: propagates reward_kind/promo_code_config_id/promo_code_config_version_no verbatim when present', async () => {
+    const ingest = jest.fn().mockResolvedValue(receivedResult);
+    const { controller, identityContext } = buildController(ingest);
+    const call = {};
+    identityContext.set(call, 1);
+
+    await controller.submitRewardEntry(
+      {
+        ...validRequest,
+        rewardKind: 'PROMO_CODE',
+        promoCodeConfigId: 'PCC-001',
+        promoCodeConfigVersionNo: 3,
+      },
+      undefined,
+      call,
+    );
+
+    expect(ingest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        rewardKind: 'PROMO_CODE',
+        promoCodeConfigId: 'PCC-001',
+        promoCodeConfigVersionNo: 3,
+      }),
+    );
+  });
+
+  it('T-INT-058 TC-4: an old-shaped request omitting reward_kind/promo_code_config_id/promo_code_config_version_no still succeeds, all three null', async () => {
+    const ingest = jest.fn().mockResolvedValue(receivedResult);
+    const { controller, identityContext } = buildController(ingest);
+    const call = {};
+    identityContext.set(call, 1);
+
+    const response = await controller.submitRewardEntry(validRequest, undefined, call);
+
+    expect(ingest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        rewardKind: null,
+        promoCodeConfigId: null,
+        promoCodeConfigVersionNo: null,
+      }),
+    );
+    expect(response).toEqual({ rewardEntryId: 'reward-entry-1', status: 'received' });
+  });
+
+  it('T-INT-058: treats reward_kind "" / promo_code_config_version_no 0 (proto3 unset sentinels) as null, not an error', async () => {
+    const ingest = jest.fn().mockResolvedValue(receivedResult);
+    const { controller, identityContext } = buildController(ingest);
+    const call = {};
+    identityContext.set(call, 1);
+
+    await controller.submitRewardEntry(
+      { ...validRequest, rewardKind: '', promoCodeConfigId: '', promoCodeConfigVersionNo: 0 },
+      undefined,
+      call,
+    );
+
+    expect(ingest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        rewardKind: null,
+        promoCodeConfigId: null,
+        promoCodeConfigVersionNo: null,
+      }),
+    );
+  });
+
+  it('T-INT-058: an unrecognized reward_kind value degrades to null, never INVALID_ARGUMENT (descriptive-only metadata)', async () => {
+    const ingest = jest.fn().mockResolvedValue(receivedResult);
+    const { controller, identityContext } = buildController(ingest);
+    const call = {};
+    identityContext.set(call, 1);
+
+    await controller.submitRewardEntry(
+      { ...validRequest, rewardKind: 'NOT_A_REAL_KIND' },
+      undefined,
+      call,
+    );
+
+    expect(ingest).toHaveBeenCalledWith(expect.objectContaining({ rewardKind: null }));
+  });
+
   it('rejects a request missing a required field (customer_id) with INVALID_ARGUMENT', async () => {
     const ingest = jest.fn();
     const { controller, identityContext } = buildController(ingest);
@@ -427,5 +508,12 @@ describe('T-RR-011 — proto file structural checks', () => {
   it("never renumbers field 1 (id) or field 25 (completion_cycle) away from RAP's real file", () => {
     expect(proto).toMatch(/string\s+id\s+=\s*1;/);
     expect(proto).toMatch(/int32\s+completion_cycle\s+=\s*25;/);
+  });
+
+  // T-INT-058: fields 26-28 copied field-number-for-field-number from RAP's own real proto.
+  it('declares reward_kind (26), promo_code_config_id (27), promo_code_config_version_no (28) at RAP-matching field numbers/types', () => {
+    expect(proto).toMatch(/string\s+reward_kind\s+=\s*26;/);
+    expect(proto).toMatch(/string\s+promo_code_config_id\s+=\s*27;/);
+    expect(proto).toMatch(/int32\s+promo_code_config_version_no\s*=\s*28;/);
   });
 });

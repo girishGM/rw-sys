@@ -226,6 +226,32 @@ describe('T-RR-010 — RewardIngestionService', () => {
     expect(repository.calls[0].reward_value_unit).toBe('');
   });
 
+  // T-INT-058
+  it('T-INT-058: ingest() persists rewardKind/promoCodeConfigId/promoCodeConfigVersionNo verbatim when the DTO carries them', async () => {
+    const dto = baseDto({
+      rewardKind: 'PROMO_CODE',
+      promoCodeConfigId: 'PCC-001',
+      promoCodeConfigVersionNo: 3,
+    });
+
+    await service.ingest(dto);
+
+    expect(repository.calls[0].reward_kind).toBe('PROMO_CODE');
+    expect(repository.calls[0].promo_code_config_id).toBe('PCC-001');
+    expect(repository.calls[0].promo_code_config_version_no).toBe(3);
+  });
+
+  it('T-INT-058: ingest() a DTO omitting rewardKind/promoCodeConfigId/promoCodeConfigVersionNo (pre-fix-shaped sender) persists all three as null, no throw', async () => {
+    const dto = baseDto();
+
+    const result = await service.ingest(dto);
+
+    expect(result).toEqual({ rewardEntryId: dto.id, status: 'received' });
+    expect(repository.calls[0].reward_kind).toBeNull();
+    expect(repository.calls[0].promo_code_config_id).toBeNull();
+    expect(repository.calls[0].promo_code_config_version_no).toBeNull();
+  });
+
   it('TC-6: no log line emitted during ingest() contains the raw customerId value used in the fixture', async () => {
     const dto = baseDto({ customerId: 'a-very-distinctive-raw-customer-id-9f3c1a' });
 

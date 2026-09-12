@@ -25,6 +25,8 @@
  * Kafka JSON payload, a REST JSON body) into this exact shape, including any malformed-input
  * rejection, is each adapter's own job, never this module's.
  */
+import type { RewardKind } from '@/grpc/reward-ingest.validation';
+
 export type IngestionChannel = 'GRPC' | 'KAFKA' | 'REST';
 
 export interface RewardEntryIngestDto {
@@ -63,4 +65,20 @@ export interface RewardEntryIngestDto {
   /** Observability only — never branches this service's business logic (`01-DATABASE.md` §1's own
    * column comment, R10). */
   ingestionChannel: IngestionChannel;
+  /** T-INT-058 (fields 26-28 on the wire, migration `022`/`T-RR-062`). Descriptive-only metadata
+   * mirrored from RAP's own `BoundReward` at grant time — never a new enforcement input for this
+   * service either (RAP's own proto comment). `null`/absent when the sender predates this fix (an
+   * old-shaped payload with none of the three fields), or when the wire value did not decode to a
+   * recognized `RewardKind`. Optional (`?`), not just nullable — same "several fixture builders
+   * across the tree predate this field and must keep compiling unchanged" reasoning
+   * `RewardRedemptionEntryRow.reward_kind`'s own doc comment already gives for the destination
+   * column (`database/models/reward-redemption-entry.model.ts`); every real adapter (T-RR-011/
+   * 012/013, this task) always sets it explicitly to a value or `null`, never omits it. */
+  rewardKind?: RewardKind | null;
+  /** Meaningful only when `rewardKind === 'PROMO_CODE'`; `null`/absent otherwise, and for a
+   * pre-T-INT-058-shaped sender. Optional, same reasoning as `rewardKind` above. */
+  promoCodeConfigId?: string | null;
+  /** Sibling to `promoCodeConfigId` — which version of that config produced this entry. Optional,
+   * same reasoning as `rewardKind` above. */
+  promoCodeConfigVersionNo?: number | null;
 }

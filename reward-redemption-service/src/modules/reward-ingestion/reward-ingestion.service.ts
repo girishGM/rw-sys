@@ -41,6 +41,13 @@
  * caller-retried/redelivered duplicate is exactly the kind of inbound arrival this metric exists
  * to count. `dto.ingestionChannel` (`'GRPC'|'KAFKA'|'REST'`) is lower-cased to match §3's
  * `channel` label values (`'grpc'|'kafka'|'rest'`).
+ *
+ * **T-INT-058.** `reward_kind`/`promo_code_config_id`/`promo_code_config_version_no`
+ * (`RewardEntryIngestDto`'s own doc comments) are persisted here, unchanged from whatever the DTO
+ * carries (`null`/absent for a pre-T-INT-058-shaped sender) — this closes the gap migration `022`'s
+ * own header comment predicted: the destination columns existed but nothing wrote to them because
+ * this service's own Wave 1 ingestion had not yet been extended to read the upstream fields RAP's
+ * `T-RAP-062` added.
  */
 import { Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -155,6 +162,11 @@ export class RewardIngestionService {
       completion_cycle: dto.completionCycle,
       reward_processed_env: this.config.get('NODE_ENV', { infer: true }),
       ingestion_channel: dto.ingestionChannel,
+      // T-INT-058: `null`/absent (a pre-T-INT-058-shaped sender) persists as `null` — never
+      // fabricated, matching migration `022`'s own "nullable means not yet known" discipline.
+      reward_kind: dto.rewardKind ?? null,
+      promo_code_config_id: dto.promoCodeConfigId ?? null,
+      promo_code_config_version_no: dto.promoCodeConfigVersionNo ?? null,
     });
 
     this.logger.log({

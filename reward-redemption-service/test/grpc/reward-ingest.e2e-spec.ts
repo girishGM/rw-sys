@@ -238,6 +238,57 @@ describe('T-RR-011 — gRPC server (real mTLS, real Postgres) (e2e)', () => {
     client.close();
   });
 
+  // T-INT-058 TC-1 (real Postgres): a PROMO_CODE-kind entry persists reward_kind/
+  // promo_code_config_id/promo_code_config_version_no unchanged from the sender.
+  it('T-INT-058 TC-1: a well-formed RewardEntry carrying reward_kind/promo_code_config_id/promo_code_config_version_no persists all three unchanged', async () => {
+    const client = allowedClient();
+    const request = baseRequest({
+      rewardKind: 'PROMO_CODE',
+      promoCodeConfigId: 'PCC-CFG-001',
+      promoCodeConfigVersionNo: 7,
+    });
+
+    await callSubmitRewardEntry(client, request);
+
+    const rows = await db.query<{
+      reward_kind: string | null;
+      promo_code_config_id: string | null;
+      promo_code_config_version_no: number | null;
+    }>(
+      `SELECT reward_kind, promo_code_config_id, promo_code_config_version_no
+       FROM reward_redemption.reward_redemption_entry WHERE id = :id`,
+      { type: QueryTypes.SELECT, replacements: { id: request.id } },
+    );
+    expect(rows[0].reward_kind).toBe('PROMO_CODE');
+    expect(rows[0].promo_code_config_id).toBe('PCC-CFG-001');
+    expect(rows[0].promo_code_config_version_no).toBe(7);
+    client.close();
+  });
+
+  // T-INT-058 TC-4 (real Postgres): an old-shaped request (fields 26-28 entirely absent) persists
+  // all three as NULL, never a gRPC error.
+  it('T-INT-058 TC-4: an old-shaped RewardEntry omitting reward_kind/promo_code_config_id/promo_code_config_version_no still persists (all three NULL)', async () => {
+    const client = allowedClient();
+    const request = baseRequest();
+
+    const response = await callSubmitRewardEntry(client, request);
+
+    expect(response.status).toBe('received');
+    const rows = await db.query<{
+      reward_kind: string | null;
+      promo_code_config_id: string | null;
+      promo_code_config_version_no: number | null;
+    }>(
+      `SELECT reward_kind, promo_code_config_id, promo_code_config_version_no
+       FROM reward_redemption.reward_redemption_entry WHERE id = :id`,
+      { type: QueryTypes.SELECT, replacements: { id: request.id } },
+    );
+    expect(rows[0].reward_kind).toBeNull();
+    expect(rows[0].promo_code_config_id).toBeNull();
+    expect(rows[0].promo_code_config_version_no).toBeNull();
+    client.close();
+  });
+
   // TC-7
   it('TC-7: the fully-qualified gRPC method path is exactly /rewardrap.reward.v1.RewardIngestService/SubmitRewardEntry', () => {
     expect(resolveFullyQualifiedMethodPath()).toBe(

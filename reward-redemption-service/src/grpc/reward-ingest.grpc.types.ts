@@ -35,6 +35,11 @@ export interface RewardEntryProto {
   rewardValueUnit?: string;
   rewardEntryDate?: string;
   completionCycle?: number;
+  // T-INT-058 (fields 26-28) — proto3 "absent means zero value": an empty string / 0 both mean
+  // "not set", same convention every other optional field above already uses.
+  rewardKind?: string;
+  promoCodeConfigId?: string;
+  promoCodeConfigVersionNo?: number;
 }
 
 export interface SubmitRewardEntryAckProto {

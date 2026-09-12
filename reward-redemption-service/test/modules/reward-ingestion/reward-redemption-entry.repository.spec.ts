@@ -143,6 +143,31 @@ describe('T-RR-010 — RewardRedemptionEntryRepository', () => {
     expect(result.row.status).toBe('completed');
   });
 
+  // T-INT-058
+  it('T-INT-058: persists reward_kind/promo_code_config_id/promo_code_config_version_no verbatim when given', async () => {
+    const input = baseInput({
+      reward_kind: 'PROMO_CODE',
+      promo_code_config_id: 'PCC-001',
+      promo_code_config_version_no: 3,
+    });
+
+    const result = await repository.insertOrGetExisting(input);
+
+    expect(result.row.reward_kind).toBe('PROMO_CODE');
+    expect(result.row.promo_code_config_id).toBe('PCC-001');
+    expect(result.row.promo_code_config_version_no).toBe(3);
+  });
+
+  it('T-INT-058: omitting reward_kind/promo_code_config_id/promo_code_config_version_no persists all three as null', async () => {
+    const input = baseInput();
+
+    const result = await repository.insertOrGetExisting(input);
+
+    expect(result.row.reward_kind).toBeNull();
+    expect(result.row.promo_code_config_id).toBeNull();
+    expect(result.row.promo_code_config_version_no).toBeNull();
+  });
+
   it('TC-3 (concurrency): two real concurrent inserts of the same id — exactly one row ever exists, neither call throws', async () => {
     const id = randomUUID();
 

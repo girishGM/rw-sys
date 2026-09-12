@@ -19,6 +19,17 @@
  * (`DB_APP_USERNAME`/`DB_APP_PASSWORD`, `AGENT-PROTOCOL.md` R5) — same convention
  * `RewardRedemptionEntryClaimRepository`/`FieldEncryptionConfigRepository` already established (no
  * shared runtime DB pool module exists anywhere in this service).
+ *
+ * **T-INT-058** extends `NewRewardRedemptionEntryInput`/`INSERT_SQL` with `reward_kind`/
+ * `promo_code_config_id`/`promo_code_config_version_no` (migration `022`'s own columns, unused
+ * until now) — this file is not in that task's own "Files owned" list (only
+ * `reward-entry-ingest.dto.ts`/`reward-ingestion.service.ts` are), but that task's scope item 4
+ * ("update `RewardIngestionService.ingest()`'s `insertOrGetExisting(...)` call to persist all
+ * three onto the row") is mechanically impossible without this file's own `INSERT_SQL` and input
+ * type also carrying the three new columns — flagged as a deviation in that task's completion
+ * report rather than silently expanding scope unremarked. `reward-redemption-service-plan/
+ * project.config.json`'s own `allow` grant for `agent-rr-ingestion` already covers this exact file
+ * (`src/modules/reward-ingestion/**`), so this is not a new cross-agent ownership overlap (R3).
  */
 import { Injectable, OnModuleDestroy, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -66,6 +77,9 @@ export type NewRewardRedemptionEntryInput = Pick<
   | 'completion_cycle'
   | 'reward_processed_env'
   | 'ingestion_channel'
+  | 'reward_kind'
+  | 'promo_code_config_id'
+  | 'promo_code_config_version_no'
 >;
 
 export interface InsertOrGetExistingResult {
@@ -84,10 +98,11 @@ const INSERT_SQL = `
     activity_value, activity_value_unit, channel, activity_performed_env, activity_name,
     campaign_code, tracker_code, tracker_component_code, merchant_code, reward_code,
     reward_category, reward_value, reward_value_unit, reward_entry_date, completion_cycle,
-    reward_processed_env, ingestion_channel
+    reward_processed_env, ingestion_channel, reward_kind, promo_code_config_id,
+    promo_code_config_version_no
   ) VALUES (
     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
-    $21, $22, $23, $24, $25, $26, $27, $28
+    $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31
   )
   ON CONFLICT (id) DO NOTHING
   RETURNING *
@@ -151,6 +166,9 @@ export class RewardRedemptionEntryRepository implements OnModuleDestroy {
       input.completion_cycle,
       input.reward_processed_env,
       input.ingestion_channel,
+      input.reward_kind ?? null,
+      input.promo_code_config_id ?? null,
+      input.promo_code_config_version_no ?? null,
     ]);
 
     if (inserted.rowCount) {

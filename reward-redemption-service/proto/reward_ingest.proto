@@ -19,6 +19,13 @@
 // `activity_value`/`reward_value` stay `string` (decimal-as-string), the same float-precision-
 // loss-avoidance convention every proto in this repo already applies (`campaign_config.v1.proto`
 // rule 3, `promo_code.v1.proto` §2, `03-GRPC-CONTRACT.md` §1).
+//
+// T-INT-058: fields 26-28 (`reward_kind`/`promo_code_config_id`/`promo_code_config_version_no`)
+// added field-number-for-field-number identical to RAP's own real, shipped copy of this file
+// (`realtime-activity-processing-service/proto/reward_ingest.proto`, `T-RAP-062`) — this service's
+// own copy had silently drifted behind RAP's after that task shipped, the exact contract-drift
+// class of bug `T-INT-002` already fixed once for a different leg. Do NOT renumber or reuse any
+// field number for any reason.
 
 syntax = "proto3";
 
@@ -54,6 +61,13 @@ message RewardEntry {
   string reward_value_unit         = 23;
   string reward_entry_date         = 24;  // full ISO-8601 with zone offset
   int32  completion_cycle          = 25;
+  // T-RAP-062 / T-INT-058: descriptive-only metadata mirrored from BoundReward at grant time —
+  // never a new enforcement input. OPTIONAL — empty string / 0 means "not set / not applicable",
+  // same proto3 "absent means zero value" convention every other optional field in this message
+  // uses.
+  string reward_kind               = 26;
+  string promo_code_config_id      = 27;  // meaningful only when reward_kind == "PROMO_CODE"
+  int32  promo_code_config_version_no = 28;
 }
 
 message SubmitRewardEntryAck {

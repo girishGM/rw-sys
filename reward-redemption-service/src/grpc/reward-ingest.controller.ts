@@ -54,7 +54,12 @@ import type { RewardEntryIngestDto } from '@/modules/reward-ingestion/reward-ent
 import { MtlsGuard } from './mtls.guard';
 import { ResolvedIdentityContext } from './resolved-identity.context';
 import { GRPC_SERVICE_NAME } from './grpc-server.config';
-import { isValidDecimalString, parseIsoDateWithOffset } from './reward-ingest.validation';
+import {
+  isValidDecimalString,
+  parseIsoDateWithOffset,
+  parsePromoCodeConfigVersionNo,
+  parseRewardKind,
+} from './reward-ingest.validation';
 import type { RewardEntryProto, SubmitRewardEntryAckProto } from './reward-ingest.grpc.types';
 
 function invalidArgument(message: string): never {
@@ -219,6 +224,11 @@ export class RewardIngestController {
       rewardEntryDate,
       completionCycle,
       ingestionChannel: 'GRPC',
+      // T-INT-058 (fields 26-28) — descriptive-only, never validated as mandatory: an old-shaped
+      // sender omitting these entirely (proto-loader hands back `undefined`) must keep working.
+      rewardKind: parseRewardKind(data.rewardKind),
+      promoCodeConfigId: emptyToNull(data.promoCodeConfigId),
+      promoCodeConfigVersionNo: parsePromoCodeConfigVersionNo(data.promoCodeConfigVersionNo),
     };
   }
 }

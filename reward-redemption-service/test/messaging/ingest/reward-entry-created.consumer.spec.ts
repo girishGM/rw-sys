@@ -142,6 +142,31 @@ describe('RewardEntryCreatedConsumer.processMessage', () => {
     expect(publish).not.toHaveBeenCalled();
   });
 
+  // T-INT-058: end-to-end through this adapter's own validate-then-ingest chain (not just
+  // `reward-entry-created.schema.spec.ts`'s own isolated unit coverage).
+  it('T-INT-058: a message carrying rewardKind/promoCodeConfigId/promoCodeConfigVersionNo reaches ingest() with all three set', async () => {
+    const { consumer, ingest } = buildHarness();
+
+    await consumer.processMessage({
+      key: 'cust-1',
+      value: JSON.stringify(
+        validBody({
+          rewardKind: 'PROMO_CODE',
+          promoCodeConfigId: 'PCC-001',
+          promoCodeConfigVersionNo: 3,
+        }),
+      ),
+    });
+
+    expect(ingest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        rewardKind: 'PROMO_CODE',
+        promoCodeConfigId: 'PCC-001',
+        promoCodeConfigVersionNo: 3,
+      }),
+    );
+  });
+
   // TC-3 (negative)
   it('TC-3: a message missing a mandatory field (campaignCode) is retried, then routed to DLQ, never calling ingest()', async () => {
     const { consumer, ingest, publish } = buildHarness();

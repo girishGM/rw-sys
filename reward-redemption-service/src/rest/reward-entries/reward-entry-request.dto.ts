@@ -27,7 +27,13 @@
  */
 import { BadRequestException } from '@nestjs/common';
 import { z } from 'zod';
-import { isValidDecimalString, parseIsoDateWithOffset } from '@/grpc/reward-ingest.validation';
+import {
+  isValidDecimalString,
+  parseIsoDateWithOffset,
+  parsePromoCodeConfigVersionNo,
+  parseRewardKind,
+} from '@/grpc/reward-ingest.validation';
+import type { RewardKind } from '@/grpc/reward-ingest.validation';
 import type {
   IngestionChannel,
   RewardEntryIngestDto,
@@ -91,6 +97,13 @@ const requestSchema = z
     completionCycle: z
       .number({ invalid_type_error: 'completionCycle is required and must be an integer' })
       .int('completionCycle must be an integer'),
+    // T-INT-058: descriptive-only, never mandatory, never rejected for an unrecognized value —
+    // a plain `z.string()` here (not `z.enum(REWARD_KIND_VALUES)`), since normalization to a known
+    // `RewardKind` (or `null`) happens in `parseRewardEntryRequest` below via the same shared,
+    // never-throwing `parseRewardKind` the gRPC/Kafka legs also use.
+    rewardKind: z.string().nullable().optional(),
+    promoCodeConfigId: z.string().nullable().optional(),
+    promoCodeConfigVersionNo: z.number().nullable().optional(),
   })
   .refine((data) => Boolean(data.transactionType) || Boolean(data.activityCode), {
     message: 'one of transactionType or activityCode is required',
@@ -123,6 +136,11 @@ export interface RewardEntryRequestDto {
   rewardValueUnit: string;
   rewardEntryDate: Date;
   completionCycle: number;
+  /** T-INT-058 — see `RewardEntryIngestDto`'s own doc comment for the full field-level reasoning;
+   * this REST-facing shape mirrors it exactly. */
+  rewardKind: RewardKind | null;
+  promoCodeConfigId: string | null;
+  promoCodeConfigVersionNo: number | null;
 }
 
 export function parseRewardEntryRequest(input: unknown): RewardEntryRequestDto {
@@ -142,6 +160,12 @@ export function parseRewardEntryRequest(input: unknown): RewardEntryRequestDto {
     // `RewardEntryRequestDto`/`RewardEntryIngestDto` — normalize `null`/absent to `''`, the same
     // "no unit for this reward kind" convention the gRPC/Kafka legs also use.
     rewardValueUnit: result.data.rewardValueUnit ?? '',
+    // T-INT-058: same shared, never-throwing normalizers the gRPC/Kafka legs use — absent, `null`,
+    // or an unrecognized `rewardKind` string all degrade to `null`, never a 400 (descriptive-only
+    // metadata, never mandatory).
+    rewardKind: parseRewardKind(result.data.rewardKind),
+    promoCodeConfigId: result.data.promoCodeConfigId ?? null,
+    promoCodeConfigVersionNo: parsePromoCodeConfigVersionNo(result.data.promoCodeConfigVersionNo),
   };
 }
 
@@ -181,5 +205,8 @@ export function toRewardEntryIngestDto(dto: RewardEntryRequestDto): RewardEntryI
     rewardEntryDate: dto.rewardEntryDate,
     completionCycle: dto.completionCycle,
     ingestionChannel: REST_INGESTION_CHANNEL,
+    rewardKind: dto.rewardKind,
+    promoCodeConfigId: dto.promoCodeConfigId,
+    promoCodeConfigVersionNo: dto.promoCodeConfigVersionNo,
   };
 }

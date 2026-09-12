@@ -46,3 +46,37 @@ export function parseIsoDateWithOffset(value: string): Date | null {
   }
   return parsed;
 }
+
+/**
+ * T-INT-058. RAP's own `reward_kind` values (`reward-entry.model.ts`'s own header, RAP's copy —
+ * this service never derives or enforces this list itself, it only recognizes it well enough to
+ * type the ingest DTO field honestly). Descriptive-only metadata, never a new enforcement input
+ * (RAP's own proto comment) — kept here, alongside the other wire-payload normalizers this file's
+ * own header already documents as shared by all three transport adapters (`agent-rr-ingestion`).
+ */
+export const REWARD_KIND_VALUES = ['PERCENTAGE', 'FIXED_AMOUNT', 'POINTS', 'PROMO_CODE'] as const;
+export type RewardKind = (typeof REWARD_KIND_VALUES)[number];
+
+/**
+ * Normalizes an inbound `reward_kind` wire value to one of RAP's own known values, or `null` for
+ * anything else — absent (`undefined`), empty string (proto3's own "unset" convention, this file's
+ * own header), `null`, or a value this service does not recognize. Never throws: an unrecognized
+ * value is not a malformed request (this field is purely descriptive, per T-RAP-062's own
+ * comment), so it degrades to `null` rather than rejecting the whole entry.
+ */
+export function parseRewardKind(value: unknown): RewardKind | null {
+  return typeof value === 'string' && (REWARD_KIND_VALUES as readonly string[]).includes(value)
+    ? (value as RewardKind)
+    : null;
+}
+
+/**
+ * T-INT-058. `promo_code_config_version_no` is a proto3 `int32` — `0`/absent both mean "not set"
+ * (RAP's own `reward-grpc-fallback.client.ts` sends `?? 0` for exactly this reason, confirmed by
+ * direct read). A real config version is always a positive integer (versions start at 1), so any
+ * non-positive or non-integer value normalizes to `null` rather than being persisted as a fake
+ * version number.
+ */
+export function parsePromoCodeConfigVersionNo(value: unknown): number | null {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : null;
+}

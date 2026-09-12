@@ -244,6 +244,50 @@ describe('T-RR-013 — POST /api/v1/reward-entries (controller, faked domain ser
     expect(dto.activityCode).toBeNull();
   });
 
+  // T-INT-058 TC-3/TC-4
+  it('T-INT-058 TC-3: propagates rewardKind/promoCodeConfigId/promoCodeConfigVersionNo verbatim when present', async () => {
+    const response = await request(app.getHttpServer())
+      .post('/api/v1/reward-entries')
+      .set('Authorization', `Bearer ${TOKEN}`)
+      .send(
+        validBody({
+          rewardKind: 'PROMO_CODE',
+          promoCodeConfigId: 'PCC-001',
+          promoCodeConfigVersionNo: 3,
+        }),
+      );
+
+    expect(response.status).toBe(200);
+    const [[dto]] = ingest.mock.calls as [[RewardEntryIngestDto]];
+    expect(dto.rewardKind).toBe('PROMO_CODE');
+    expect(dto.promoCodeConfigId).toBe('PCC-001');
+    expect(dto.promoCodeConfigVersionNo).toBe(3);
+  });
+
+  it('T-INT-058 TC-4: an old-shaped body omitting rewardKind/promoCodeConfigId/promoCodeConfigVersionNo still succeeds (200), all three null', async () => {
+    const response = await request(app.getHttpServer())
+      .post('/api/v1/reward-entries')
+      .set('Authorization', `Bearer ${TOKEN}`)
+      .send(validBody());
+
+    expect(response.status).toBe(200);
+    const [[dto]] = ingest.mock.calls as [[RewardEntryIngestDto]];
+    expect(dto.rewardKind).toBeNull();
+    expect(dto.promoCodeConfigId).toBeNull();
+    expect(dto.promoCodeConfigVersionNo).toBeNull();
+  });
+
+  it('T-INT-058: an unrecognized rewardKind string degrades to null, never a 400 (descriptive-only metadata)', async () => {
+    const response = await request(app.getHttpServer())
+      .post('/api/v1/reward-entries')
+      .set('Authorization', `Bearer ${TOKEN}`)
+      .send(validBody({ rewardKind: 'NOT_A_REAL_KIND' }));
+
+    expect(response.status).toBe(200);
+    const [[dto]] = ingest.mock.calls as [[RewardEntryIngestDto]];
+    expect(dto.rewardKind).toBeNull();
+  });
+
   it('GET is rejected, never silently treated as POST', async () => {
     const response = await request(app.getHttpServer()).get('/api/v1/reward-entries');
     expect([404, 405]).toContain(response.status);
