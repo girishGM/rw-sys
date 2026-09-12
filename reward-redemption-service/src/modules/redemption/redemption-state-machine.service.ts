@@ -160,6 +160,16 @@ export class RedemptionStateMachineService implements OnModuleDestroy {
    * `external_reference_id` are left untouched (already `NULL`, per §2's own note); no
    * `external_system_call_log` row is written (there was no call to log).
    *
+   * **Defect fix (found live 2026-09-12): this path never called `sideEffects.recordCompletionSideEffects`,
+   * unlike `completeDispatched` below — every reward completed here (no external connector needed)
+   * silently never reached Reward Tracking at all, with no test catching it (TC-2's own test only
+   * ever asserted `external_system_call_log` stayed empty, never checked the tracking-dispatch
+   * outbox). Fixed by calling it after the state transition commits, using the returned, fully
+   * enriched row (`tenant_code`/`country_code` already populated by this point, per T-RR-065) —
+   * mirroring `completeDispatched`'s own "side effects run with no open transaction/lock held"
+   * discipline, just after this method's own transaction instead of before, since here the
+   * transaction *is* the state transition itself, not a separate resume step.**
+   *
    * `expiresAt` (T-RR-063): optional, `Date | null` — same "caller already computed it from the
    * resolved `BoundReward`'s expiry duration" contract as `MarkDispatchedExternalInput.expiresAt`
    * above. A second parameter, not folded into an input object, since this method's only other
@@ -183,6 +193,9 @@ export class RedemptionStateMachineService implements OnModuleDestroy {
         [entryId, expiresAt ?? null],
       );
       return updated.rows[0];
+    }).then(async (updated) => {
+      await this.sideEffects.recordCompletionSideEffects(updated);
+      return updated;
     });
   }
 

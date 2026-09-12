@@ -285,6 +285,21 @@ describe('T-RR-021 — RedemptionStateMachineService', () => {
     expect(count).toBe('0');
   });
 
+  // Defect regression (found live 2026-09-12): markCompletedDirect never called
+  // recordCompletionSideEffects, so a reward completed via this path (no connector needed) was
+  // never dispatched to Reward Tracking at all -- silently, with no test catching it (TC-2 above
+  // only ever checked external_system_call_log, never this). Every reward that reaches
+  // 'completed', by either path, must be reported.
+  it('regression: markCompletedDirect calls recordCompletionSideEffects with the completed row, same as completeDispatched does', async () => {
+    const id = await insertEntry(migrationDb, { status: 'processing' });
+
+    await service.markCompletedDirect(id);
+
+    expect(sideEffects.calls).toHaveLength(1);
+    expect(sideEffects.calls[0].id).toBe(id);
+    expect(sideEffects.calls[0].status).toBe('completed');
+  });
+
   it('TC-3: dispatched_external row proceeds normally to the outbox/notification step -> completed', async () => {
     const id = await insertEntry(migrationDb, {
       status: 'dispatched_external',
