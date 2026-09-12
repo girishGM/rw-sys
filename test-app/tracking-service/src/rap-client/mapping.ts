@@ -21,7 +21,9 @@ import type { SubmitActivityRequest } from './types';
 
 export const RAP_CUSTOMER_ID_TYPE = 'EXTERNAL_ID';
 export const RAP_ACTIVITY_CATEGORY = 'GENERAL';
-export const RAP_ACTIVITY_VALUE_UNIT = 'USD';
+// T-INT-061 — this tenant's real currency is MYR, not USD (confirmed live: a submitted activity
+// landed in RAP's `activity_logs` with `activity_value_unit='USD'`, which was simply wrong).
+export const RAP_ACTIVITY_VALUE_UNIT = 'MYR';
 export const RAP_CHANNEL = 'test-app-tracking-service';
 export const RAP_ACTIVITY_PERFORMED_ENV = 'test-app-demo';
 

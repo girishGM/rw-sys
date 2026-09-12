@@ -23,7 +23,7 @@ const VALID_REQUEST: SubmitActivityRequest = {
   activityType: 'Grocery Purchase',
   activityCategory: 'GENERAL',
   activityValue: '12.5',
-  activityValueUnit: 'USD',
+  activityValueUnit: 'MYR',
   channel: 'test-app-tracking-service',
   activityPerformedEnv: 'test-app-demo',
   activityName: 'Grocery Purchase',

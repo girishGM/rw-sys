@@ -105,7 +105,7 @@ describe('buildRewardForCompletedTracker', () => {
     );
     expect(reward.type).toBe('cashback');
     expect(reward.value).toBe('25.00');
-    expect(reward.currency).toBe('USD');
+    expect(reward.currency).toBe('MYR');
   });
 
   it('uses a real amount over the invented fallback when one is present', async () => {

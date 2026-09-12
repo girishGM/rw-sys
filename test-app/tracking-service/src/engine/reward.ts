@@ -24,7 +24,9 @@ import type { BindLevel, PromoCodeClient } from '../promo-code-client';
  * them). A fixed, predictable value rather than a random one so a QA screenshot/API response is
  * reproducible run to run. */
 const DEMO_CASHBACK_AMOUNT = '25.00';
-const DEMO_CASHBACK_CURRENCY = 'USD';
+// T-INT-061 — this tenant's real currency is MYR, not USD; the invented cashback ledger currency
+// must match, same reasoning as `rap-client/mapping.ts`'s `RAP_ACTIVITY_VALUE_UNIT`.
+const DEMO_CASHBACK_CURRENCY = 'MYR';
 const DEMO_POINTS_AMOUNT = '500';
 
 /** Invented promo-code discounts, in the same "SAVE##" style as `data/seed.ts`'s seeded `SAVE20` —
