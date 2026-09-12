@@ -23,6 +23,19 @@
 // remaining three (`ResolveRuleVersion`, `ResolveRewardVersion`, `GetBudgetStatus`) are included
 // so a later Wave 3 task doesn't need to touch this file (owned exclusively by
 // `agent-rap-cache`, R10) just to add a method this contract already documents.
+//
+// **T-RAP-065**: this mirror had fallen behind on *fields*, not RPCs — `BoundReward` stopped at
+// field 12 despite the portal's own message (T-173) already carrying fields 13-17
+// (`expiry_value`/`expiry_unit`/`reward_kind`/`promo_code_config_id`/
+// `promo_code_config_version_no`). Found when T-RAP-062 needed 15-17 and couldn't read them off
+// this copy. Fixed by adding all five, not just the three T-RAP-062 needs, per the "mirror the
+// whole contract" policy stated above.
+//
+// **T-RAP-066**: same class of gap, this time on `BoundRule` — it stopped at field 9 despite the
+// portal's own message (T-175) already carrying fields 10-13
+// (`operator`/`resolver_id`/`resolver_config`/`default_operators`). Filed by T-RAP-064 (which
+// reproduced the gap but could not fix it — those fields are outside its own scope). Fixed by
+// adding all four.
 
 syntax = "proto3";
 
@@ -124,6 +137,31 @@ message BoundRule {
   string bound_values_json   = 7;
   int32  tracker_component_id = 8;
   string status              = 9;
+
+  // Added by T-175 on the portal side, appended at the next free numbers (1-9 above untouched,
+  // rule 1). Added to this mirror by T-RAP-066, which found this message stopped at 9 despite
+  // T-175 landing on the portal side long before (T-RAP-064's own evidence: it needed to read
+  // these to validate resolver dispatch but couldn't off this copy — see that task's diagnosis and
+  // this task's own header note above for the full history).
+  //
+  // `operator` is the maker's chosen comparison for THIS binding
+  // (`tracker_component_rules.operator`) — a separate column from `bound_values_json`'s source,
+  // never folded into it. Empty when the maker set none.
+  string operator = 10;
+
+  // The resolver wiring frozen on the rule version this binding resolves to (fields 2/3):
+  // `rule_versions.resolver_id` / `resolver_config` / `default_operators`. A version with no
+  // resolver wired serves `0` / empty / empty, and so does a binding that resolves to no version
+  // at all (`rule_version_id = 0`) — **the empty case is real information** ("no resolver
+  // configured"), never a fabricated default, and a consumer must keep it distinct from "resolver
+  // configured, but with an empty config".
+  //
+  // `resolver_config` is a JSON document as a string, the same treatment as `bound_values_json`.
+  // `resolver_id` names a row of the portal's `rule_resolvers` registry; the registry itself is
+  // not served here.
+  int32  resolver_id     = 11;
+  string resolver_config = 12;
+  repeated string default_operators = 13;  // the operator codes this version permits
 }
 
 message BoundReward {
@@ -140,6 +178,34 @@ message BoundReward {
   string level   = 10;  // 'campaign' | 'tracker' | 'component'
   int32  ref_id  = 11;  // tracker id or component id; 0 at campaign level
   string status  = 12;
+
+  // Added by T-173, appended at the next free numbers (1-12 above untouched, rule 1). Added to
+  // this mirror by T-RAP-065, which found this message stopped at 12 despite T-173 landing on the
+  // portal side long before — see that task's own evidence for how this was caught (T-RAP-062
+  // needed 15-17 to stamp `reward_kind`/promo-code identity onto `reward_entry`; 13-14 are
+  // included too so this mirror matches the portal's `BoundReward` field-for-field rather than
+  // leaving a second, still-undetected gap for a future task to trip over — the same "mirror the
+  // whole contract, not just what's used today" reasoning reward-tracking-service's own copy of
+  // this file already states).
+  //
+  // How long the reward stays usable AFTER IT IS GIVEN, as a duration rather than a date — see the
+  // portal's own `campaign_config.v1.proto` for the full reasoning. **0/absent means the reward
+  // never expires**, never "not configured yet" and never "expires immediately".
+  int32  expiry_value = 13;
+  string expiry_unit  = 14;  // 'minutes' | 'hours' | 'days'; empty when expiry_value is 0/absent
+
+  // The reward's Kind, as frozen on this version — distinct from `reward_type` (field 5). Empty
+  // when the version has no Kind set yet, never a fabricated default.
+  string reward_kind = 15;  // 'FIXED_AMOUNT'|'PERCENTAGE'|'POINTS'|'PHYSICAL'|'PROMO_CODE'
+
+  // Which promo-code recipe fulfils this reward, for `reward_kind = 'PROMO_CODE'`. Opaque decimal
+  // string (promo-code-service's own id convention), empty when not promo-code fulfilled or no
+  // config bound yet.
+  string promo_code_config_id = 16;
+
+  // The pinned version of that promo-code config. 0/absent until the portal has a Maker UI to set
+  // it — never a fabricated `1`.
+  int32  promo_code_config_version_no = 17;
 }
 
 message CampaignCap {

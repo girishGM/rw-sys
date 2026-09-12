@@ -104,6 +104,37 @@ function samplePayload(overrides: Partial<RewardEntryGrpcPayload> = {}): RewardE
 }
 
 describe('RewardGrpcFallbackClient (real @grpc/grpc-js wire, insecure mock server)', () => {
+  // T-RAP-062 TC-7 (gRPC leg): the three new descriptive-only fields
+  // (`reward-entry.model.ts`'s own header) genuinely round-trip over the real wire, not just in a
+  // TypeScript mapping function — a mock server that predates this task's own proto/client change
+  // would never see them at all if the client had forgotten to actually send them.
+  it('T-RAP-062: rewardKind/promoCodeConfigId/promoCodeConfigVersionNo round-trip over the real wire', async () => {
+    const requests: RewardEntryGrpcPayload[] = [];
+    const { server, port } = await startGrpcMock((request) => {
+      requests.push(request);
+      return { rewardEntryId: request.id, status: 'accepted' };
+    });
+    const client = new RewardGrpcFallbackClient({ host: '127.0.0.1', port, timeoutMs: 3000 });
+
+    try {
+      await client.submitRewardEntry(
+        samplePayload({
+          id: 'reward-entry-promo',
+          rewardKind: 'PROMO_CODE',
+          promoCodeConfigId: 'PCC-WIRE-1',
+          promoCodeConfigVersionNo: 5,
+        }),
+      );
+      expect(requests).toHaveLength(1);
+      expect(requests[0].rewardKind).toBe('PROMO_CODE');
+      expect(requests[0].promoCodeConfigId).toBe('PCC-WIRE-1');
+      expect(requests[0].promoCodeConfigVersionNo).toBe(5);
+    } finally {
+      client.onModuleDestroy();
+      stopGrpcMock(server);
+    }
+  });
+
   it('submitRewardEntry resolves with the mock server’s own ack on success', async () => {
     const requests: RewardEntryGrpcPayload[] = [];
     const { server, port } = await startGrpcMock((request) => {

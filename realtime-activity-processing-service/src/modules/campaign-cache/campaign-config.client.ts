@@ -116,6 +116,17 @@ export interface BoundRuleProto {
   boundValuesJson: string;
   trackerComponentId: number;
   status: string;
+  // Added by T-175 on the portal side (fields 10-13); mirrored here by T-RAP-066, which found
+  // this interface (and the proto it types) had fallen behind — see `campaign_config.proto`'s own
+  // header note for the full history. All four are optional for the same reason
+  // `BoundRewardProto`'s T-RAP-065 fields are: proto3's "absent means zero value" semantics mean a
+  // real portal response that hasn't set a field deserializes to `''`/`0`/`[]`, never `undefined`
+  // — optional here only accommodates hand-built TS literals in this codebase's own
+  // tests/fixtures that predate this task.
+  operator?: string;
+  resolverId?: number;
+  resolverConfig?: string;
+  defaultOperators?: string[];
 }
 
 export interface BoundRewardProto {
@@ -131,6 +142,18 @@ export interface BoundRewardProto {
   level: string;
   refId: number;
   status: string;
+  // Added by T-173 on the portal side (fields 13-17); mirrored here by T-RAP-065, which found
+  // this interface (and the proto it types) had fallen behind — see `campaign_config.proto`'s own
+  // header note for the full history. All five are optional: older recorded fixtures/snapshots
+  // predating this task never set them, and proto3's own "absent means zero value" semantics mean
+  // a real portal response that hasn't set a field (e.g. `reward_kind` on a reward version created
+  // before T-119) deserializes to `''`/`0`, never `undefined` — optional here only accommodates
+  // hand-built TS literals in this codebase's own tests/fixtures that predate this task.
+  expiryValue?: number;
+  expiryUnit?: string;
+  rewardKind?: string;
+  promoCodeConfigId?: string;
+  promoCodeConfigVersionNo?: number;
 }
 
 export interface CampaignCapProto {

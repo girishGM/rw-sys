@@ -59,6 +59,11 @@ export interface GrantedRewardInsertInput {
   rewardValueUnit: string;
   completionCycle: number;
   rewardEntryDate: Date;
+  // T-RAP-062: descriptive-only metadata mirrored from `BoundReward` at grant time
+  // (`reward-entry.model.ts`'s own header) — optional/nullable, never a new enforcement input.
+  rewardKind?: string | null;
+  promoCodeConfigId?: string | null;
+  promoCodeConfigVersionNo?: number | null;
 }
 
 @Injectable()
@@ -88,14 +93,14 @@ export class RewardEntryRepository {
           activity_category, activity_value, activity_value_unit, channel, activity_performed_env,
           activity_name, campaign_code, tracker_code, tracker_component_code, merchant_code,
           reward_code, reward_category, reward_value, reward_value_unit, reward_entry_date,
-          completion_cycle)
+          completion_cycle, reward_kind, promo_code_config_id, promo_code_config_version_no)
        VALUES
          (:correlationId, :tenantId, :customerIdEncrypted, :customerIdHash, :customerIdType,
           :activityPerformedDate, :transactionType, :activityCode, :activityType,
           :activityCategory, :activityValue, :activityValueUnit, :channel, :activityPerformedEnv,
           :activityName, :campaignCode, :trackerCode, :trackerComponentCode, :merchantCode,
           :rewardCode, :rewardCategory, :rewardValue, :rewardValueUnit, :rewardEntryDate,
-          :completionCycle)
+          :completionCycle, :rewardKind, :promoCodeConfigId, :promoCodeConfigVersionNo)
        ON CONFLICT (tenant_id, customer_id_hash, campaign_code, tracker_code, tracker_component_code,
                     completion_cycle, reward_code) DO NOTHING
        RETURNING *`,
@@ -128,6 +133,9 @@ export class RewardEntryRepository {
           rewardValueUnit: input.rewardValueUnit,
           rewardEntryDate: input.rewardEntryDate,
           completionCycle: input.completionCycle,
+          rewardKind: input.rewardKind ?? null,
+          promoCodeConfigId: input.promoCodeConfigId ?? null,
+          promoCodeConfigVersionNo: input.promoCodeConfigVersionNo ?? null,
         },
       },
     );

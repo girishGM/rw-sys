@@ -54,10 +54,32 @@
  *  whatever's on the wire today" — it does **not** make `RULE_ACTIVITY_VALUE_001`/
  *  `RULE_ACTIVITY_WINDOW_001` evaluate to the business-correct answer (that needs the wire-contract
  *  extension `T-175` plus the resolver-dispatch mechanism `T-RAP-064`).
+ *
+ * **T-RAP-064 update (Phase 2 — the resolver-dispatch mechanism referenced just above).** Before a
+ * clause falls into Phase 1's placeholder-substitution path (`resolveClauseCondition`), it is now
+ * offered to `this.resolverRegistry` (`resolvers/resolver-registry.ts`): a small, extensible set of
+ * `RuleResolver`s, each claiming clauses of one specific shape via its own `canHandle()`. The one
+ * resolver shipped by this task, `ScheduleContextResolver`, recognizes
+ * `"currentTime within the :windowType window"` and makes `RULE_ACTIVITY_WINDOW_001` evaluate for
+ * real — see that file's own header. A resolver that recognizes a clause but still cannot resolve
+ * it (e.g. an unsupported `windowType`) reports that back the same way an unresolved `:placeholder`
+ * already does: not-passed, a warning naming the reason, never a throw. A clause no resolver
+ * recognizes falls through to Phase 1's own path completely unchanged.
+ *
+ * **`BoundRule.resolverId`/`resolverConfig`/`defaultOperators`/`operator` (`T-175`) are on the
+ * wire (`T-RAP-066`, landed) but still not read here.** See `resolvers/rule-resolver.interface.ts`'s
+ * own header for the full account — dispatch is deliberately by **expression shape**
+ * (`canHandle()`), not by the opaque numeric `resolverId`, because the portal doesn't serve the
+ * `resolver_id → resolver_code` registry mapping itself, so a bare id isn't actionable without a
+ * second, independently-maintained hardcoded lookup. `ScheduleContextResolver` reads its window
+ * parameters from `rule.boundValuesJson` (already on the wire) rather than `resolverConfig`.
+ * `:operator`-shaped clauses (`RULE_ACTIVITY_VALUE_001`) are unaffected by this task — still
+ * blocked on the Phase 3 product decision, `BACKLOG.md` RS-05.
  */
 import { Injectable, Logger } from '@nestjs/common';
 import type { ActivityLogRow } from '@/database/models/activity-log.model';
 import type { BoundRuleProto } from '@/modules/campaign-cache/campaign-config.client';
+import { defaultResolverRegistry, ResolverRegistry } from './resolvers/resolver-registry';
 
 /** A component with no numeric override in any of its bound rules' `boundValuesJson` completes on
  * its first passing activity — matches every example in this service's own seed data, and the
@@ -158,7 +180,14 @@ function formatBoundValueAsLiteral(value: unknown): string | undefined {
 
 type ClauseResolution =
   | { kind: 'condition'; condition: ParsedCondition }
-  | { kind: 'unresolved'; placeholders: string[] };
+  | { kind: 'unresolved'; placeholders: string[] }
+  // T-RAP-064: a registered `RuleResolver` claimed this clause (`canHandle`) and produced a
+  // definitive answer.
+  | { kind: 'resolved'; passed: boolean; resolverCode: string }
+  // T-RAP-064: a registered `RuleResolver` claimed this clause but could not produce a definitive
+  // answer today (e.g. an unsupported `windowType`) — same "not-passed, warn, never throw"
+  // discipline as `unresolved` above, just with a free-text reason instead of a placeholder list.
+  | { kind: 'resolverUnresolved'; resolverCode: string; reason: string };
 
 /**
  * T-RAP-063. Pure — no row access, no logging — so it's independently testable from the
@@ -207,6 +236,38 @@ function resolveClauseCondition(
   } catch {
     return { kind: 'unresolved', placeholders: rawPlaceholders };
   }
+}
+
+/**
+ * T-RAP-064. The one entry point `evaluate()` calls per clause — offers `clause` to
+ * `registry.findResolverForClause()` first (a resolver dispatches purely off the clause's own raw
+ * expression text, unsubstituted); when no registered resolver claims it, falls straight through
+ * to Phase 1's own `resolveClauseCondition` completely unchanged. Pure — same discipline
+ * `resolveClauseCondition` itself already documents.
+ */
+function resolveClause(
+  clause: string,
+  boundValues: Readonly<Record<string, unknown>>,
+  row: ActivityLogRow,
+  registry: ResolverRegistry,
+): ClauseResolution {
+  const resolver = registry.findResolverForClause(clause);
+  if (resolver) {
+    const outcome = resolver.resolve({ clause, boundValues, row });
+    if (outcome.resolved) {
+      return {
+        kind: 'resolved',
+        passed: outcome.passed === true,
+        resolverCode: resolver.resolverCode,
+      };
+    }
+    return {
+      kind: 'resolverUnresolved',
+      resolverCode: resolver.resolverCode,
+      reason: outcome.reason ?? 'no reason given',
+    };
+  }
+  return resolveClauseCondition(clause, boundValues);
 }
 
 function splitExpressionClauses(expression: string): string[] {
@@ -270,10 +331,20 @@ export class RuleEvaluatorService {
   private readonly logger = new Logger(RuleEvaluatorService.name);
 
   /**
+   * T-RAP-064: shared, stateless default (`resolvers/resolver-registry.ts`) — not constructor
+   * injected. `RuleEvaluatorService` had no constructor before this task and every existing
+   * caller/test still constructs it with `new RuleEvaluatorService()`; every resolver in the
+   * default registry is itself pure, so one process-wide instance is safe to reuse across every
+   * evaluation, and this keeps that zero-arg shape unchanged.
+   */
+  private readonly resolverRegistry: ResolverRegistry = defaultResolverRegistry;
+
+  /**
    * Evaluates every *active* `RuleRef` bound to the claimed row's own tracker component. Pure
-   * except for `this.logger.warn` on the T-RAP-063 "unresolved placeholder" path below (no other
-   * side effect, no DB/cache access): throws (never returns) only for a malformed/unsupported
-   * expression that carries **no** `:placeholder` template token — a genuine configuration defect
+   * except for `this.logger.warn` on the T-RAP-063 "unresolved placeholder" / T-RAP-064 "resolver
+   * could not resolve" paths below (no other side effect, no DB/cache access): throws (never
+   * returns) only for a malformed/unsupported expression that carries **no** `:placeholder`
+   * template token and no registered resolver recognizes — a genuine configuration defect
    * (`05-PROCESSING-PIPELINE.md` §5 point 3's own "reserve 'error' for genuine failures ... not for
    * 'the activity didn't satisfy the rule'" — a rule that cannot even be parsed is the former, not
    * the latter) — or for an unknown `activity.<field>` reference, same as before this task.
@@ -284,6 +355,11 @@ export class RuleEvaluatorService {
    * own header. That rule is evaluated as **not passed**, with a warning naming the exact
    * unresolved placeholder(s) and the rule code, and every other rule bound to this same component
    * (and every other row in the claimed queue) proceeds completely unaffected.
+   *
+   * T-RAP-064: before that placeholder-substitution path runs, each clause is first offered to
+   * `this.resolverRegistry` (see `resolveClause`, and this file's own header). A resolver that
+   * claims the clause but cannot resolve it today reports the same "not passed, warn, never throw"
+   * outcome, just with a free-text reason instead of a placeholder list.
    */
   evaluate(row: ActivityLogRow, ruleRefs: readonly BoundRuleProto[]): RuleEvaluationOutcome {
     const activeRules = ruleRefs.filter((rule) => rule.status === 'active');
@@ -291,12 +367,24 @@ export class RuleEvaluatorService {
       const boundValues = this.parseBoundValuesJson(rule);
       const clauses = splitExpressionClauses(rule.expression);
       let unresolvedPlaceholders: string[] | null = null;
+      let resolverUnresolved: { resolverCode: string; reason: string } | null = null;
       let clausesPassed = true;
       for (const clause of clauses) {
-        const resolution = resolveClauseCondition(clause, boundValues);
+        const resolution = resolveClause(clause, boundValues, row, this.resolverRegistry);
         if (resolution.kind === 'unresolved') {
           unresolvedPlaceholders = resolution.placeholders;
           break;
+        }
+        if (resolution.kind === 'resolverUnresolved') {
+          resolverUnresolved = { resolverCode: resolution.resolverCode, reason: resolution.reason };
+          break;
+        }
+        if (resolution.kind === 'resolved') {
+          if (!resolution.passed) {
+            clausesPassed = false;
+            break;
+          }
+          continue;
         }
         if (!compare(resolveActivityField(row, resolution.condition.field), resolution.condition)) {
           clausesPassed = false;
@@ -319,6 +407,21 @@ export class RuleEvaluatorService {
             `Rule "${rule.ruleCode}" could not be evaluated: unresolved placeholder(s) ` +
             `${unresolvedPlaceholders.map((p) => `:${p}`).join(', ')} in expression ` +
             `"${rule.expression}" for activity_logs row ${row.id} — evaluated as not passed.`,
+        };
+      }
+      if (resolverUnresolved !== null) {
+        this.logger.warn(
+          `rule ${rule.ruleCode} on tracker_component ${row.tracker_component_code}: ` +
+            `resolver ${resolverUnresolved.resolverCode} could not resolve this clause ` +
+            `(${resolverUnresolved.reason}) — evaluating as not-passed`,
+        );
+        return {
+          passed: false,
+          failedRuleCode: rule.ruleCode,
+          comment:
+            `Rule "${rule.ruleCode}" could not be evaluated: resolver "${resolverUnresolved.resolverCode}" ` +
+            `could not resolve expression "${rule.expression}" for activity_logs row ${row.id} ` +
+            `(${resolverUnresolved.reason}) — evaluated as not passed.`,
         };
       }
       if (!clausesPassed) {

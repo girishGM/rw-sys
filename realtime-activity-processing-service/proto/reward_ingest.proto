@@ -52,6 +52,13 @@ message RewardEntry {
   string reward_value_unit         = 23;
   string reward_entry_date         = 24;  // full ISO-8601 with zone offset
   int32  completion_cycle          = 25;
+  // T-RAP-062: descriptive-only metadata mirrored from BoundReward at grant time
+  // (`reward-entry.model.ts`'s own header, `05-PROCESSING-PIPELINE.md` §6) — never a new
+  // enforcement input. OPTIONAL — empty string / 0 means "not set / not applicable", same
+  // proto3 "absent means zero value" convention every other optional field in this message uses.
+  string reward_kind               = 26;
+  string promo_code_config_id      = 27;  // meaningful only when reward_kind == "PROMO_CODE"
+  int32  promo_code_config_version_no = 28;
 }
 
 message SubmitRewardEntryAck {

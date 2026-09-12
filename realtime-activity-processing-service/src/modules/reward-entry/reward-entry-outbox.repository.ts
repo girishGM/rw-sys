@@ -62,6 +62,12 @@ export interface RewardEntryOutboxPayload {
   rewardValueUnit: string;
   rewardEntryDate: string;
   completionCycle: number;
+  // T-RAP-062: descriptive-only metadata (`reward-entry.model.ts`'s own header) — optional so this
+  // is a purely additive change to a payload shape other tasks' own out-of-scope fixtures may
+  // still hand-build without these fields.
+  rewardKind?: string | null;
+  promoCodeConfigId?: string | null;
+  promoCodeConfigVersionNo?: number | null;
 }
 
 export function buildOutboxPayload(row: RewardEntryRow): RewardEntryOutboxPayload {
@@ -91,6 +97,9 @@ export function buildOutboxPayload(row: RewardEntryRow): RewardEntryOutboxPayloa
     rewardValueUnit: row.reward_value_unit,
     rewardEntryDate: new Date(row.reward_entry_date).toISOString(),
     completionCycle: row.completion_cycle,
+    rewardKind: row.reward_kind ?? null,
+    promoCodeConfigId: row.promo_code_config_id ?? null,
+    promoCodeConfigVersionNo: row.promo_code_config_version_no ?? null,
   };
 }
 

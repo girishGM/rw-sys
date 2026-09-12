@@ -262,9 +262,11 @@ describe('RuleEvaluatorService.evaluate — T-RAP-063 placeholder binding (pure,
     });
 
   // Row set B (diagnosis doc §3) — WELCOME_STREAK_LIVE / TRK-530457-OQIDT5 / CMP-530457-JHISLD,
-  // `RULE_ACTIVITY_WINDOW_001`. `:windowType` *is* present in the wire config (`tcr.config`), but
-  // resolving it into an actual time-window comparison needs real resolver dispatch (T-RAP-064) —
-  // this Phase-1 fix only stops the throw, it does not make this rule pass for real.
+  // `RULE_ACTIVITY_WINDOW_001`. `:windowType` *is* present in the wire config (`tcr.config`) —
+  // T-RAP-064 (Phase 2) added real `SCHEDULE_CONTEXT` resolver dispatch for exactly this clause
+  // shape, so this now evaluates for real rather than falling through to Phase 1's inert
+  // "unresolved" outcome (see the test immediately below, updated accordingly by that task; full
+  // resolver coverage lives in `rule-evaluator.service.resolver-dispatch.spec.ts`).
   const windowRule = () =>
     rule({
       ruleCode: 'RULE_ACTIVITY_WINDOW_001',
@@ -300,9 +302,17 @@ describe('RuleEvaluatorService.evaluate — T-RAP-063 placeholder binding (pure,
     }
   });
 
-  // TC-3 (reproduce + fix): same shape as TC-1/TC-2, for the natural-language window clause — not
-  // passed, logged, no throw, even though `:windowType` itself does have a wire value.
-  it('TC-3: RULE_ACTIVITY_WINDOW_001 (real expression) does not throw — not-passed, warns naming :windowType', () => {
+  // TC-3 (reproduce + Phase 1 fix): never throws, regardless of phase.
+  //
+  // T-RAP-064 (Phase 2) update: this clause is now claimed by the real `SCHEDULE_CONTEXT`
+  // resolver (`resolvers/schedule-context.resolver.ts`) and evaluates for real — the live
+  // `windowStart`/`windowEnd` (`00:00`/`23:59`) is a full calendar day, so any activity timestamp
+  // (`fakeRow()`'s own `new Date()`) genuinely falls inside it: `passed:true`, no warning logged.
+  // This supersedes the pre-T-RAP-064 assertion that used to live here (`passed:false`, warns
+  // naming `:windowType`) — see `rule-evaluator.service.resolver-dispatch.spec.ts` for the full
+  // resolver-dispatch test matrix (including the outside-window / unsupported-`windowType` cases
+  // this file does not re-cover).
+  it('TC-3: RULE_ACTIVITY_WINDOW_001 (real expression) does not throw — resolved for real by SCHEDULE_CONTEXT, passed:true', () => {
     const warnSpy = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
     try {
       const row = fakeRow({ tracker_component_code: 'CMP-530457-JHISLD' });
@@ -312,10 +322,9 @@ describe('RuleEvaluatorService.evaluate — T-RAP-063 placeholder binding (pure,
         outcome = evaluator.evaluate(row, [windowRule()]);
       }).not.toThrow();
 
-      expect(outcome?.passed).toBe(false);
-      expect(outcome?.failedRuleCode).toBe('RULE_ACTIVITY_WINDOW_001');
-      expect(outcome?.comment).toContain(':windowType');
-      expect(warnSpy.mock.calls.some((call) => String(call[0]).includes(':windowType'))).toBe(true);
+      expect(outcome?.passed).toBe(true);
+      expect(outcome?.failedRuleCode).toBeNull();
+      expect(warnSpy).not.toHaveBeenCalled();
     } finally {
       warnSpy.mockRestore();
     }

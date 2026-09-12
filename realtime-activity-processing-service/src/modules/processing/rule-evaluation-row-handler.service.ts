@@ -64,6 +64,12 @@
  * plain `Logger` field above is kept only because `resolveAdvisoryLockWaitTimeoutMs` (a shared
  * `processing.config.ts` helper also used by `activity-log-claim.worker.ts`) is typed against the
  * concrete Nest `Logger`, not `StructuredLogger`.
+ *
+ * **T-RAP-062 update:** the `reward_entry` insert beside the `rewardCategory` assignment above also
+ * stamps `reward_kind`/`promo_code_config_id`/`promo_code_config_version_no`, read straight off the
+ * same already-resolved `granted.reward` (`BoundReward`, T-173/T-RAP-065) — purely descriptive
+ * metadata (`reward-entry.model.ts`'s own header), never a new cap/budget enforcement input, never
+ * changing any existing field's own value.
  */
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import type { Sequelize, Transaction } from 'sequelize';
@@ -246,6 +252,13 @@ export class RuleEvaluationRowHandler implements ActivityLogRowHandler {
                   rewardValueUnit: granted.reward.unitCode,
                   completionCycle: progressResult.row.completion_cycle,
                   rewardEntryDate,
+                  // T-RAP-062: stamp the three descriptive-only fields read straight off the
+                  // already-resolved `BoundReward` (T-173/T-RAP-065) — `||` treats proto3's own
+                  // empty-string/zero "absent" encoding as "not yet set/not applicable", never
+                  // fabricated, same discipline `rewardCategory` above already follows.
+                  rewardKind: granted.reward.rewardKind || null,
+                  promoCodeConfigId: granted.reward.promoCodeConfigId || null,
+                  promoCodeConfigVersionNo: granted.reward.promoCodeConfigVersionNo || null,
                 },
               );
               if (rewardEntry === null) {

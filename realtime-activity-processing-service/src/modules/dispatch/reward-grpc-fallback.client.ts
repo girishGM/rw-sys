@@ -135,6 +135,12 @@ export interface RewardEntryGrpcPayload {
   rewardValueUnit: string;
   rewardEntryDate: string;
   completionCycle: number;
+  // T-RAP-062: descriptive-only metadata (`reward-entry.model.ts`'s own header) — optional,
+  // proto3-empty-means-absent (`?? ''`/`?? 0` applied in `toRewardEntryGrpcPayload` below), same
+  // convention `activity_ingest.proto`'s own optional fields already use.
+  rewardKind?: string;
+  promoCodeConfigId?: string;
+  promoCodeConfigVersionNo?: number;
 }
 
 export interface SubmitRewardEntryAck {
@@ -173,6 +179,9 @@ export function toRewardEntryGrpcPayload(
     rewardValueUnit: string;
     rewardEntryDate: string;
     completionCycle: number;
+    rewardKind?: string | null;
+    promoCodeConfigId?: string | null;
+    promoCodeConfigVersionNo?: number | null;
   },
   customerId: string,
 ): RewardEntryGrpcPayload {
@@ -202,6 +211,9 @@ export function toRewardEntryGrpcPayload(
     rewardValueUnit: source.rewardValueUnit,
     rewardEntryDate: source.rewardEntryDate,
     completionCycle: source.completionCycle,
+    rewardKind: source.rewardKind ?? '',
+    promoCodeConfigId: source.promoCodeConfigId ?? '',
+    promoCodeConfigVersionNo: source.promoCodeConfigVersionNo ?? 0,
   };
 }
 
