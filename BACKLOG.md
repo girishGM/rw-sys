@@ -13,6 +13,29 @@ Status: `deferred` (agreed, not scheduled) · `decision-needed` (blocked on the 
 
 ---
 
+## RS-05 · Real operator/threshold for `RULE_ACTIVITY_VALUE_001` on 3 live campaigns
+
+**Status:** decision-needed · **Raised:** 2026-09-12 (diagnosing `T-RAP-063`)
+
+Confirmed live on Render (tenant 7): 10 `tracker_component_rules` bindings across
+`WEEKEND_PROMO_BLITZ`/`SUMMER_CASHBACK_SPRINT`/`REFER_AND_EARN` use
+`rule_master.expression = "transaction.amount :operator :value (transaction.currency == :currency)"`
+with **no `operator` set** (structurally un-settable today — no `rule_version_id` is pinned, and an
+unversioned binding has an empty allowed-operator set per `bindings.service.ts`'s own
+`assertOperatorAllowed`) and `value=0`/`currency="MYR"`, which read as untouched form defaults
+(`min:0`, first dropdown option), not a deliberately chosen threshold.
+
+**What's needed**: whoever owns these 3 campaigns' reward rules must decide the real comparison
+(`>=` is the plausible business intent for "spend at least X," but this is not written down
+anywhere retrievable) and a real threshold amount + currency — then get a `rule_version_id` pinned
+to each binding so `operator` becomes settable at all. Full context:
+`realtime-activity-processing-service-plan/brain-storm/T-RAP-063-rule-expression-binding-diagnosis.md`
+§3 (row set A) and §8 (open question 2). Blocks `realtime-activity-processing-service-plan/tasks/T-RAP-064`
+from making these 10 bindings pass for real (that task can still ship its resolver mechanism and the
+one other real clause type without this landing first).
+
+---
+
 ## RS-01 · Campaign owner contact — schema location
 
 **Status:** decision-needed · **Raised:** 2026-09-07 (reward-tracking-service brainstorm review)
