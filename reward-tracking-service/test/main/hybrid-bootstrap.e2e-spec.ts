@@ -21,6 +21,14 @@
  * every test in this file; only the vars `main.ts`'s own hybrid-bootstrap logic and
  * `campaign-hierarchy.client.ts` read directly from `process.env` at call time are the ones this
  * file varies per test.
+ *
+ * **T-INT-057 update:** `HybridBootstrapHandle.restIngest` (a second app/port handle) is gone —
+ * `RewardTrackingIngestController`'s routes are now mounted on `handle.app`/`handle.port`, the same
+ * listener `/health` answers on (Render exposes exactly one port per `web` service; a second port
+ * was never reachable there). TC-1 below now also asserts a real 404 for the ingest route on the
+ * primary listener when the gate is off (this task's own TC-2), and TC-4 asserts the route is
+ * reachable — and a bad token still 401s (this task's own TC-3) — on that same primary listener
+ * instead of a separately-booted one.
  */
 import 'reflect-metadata';
 import { randomUUID } from 'node:crypto';
@@ -441,10 +449,17 @@ describe('T-INT-005 — hybrid bootstrap (real process, real Postgres) (e2e)', (
 
     expect(handle.grpc).toBeNull();
     expect(handle.kafka).toBeNull();
-    expect(handle.restIngest).toBeNull();
+    expect(handle.restIngestMounted).toBe(false);
 
     const healthResponse = await request(handle.app.getHttpServer()).get('/health');
     expect(healthResponse.status).toBe(200);
+
+    // T-INT-057 TC-2: a true 404 on the primary listener — no route registered at all, not an
+    // auth rejection — matching today's genuinely-unconfigured behavior exactly.
+    const ingestProbe = await request(handle.app.getHttpServer())
+      .post('/internal/reward-tracking-events')
+      .send({});
+    expect(ingestProbe.status).toBe(404);
 
     await expect(isPortListening(grpcProbePort)).resolves.toBe(false);
     await expect(isPortListening(restProbePort)).resolves.toBe(false);
@@ -507,27 +522,40 @@ describe('T-INT-005 — hybrid bootstrap (real process, real Postgres) (e2e)', (
     }, 20000);
   });
 
-  // TC-4
-  it('TC-4: REST ingest gate on — POST /internal/reward-tracking-events reachable', async () => {
+  // TC-4 (T-INT-057: reachable on the SAME port/listener as /health — no second port)
+  it('TC-4: REST ingest gate on — POST /internal/reward-tracking-events reachable on the primary listener, same port as /health', async () => {
     disableCampaignCacheWarm();
-    const port = await getFreePort();
+    // Deliberately NOT set — T-INT-057's whole point is that the hybrid bootstrap no longer reads
+    // this var at all; leaving it unset (and even pointed elsewhere) proves the ingest route is
+    // reached via the primary `handle.port`, not some other port this variable might suggest.
+    delete process.env.RTS_REST_INGEST_PORT;
     process.env.RTS_REST_INGEST_ENABLED = 'true';
-    process.env.RTS_REST_INGEST_PORT = String(port);
     process.env.REWARD_TRACKING_INGEST_TOKEN = 'hybrid-bootstrap-e2e-spec-token';
 
     handle = await bootstrap();
-    expect(handle.restIngest).not.toBeNull();
-    expect(handle.restIngest?.port).toBe(port);
+    expect(handle.restIngestMounted).toBe(true);
+
+    // TC-1 (this task's own): reachable on the exact same port/listener `/health` responds on.
+    const healthResponse = await request(handle.app.getHttpServer()).get('/health');
+    expect(healthResponse.status).toBe(200);
 
     const tenantId = nextTenantId();
     const body = jsonIngestBody(tenantId);
-    const response = await request(handle.restIngest?.app.getHttpServer())
+    const response = await request(handle.app.getHttpServer())
       .post('/internal/reward-tracking-events')
       .set('Authorization', `Bearer ${process.env.REWARD_TRACKING_INGEST_TOKEN}`)
       .send(body);
 
     expect(response.status).toBe(200);
     expect(response.body).toEqual({ status: 'applied' });
+
+    // TC-3 (this task's own): a bad token behaves identically to the standalone server's own guard
+    // (401, not 404) — proving this is a real, registered, authenticated route, not a bypass.
+    const badTokenResponse = await request(handle.app.getHttpServer())
+      .post('/internal/reward-tracking-events')
+      .set('Authorization', 'Bearer wrong-token')
+      .send(jsonIngestBody(tenantId));
+    expect(badTokenResponse.status).toBe(401);
   });
 
   // TC-5 + TC-6

@@ -14,7 +14,7 @@ import { loadDotenvFilesIntoProcessEnv } from './config/load-dotenv-files';
 loadDotenvFilesIntoProcessEnv();
 
 import { NestFactory } from '@nestjs/core';
-import { Logger } from '@nestjs/common';
+import { Logger, Module } from '@nestjs/common';
 import type { INestApplication, INestApplicationContext } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AppModule } from './app.module';
@@ -28,10 +28,9 @@ import {
   KAFKA_CONSUMER_ENABLED_ENV_VAR,
 } from './kafka/kafka-consumer.main';
 import { RewardTrackingConsumerService } from './kafka/reward-tracking-consumer.service';
-import {
-  createRewardTrackingIngestHttpServer,
-  type RewardTrackingIngestHttpServerHandle,
-} from './modules/ingestion/reward-tracking-ingest-http.main';
+import { LoggingModule } from './observability/logging.module';
+import { RewardTrackingIngestionModule } from './modules/ingestion/reward-tracking-ingestion.module';
+import { RewardTrackingIngestController } from './modules/ingestion/reward-tracking-ingest.controller';
 
 /**
  * T-INT-005. Fixes the "standalone entry point" disease (`reward-service-integration-plan/
@@ -78,6 +77,41 @@ import {
  * `CampaignHierarchyClient.onModuleInit()` runs automatically as part of `NestFactory.create(
  * AppModule)`/`app.listen(port)` below, no separate call needed here, and it never gates or crashes
  * this process even when the portal is unreachable or unconfigured (that class's own header, R1).
+ *
+ * **T-INT-057 correction — REST ingest is no longer a fourth "started alongside" sub-server.**
+ * Render only exposes a single port per `web` service (the same constraint RAP's/RR's own gRPC/mTLS
+ * gaps already document for this tier); the original shape above booted
+ * `RewardTrackingIngestController` via `createRewardTrackingIngestHttpServer()` on its own
+ * `RTS_REST_INGEST_PORT` (default `3041`) — a second `http.Server` Render never routes to, so every
+ * REST dispatch from `reward-redemption-service` to the one externally-reachable hostname/port
+ * 404'd (no route registered there at all; see this task's own evidence). The fix folds
+ * `RewardTrackingIngestController`'s module directly into **this same primary HTTP listener**
+ * instead: `bootstrap()` below picks its own root module — plain `AppModule`, or
+ * `HybridAppWithRestIngestModule` (this file, further down) which simply imports `AppModule` plus
+ * `RewardTrackingIngestionModule`/`LoggingModule` and additionally declares
+ * `RewardTrackingIngestController` — based on `RTS_REST_INGEST_ENABLED` *before* the one
+ * `NestFactory.create(...)`/`app.listen(port)` call, so the ingest route (when enabled) is reachable
+ * on the exact same port `/health` answers on (TC-1), and is a true 404 on that same port when the
+ * gate is unset/false (TC-2) — matching R2/T-INT-004's own "fold a standalone transport into the
+ * always-on main app rather than invent a second exposed port" precedent, not a new pattern.
+ * `RewardTrackingIngestController`/`RewardTrackingIngestionModule`/the guard/DTO are reused
+ * completely unmodified (TC-3: identical validation/side effects to the old standalone-server
+ * behavior) — only how the module graph is composed changes.
+ *
+ * `src/app.module.ts` is deliberately **not** edited for this — `HybridAppWithRestIngestModule`
+ * imports the already-exported `AppModule` class as a sibling module instead of the other way
+ * around, so `RewardTrackingIngestController`'s routes end up on the same Express instance/module
+ * graph without touching a file outside this task's own "Files owned" list. `ConfigModule` is
+ * `@Global()` (`config.module.ts`) so it doesn't need re-importing here once it arrives via
+ * `AppModule`; `LoggingModule` is imported explicitly for the identical reason
+ * `reward-tracking-ingest-http.main.ts`'s own root module already documents (T-RTS-049) —
+ * `RewardTrackingIngestController` injects `MetricsService`/`StructuredLoggerFactory` directly, and
+ * `RewardTrackingIngestionModule` doesn't re-export the `LoggingModule` it imports internally.
+ *
+ * The standalone `reward-tracking-ingest-http.main.ts` composition root (T-RTS-013) is untouched and
+ * no longer imported by this file at all (R2) — it remains independently runnable as its own process
+ * for local/dev use or any future multi-port topology (TC-4); this file simply stops being one of
+ * its callers.
  */
 const GRPC_INGEST_ENABLED_ENV_VAR = 'RTS_GRPC_INGEST_ENABLED';
 const REST_INGEST_ENABLED_ENV_VAR = 'RTS_REST_INGEST_ENABLED';
@@ -86,12 +120,32 @@ function isFlagEnabled(envVar: string): boolean {
   return process.env[envVar] === 'true';
 }
 
+/**
+ * T-INT-057. Composes the real `AppModule` together with the REST ingest transport
+ * (`RewardTrackingIngestionModule` + `RewardTrackingIngestController`) into one module graph, so
+ * `NestFactory.create(...)` below produces a single `INestApplication`/single `http.Server` whose
+ * routes include both — no second `app.listen(...)` call, no second port. Only ever selected as the
+ * root module when `RTS_REST_INGEST_ENABLED === 'true'` (see `bootstrap()` below); otherwise plain
+ * `AppModule` is used unchanged, so the ingest route is genuinely absent (TC-2), not merely
+ * unauthenticated. See this file's own header for the full "why" (R2/T-INT-004 precedent, why
+ * `app.module.ts` itself isn't touched, why `LoggingModule` is imported explicitly here).
+ */
+@Module({
+  imports: [AppModule, RewardTrackingIngestionModule, LoggingModule],
+  controllers: [RewardTrackingIngestController],
+})
+class HybridAppWithRestIngestModule {}
+
 export interface HybridBootstrapHandle {
   app: INestApplication;
   port: number;
   grpc: RewardTrackingGrpcServerHandle | null;
   kafka: INestApplicationContext | null;
-  restIngest: RewardTrackingIngestHttpServerHandle | null;
+  /** `true` when `RewardTrackingIngestController`'s routes are mounted on this same `app`/`port`
+   * (T-INT-057) — unlike `grpc`/`kafka` above, there is no separate handle to return here: this
+   * transport shares the primary app's own listener/lifecycle entirely, so `close()` below tears it
+   * down via the same `app.close()` call, nothing extra. */
+  restIngestMounted: boolean;
   /** Closes every transport this bootstrap actually started, plus the primary HTTP app — tests'
    * own convenience, mirroring each standalone file's own `close()`/`onModuleDestroy` shape. */
   close: () => Promise<void>;
@@ -106,7 +160,16 @@ const logger = new Logger('RewardTrackingHybridBootstrap');
  * the full contract.
  */
 export async function bootstrap(): Promise<HybridBootstrapHandle> {
-  const app = await NestFactory.create(AppModule);
+  const restIngestMounted = isFlagEnabled(REST_INGEST_ENABLED_ENV_VAR);
+  // T-INT-057: the root module is chosen BEFORE `NestFactory.create(...)` — the one place this
+  // decision can be made, since a Nest module graph is fixed at creation time. A missing
+  // `REWARD_TRACKING_INGEST_TOKEN` while this gate is `true` throws here (inside
+  // `RewardTrackingIngestTokenGuard`'s own constructor, resolved as part of building this graph),
+  // which is still "fail loud, exit non-zero" (this file's own header) — just one call earlier than
+  // before this task, not a behavior change an operator would observe.
+  const app = await NestFactory.create(
+    restIngestMounted ? HybridAppWithRestIngestModule : AppModule,
+  );
   const configService = app.get(ConfigService<Config, true>);
   const port = configService.get('PORT', { infer: true });
 
@@ -114,6 +177,12 @@ export async function bootstrap(): Promise<HybridBootstrapHandle> {
   // silently — `app.listen(...)` rejects the returned promise on a listener 'error' (e.g.
   // EADDRINUSE), which the catch below turns into a clear, explicit message before exiting.
   await app.listen(port);
+
+  if (restIngestMounted) {
+    logger.log(
+      `RewardTrackingIngestController REST route mounted on the primary HTTP listener (port ${port}, same as /health) — T-INT-057`,
+    );
+  }
 
   let grpc: RewardTrackingGrpcServerHandle | null = null;
   if (isFlagEnabled(GRPC_INGEST_ENABLED_ENV_VAR)) {
@@ -134,20 +203,13 @@ export async function bootstrap(): Promise<HybridBootstrapHandle> {
     }
   }
 
-  let restIngest: RewardTrackingIngestHttpServerHandle | null = null;
-  if (isFlagEnabled(REST_INGEST_ENABLED_ENV_VAR)) {
-    restIngest = await createRewardTrackingIngestHttpServer();
-    logger.log(`RewardTrackingIngestController HTTP server listening on port ${restIngest.port}`);
-  }
-
   return {
     app,
     port,
     grpc,
     kafka,
-    restIngest,
+    restIngestMounted,
     close: async () => {
-      await restIngest?.close();
       if (kafka) {
         await kafka.get(RewardTrackingConsumerService).stop();
         await kafka.close();
