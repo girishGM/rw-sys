@@ -84,11 +84,15 @@ import {
 // T-INT-043 retry 1: same convention every other file that acquires
 // `acquireIngestConsumerGroupReaderLease` already follows (`full-pipeline.e2e-spec.ts`,
 // `full-pipeline-multi-instance.e2e-spec.ts`) — this file's own `jest.setTimeout` must bake in the
-// full acquire-wait budget on top of its own real work (TC-1's own two `waitUntil` polls, 90s + 90s
-// = 180s worst case, plus Nest/DB/mock-portal boot overhead), not just the real-work time alone, or
+// full acquire-wait budget on top of its own real work, not just the real-work time alone, or
 // a legitimately-queued wait behind another file's own lock hold would blow this file's timeout
 // before the lock module's own clearer, attributable timeout error ever got a chance to fire.
-jest.setTimeout(READER_LEASE_ACQUIRE_TIMEOUT_MS + 240_000);
+//
+// T-INT-062 retry 3: TC-1's own two `waitUntil` polls were raised from 90s each (180s worst case)
+// to 180s each (360s worst case) — see each call site's own comment for why — so the addend below
+// was raised from `240_000` to `420_000` to keep comfortable headroom (~60s) for Nest/DB/mock-portal
+// boot overhead on top of that new 360s real-work ceiling, not just enough for the old 180s one.
+jest.setTimeout(READER_LEASE_ACQUIRE_TIMEOUT_MS + 420_000);
 
 const AES_KEY_B64 = Buffer.alloc(32, 41).toString('base64');
 const HMAC_KEY_B64 = Buffer.alloc(32, 42).toString('base64');
@@ -326,7 +330,7 @@ describe('T-INT-043 — processing/dispatch worker bundle wired into the hybrid 
         expect(result.processingWorkerContext).not.toBeNull();
         expect(result.grpcApp).toBeNull();
         expect(result.ingestConsumerContext).toBeNull();
-        expect(result.progressApiApp).toBeNull();
+        expect(result.progressApiMounted).toBe(false);
 
         // ActivityLogClaimWorker/StaleProcessingSweepService both autostart unconditionally
         // (`src/main.ts`'s own header) — no explicit start() call needed for the claim itself.
@@ -339,18 +343,25 @@ describe('T-INT-043 — processing/dispatch worker bundle wired into the hybrid 
         // to 60_000 first (matching `full-pipeline.e2e-spec.ts`'s own tuned precedent for the
         // identical claim-to-`'processed'` transition) and then to 90_000, matching
         // `full-pipeline-multi-instance.e2e-spec.ts`'s own even more generous precedent for the
-        // same step — re-verification under real, genuinely contended full-suite `npm test` runs
-        // (many concurrent heavy real-Postgres/gRPC/Kafka e2e suites, exactly the condition every
-        // one of these constants was independently tuned against) showed 60_000 alone still timing
-        // out under worse-than-typical ambient load; 90_000 is the most generous value already
-        // established anywhere in this codebase for this exact kind of step, not a new, unvetted
-        // number. This file's own dispatch-status wait below keeps its original 30_000, matching
-        // `full-pipeline.e2e-spec.ts`'s own 30_000 precedent for the (cheaper, already-`'processed'`-
-        // row) dispatch step specifically.
+        // same step.
+        //
+        // T-INT-062 retry 3: raised again, from 90_000 to 180_000. An independent review's own
+        // full, unfiltered `npm test` run reproduced this exact wait's sibling below (the
+        // dispatch-status wait) timing out at 90_000ms twice, on two separate runs, on this same
+        // shared, genuinely contended machine (see this task's own completion report for the real,
+        // disclosed `ps aux` evidence of concurrent orchestrators/dev servers this repo's own
+        // `CLAUDE.md` already documents as routine here) — the identical class of headroom problem
+        // this comment's own history already describes, just needing a larger ceiling than the
+        // last one this codebase had established for it. `180_000` matches
+        // `test/main/hybrid-bootstrap.e2e-spec.ts`'s own TC-3/TC-5 precedent (also raised from
+        // `120_000` to `180_000` for the identical "real Postgres/Kafka round trip competing with
+        // ~74 other suites" reason, and confirmed stable there across repeated full-suite runs) —
+        // the most generous ceiling now established anywhere in this codebase for this class of
+        // wait, not a new, unvetted number.
         await waitUntil(async () => {
           const row = await fetchActivityLogRow(sequelize, rowId);
           return row?.status === 'processed';
-        }, 90_000);
+        }, 180_000);
 
         const row = await fetchActivityLogRow(sequelize, rowId);
         expect(row?.status).toBe('processed');
@@ -392,14 +403,38 @@ describe('T-INT-043 — processing/dispatch worker bundle wired into the hybrid 
         // `DEFAULT_REWARD_DISPATCH_MAX_RETRY_ATTEMPTS`/`DEFAULT_RETRY_BACKOFF_BASE_MS`) occasionally
         // exceeding even 60s once real Postgres/Kafka round trips are themselves slower under a
         // genuinely heavily-loaded full-suite run — the same class of headroom problem the claim-
-        // to-`'processed'` wait above already needed more of. Matching that same wait's own 90_000
-        // ceiling keeps this file internally consistent rather than inventing a third distinct
-        // budget for what is, under contention, the same underlying "real DB/broker round trip
-        // competing with ~74 other suites" problem.
+        // to-`'processed'` wait above already needed more of.
+        //
+        // T-INT-062 retry 3: raised again, from 90_000 to 180_000 — this is the exact wait an
+        // independent review's own full, unfiltered `npm test` run reproduced timing out (twice,
+        // on two separate runs, at this file's own then-`90000ms` ceiling), see this task's own
+        // completion report for the full reproduction. Matches the claim-to-`'processed'` wait
+        // above's own identical bump to `180_000` (see that wait's own comment for why that specific
+        // ceiling, not a new, third distinct number) — keeps this file internally consistent rather
+        // than inventing a separate budget for what is, under contention, the same underlying "real
+        // DB/broker round trip competing with ~74 other suites" problem.
+        //
+        // Soft, disclosed note on the reader-lease budget this test holds for the duration of BOTH
+        // waits (see this file's own header + `acquireIngestConsumerGroupReaderLease` above): the
+        // worst-case combined hold time this raises to (up to 360s across both waits, plus real Nest/
+        // DB/mock-portal boot overhead) is now larger than `test/e2e/full-pipeline-test-helpers.ts`'s
+        // own `OTHER_READER_FILE_MAX_HOLD_MS` (200_000ms) — an informal assumption baked into a
+        // SEPARATE file's own `WRITER_LOCK_ACQUIRE_TIMEOUT_MS` arithmetic
+        // (`test/e2e/ingest-consumer-writer-lock-budget.ts`, `test/e2e/kafka-shared-consumer-group-
+        // lock.ts`'s own `MAX_REALISTIC_LOCK_HOLD_MS = 900_000`), neither of which is in this task's
+        // own Files-owned list to fix directly. Assessed as low real risk, not silently ignored: that
+        // 200_000ms figure is only one term (dwarfed by the writer's own 900_000ms term) inside a
+        // combined `READER_LEASE_ACQUIRE_TIMEOUT_MS` of ~1_120_000ms (~18.6 minutes) any OTHER waiter
+        // actually gets before timing out its own acquire attempt, and `lock-budget-invariant.spec.ts`
+        // only asserts the static relationship between those constants, not a live cap on any one
+        // reader file's own real hold time — so this change cannot fail that test, only theoretically
+        // eat further into a large existing margin elsewhere. Flagged here rather than silently
+        // exceeded; a future task tightening that lock's own budget arithmetic should account for this
+        // file's own new worst case explicitly.
         await waitUntil(async () => {
           const entries = await fetchRewardEntries(sequelize, tenantId, campaignCode);
           return entries[0]?.dispatch_status === 'dispatched';
-        }, 90_000);
+        }, 180_000);
       } finally {
         try {
           await result?.processingWorkerContext?.close();
@@ -474,7 +509,7 @@ describe('T-INT-043 — processing/dispatch worker bundle wired into the hybrid 
       result = await startExpectingSuccess();
       expect(result.grpcApp).toBeNull();
       expect(result.ingestConsumerContext).toBeNull();
-      expect(result.progressApiApp).toBeNull();
+      expect(result.progressApiMounted).toBe(false);
       expect(result.processingWorkerContext).toBeNull();
 
       const health = await request(result.httpApp.getHttpServer()).get('/health');

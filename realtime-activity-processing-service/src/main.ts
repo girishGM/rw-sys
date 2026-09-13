@@ -9,10 +9,7 @@ import type { Config } from './config/config.schema';
 import { createGrpcMicroservice } from './grpc/grpc-server.main';
 import { createIngestConsumerContext } from './messaging/ingest/activity-ingest-consumer.main';
 import { ActivityIngestConsumer } from './messaging/ingest/activity-ingest.consumer';
-import {
-  createProgressApiApp,
-  resolveProgressApiPort,
-} from './modules/progress-api/progress-api-server.main';
+import { ProgressApiModule } from './modules/progress-api/progress-api.module';
 import { ProcessingModule } from './modules/processing/processing.module';
 import { DispatchModule } from './modules/dispatch/dispatch.module';
 
@@ -60,6 +57,37 @@ import { DispatchModule } from './modules/dispatch/dispatch.module';
  * diverge from — `ProcessingModule`/`DispatchModule` had no standalone entry point at all) and are
  * given the same off-by-default treatment for symmetry with the other two, exactly as
  * implementation note 1 asks.
+ *
+ * **T-INT-062 correction — the customer progress API is no longer a fourth "started as its own
+ * separate NestApplication" transport.** The description above (T-INT-003) had it listening on its
+ * own port (`resolveProgressApiPort()`, default 3021) inside this same process — exactly the same
+ * "second port Render never routes to" bug `T-INT-057` already found and fixed for
+ * reward-tracking-service's own REST ingest (`reward-service-integration-plan/tasks/
+ * T-INT-057-*.md`/`reward-tracking-service/src/main.ts`). The fix mirrors that precedent exactly:
+ * `HybridAppWithProgressApiModule` below simply imports `AppModule` plus `ProgressApiModule` — whose
+ * own `@Module({ controllers: [ProgressController] })` declaration (`progress-api.module.ts`) needs
+ * no re-declaring here, unlike RTS's own ingest controller, which its ingestion module doesn't
+ * declare itself. `startHybridBootstrap()` below picks this wrapper, instead of plain `AppModule`,
+ * as its ONE `NestFactory.create(...)` root module whenever `PROGRESS_API_ENABLED` is the literal
+ * string `'true'`, decided BEFORE the single `app.listen(port)` call — so `/progress/...` (when
+ * enabled) is reachable on the exact same port `/health` answers on, no second listener, no second
+ * port. `PROGRESS_API_PORT` has no effect on this hybrid path anymore — it still governs only the
+ * untouched standalone `progress-api-server.main.ts` (R2).
+ *
+ * One real, deliberate behavior difference from the gRPC/Kafka/processing gates below, flagged
+ * explicitly here and in this task's own completion report ("Deviations"): those three are each
+ * wrapped in `attemptOptionalTransport`'s try/catch, so a misconfigured one (TC-6 below) can never
+ * take down the already-`app.listen()`-ing primary HTTP app. The progress API's own
+ * `ProgressApiAuthGuard` construction (which throws if `PROGRESS_API_AUTH_SECRET` is unset —
+ * `progress-api-auth.guard.ts`'s own header) now runs as part of building `NestFactory.create(...)`'s
+ * module graph itself, BEFORE `app.listen()` is ever reached — so an explicitly-enabled-but-
+ * misconfigured progress API fails the *whole* hybrid boot (a raw, uncaught rejection out of
+ * `startHybridBootstrap()`, not a `HybridBootstrapError` with a still-live `partial.httpApp`), not
+ * just that one transport. This is the same trade-off T-INT-057 already accepted for RTS's own
+ * REST-ingest fold-in ("Fail loud, never silently downgrade... exits non-zero... one call earlier
+ * than before, not a behavior change an operator would observe") — an unavoidable consequence of
+ * Nest fixing a module graph at creation time, not a design choice available to a fix that still
+ * had to put this route on the one port Render actually exposes.
  */
 const logger = new Logger('Bootstrap');
 
@@ -84,11 +112,31 @@ export async function createProcessingWorkerContext(): Promise<INestApplicationC
   return NestFactory.createApplicationContext(ProcessingWorkerRootModule);
 }
 
+/**
+ * T-INT-062. Composes the real `AppModule` together with the customer progress API
+ * (`ProgressApiModule`, which already declares `ProgressController` as its own `controllers`) into
+ * one module graph, so `NestFactory.create(...)` below produces a single `INestApplication`/single
+ * `http.Server` whose routes include both — no second `app.listen(...)` call, no second port. Only
+ * ever selected as the root module when `PROGRESS_API_ENABLED === 'true'` (see
+ * `startHybridBootstrap()` below); otherwise plain `AppModule` is used unchanged, so
+ * `/progress/...` is genuinely absent (404, TC-2), not merely unauthenticated. See this file's own
+ * header for the full "why" (T-INT-057 precedent, why `app.module.ts` itself isn't touched here
+ * either — this module imports the already-exported `AppModule` class as a sibling, not the other
+ * way around, so this fix stays entirely inside this task's own "Files owned" list).
+ */
+@Module({ imports: [AppModule, ProgressApiModule] })
+export class HybridAppWithProgressApiModule {}
+
 export interface HybridBootstrapResult {
   httpApp: INestApplication;
   grpcApp: INestMicroservice | null;
   ingestConsumerContext: INestApplicationContext | null;
-  progressApiApp: INestApplication | null;
+  /** `true` when `ProgressController`'s routes (T-INT-062) are mounted on this same `httpApp`/port
+   * — unlike `grpcApp`/`ingestConsumerContext`/`processingWorkerContext` below, there is no separate
+   * handle to return here: this transport shares the primary app's own lifecycle/`close()` entirely.
+   * Same `restIngestMounted: boolean` precedent `reward-tracking-service/src/main.ts`'s own
+   * T-INT-057 fix already set for the identical shape of change. */
+  progressApiMounted: boolean;
   processingWorkerContext: INestApplicationContext | null;
 }
 
@@ -158,17 +206,28 @@ async function attemptOptionalTransport<T>(
  * guard below when this runs as a real process, or a test when it doesn't).
  */
 export async function startHybridBootstrap(): Promise<HybridBootstrapResult> {
-  const app = await NestFactory.create(AppModule);
+  // T-INT-062: read BEFORE NestFactory.create(...) — the root module itself depends on this value
+  // (HybridAppWithProgressApiModule's own header above), and a Nest module graph is fixed at
+  // creation time, so this is the one point in this function where that decision can be made.
+  const progressApiEnabled = process.env.PROGRESS_API_ENABLED === 'true';
+
+  const app = await NestFactory.create(
+    progressApiEnabled ? HybridAppWithProgressApiModule : AppModule,
+  );
 
   const configService = app.get(ConfigService<Config, true>);
   const port = configService.get('PORT', { infer: true });
 
   await app.listen(port);
   logger.log(`HTTP server listening on port ${port}`);
+  if (progressApiEnabled) {
+    logger.log(
+      `customer progress API mounted on the primary HTTP listener (port ${port}, same as /health) — T-INT-062`,
+    );
+  }
 
   const grpcServerEnabled = process.env.GRPC_SERVER_ENABLED === 'true';
   const activityIngestConsumerEnabled = process.env.ACTIVITY_INGEST_CONSUMER_ENABLED === 'true';
-  const progressApiEnabled = process.env.PROGRESS_API_ENABLED === 'true';
   const processingEnabled = process.env.PROCESSING_ENABLED === 'true';
 
   const grpcResult = await attemptOptionalTransport(
@@ -177,7 +236,28 @@ export async function startHybridBootstrap(): Promise<HybridBootstrapResult> {
     async () => {
       const grpcApp = await createGrpcMicroservice();
       if (grpcApp !== null) {
-        await grpcApp.listen();
+        // T-INT-062 retry 2 (review fix): `createGrpcMicroservice()` can succeed (a real,
+        // fully-constructed `INestMicroservice`, its own live NestContainer already built) and
+        // THEN `.listen()` can still fail (a real, transient `EADDRINUSE` — the exact race
+        // `test/main/hybrid-bootstrap.e2e-spec.ts`'s own TC-5 hit under a full, default-parallel
+        // `npm test` run: `getFreePort()` finding a port that a DIFFERENT parallel worker's own
+        // test grabs a moment later). Before this fix, that already-built `grpcApp` was simply
+        // dropped on the floor here — never returned (so `attemptOptionalTransport`'s own catch,
+        // and this whole function's `HybridBootstrapError.partial`, never got a reference to it),
+        // never closed. A constructed-but-never-closed `INestMicroservice` still has a live
+        // `NestContainer`; if anything about it settles asynchronously later (this project's own
+        // gRPC bootstrap holds open credentials/handles), an unhandled rejection carrying that
+        // container is exactly what corrupts jest-worker's `messageParent` IPC relay
+        // (`TypeError: Converting circular structure to JSON`) for the whole file — the same
+        // observable crash TC-7's own retry-2 fix addresses for a different trigger. Closing it
+        // here, before rethrowing, means `attemptOptionalTransport`'s caller never needs to know
+        // this ever existed.
+        try {
+          await grpcApp.listen();
+        } catch (error) {
+          await grpcApp.close().catch(() => {});
+          throw error;
+        }
       }
       return grpcApp;
     },
@@ -189,19 +269,17 @@ export async function startHybridBootstrap(): Promise<HybridBootstrapResult> {
     async () => {
       const context = await createIngestConsumerContext();
       if (context !== null) {
-        await context.get(ActivityIngestConsumer).start();
+        // T-INT-062 retry 2: same "don't drop an already-constructed handle on a later failure"
+        // fix as the gRPC transport above — `.start()` failing after a successful
+        // `createIngestConsumerContext()` must not leak the context it already built.
+        try {
+          await context.get(ActivityIngestConsumer).start();
+        } catch (error) {
+          await context.close().catch(() => {});
+          throw error;
+        }
       }
       return context;
-    },
-  );
-
-  const progressApiResult = await attemptOptionalTransport(
-    progressApiEnabled,
-    'customer progress API',
-    async () => {
-      const progressApiApp = await createProgressApiApp();
-      await progressApiApp.listen(resolveProgressApiPort());
-      return progressApiApp;
     },
   );
 
@@ -215,16 +293,13 @@ export async function startHybridBootstrap(): Promise<HybridBootstrapResult> {
     httpApp: app,
     grpcApp: grpcResult.handle,
     ingestConsumerContext: ingestResult.handle,
-    progressApiApp: progressApiResult.handle,
+    progressApiMounted: progressApiEnabled,
     processingWorkerContext: processingResult.handle,
   };
 
-  const failures = [
-    grpcResult.failure,
-    ingestResult.failure,
-    progressApiResult.failure,
-    processingResult.failure,
-  ].filter((failure): failure is TransportFailure => failure !== null);
+  const failures = [grpcResult.failure, ingestResult.failure, processingResult.failure].filter(
+    (failure): failure is TransportFailure => failure !== null,
+  );
 
   if (failures.length > 0) {
     const labels = failures.map((failure) => failure.label).join(', ');
