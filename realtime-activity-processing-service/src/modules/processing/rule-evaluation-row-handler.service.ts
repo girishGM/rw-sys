@@ -70,6 +70,40 @@
  * same already-resolved `granted.reward` (`BoundReward`, T-173/T-RAP-065) — purely descriptive
  * metadata (`reward-entry.model.ts`'s own header), never a new cap/budget enforcement input, never
  * changing any existing field's own value.
+ *
+ * **T-INT-060 update (sibling-tracker-component exclusivity).** Fixes a real correctness bug: one
+ * activity fanning out to N sibling `tracker_components` under the *same* tracker, all bound to
+ * the identical `activityId` (the "buy N times to complete a streak" shape —
+ * `05-PROCESSING-PIPELINE.md` §1 is silent on this specific case, a genuine spec gap, not a
+ * deviation from spec — see this task's own file for the full live-evidence writeup). Before
+ * `RuleEvaluatorService.evaluate()` is ever called for a claimed row, `resolveSiblingTarget` below
+ * decides whether *this* row's own component is the one sibling allowed to advance, using two
+ * checks, in order:
+ *  1. **Has this exact real-world activity submission already advanced a different sibling?**
+ *     Every row one submission fans out to shares an identical `activity_logs.dedup_key`
+ *     (`activity-ingestion.service.ts`'s own header — computed once, reused verbatim for every
+ *     matched row). `TrackerComponentProgressRepository.findSiblingAdvancedByDedupKey` answers this
+ *     directly; if it finds a match, that sibling — not a fresh recomputation — is the target. This
+ *     check exists specifically because, without it, each subsequent sibling row from the *same*
+ *     submission would legitimately look like "the new lowest incomplete slot" the instant the
+ *     previous sibling row committed, cascading every sibling through in one submission — the exact
+ *     shape of bug this task fixes, just one layer deeper; caught by this task's own TC-1 during
+ *     implementation (see completion report).
+ *  2. **Otherwise, the lowest-`sequenceOrder` sibling whose latest-cycle progress is not yet
+ *     `is_completed`** (`TrackerComponentProgressRepository.isLatestCycleComplete`) — the ordinary
+ *     "which slot is next" computation, covering a *different*, later submission advancing the next
+ *     slot once an earlier submission's own advance has already committed.
+ * A row whose own component is not the resolved target is marked `'processed'` immediately, with a
+ * comment naming the real target and which of the two reasons applied, and never reaches rule
+ * evaluation or touches progress at all — so only one sibling can ever advance per real-world
+ * activity, regardless of which of the N fanned-out rows `ActivityLogClaimWorker` happens to claim
+ * first (both checks always read current, committed state at the moment each row is actually
+ * handled, inside the same advisory-lock-guarded transaction this method already opens — never
+ * assumed from `sequence_order` alone). The common case — a tracker whose components are bound to
+ * *distinct* activities — has no siblings to resolve and is completely unaffected
+ * (`resolveSiblingTarget` returns immediately). Fan-out itself
+ * (`ActivityIngestionService`/`CampaignConfigCacheService`) is unchanged — all N rows are still
+ * created; this only gates which one is allowed to reach evaluation.
  */
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import type { Sequelize, Transaction } from 'sequelize';
@@ -100,6 +134,16 @@ import { TrackerComponentProgressRepository } from './tracker-component-progress
 import { TrackerStatusRepository } from './tracker-status.repository';
 
 type ActivityLogRowStatus = 'processed' | 'error';
+
+/** T-INT-060: `resolveSiblingTarget`'s own result — which sibling component is allowed to advance
+ * from this row's own activity, and why, so `handle()` can report an accurate skip comment. */
+interface SiblingTargetResolution {
+  componentCode: string;
+  /** `true` when the target was resolved because this exact real-world activity submission
+   * (shared `dedup_key`) already advanced this sibling; `false` when it was resolved as the
+   * ordinary lowest-`sequenceOrder`-not-yet-completed slot (including the no-siblings no-op case). */
+  alreadyAdvancedThisActivity: boolean;
+}
 
 @Injectable()
 export class RuleEvaluationRowHandler implements ActivityLogRowHandler {
@@ -147,6 +191,21 @@ export class RuleEvaluationRowHandler implements ActivityLogRowHandler {
       });
 
       const { tracker, component, ruleRefs } = this.resolveTrackerContext(row);
+
+      // T-INT-060: gate fan-out siblings sharing one activity binding under the same tracker —
+      // see this file's own header. A no-op (returns `component.componentCode` immediately) for
+      // the common case of a component with no such siblings.
+      const siblingTarget = await this.resolveSiblingTarget(transaction, row, tracker, component);
+      if (siblingTarget.componentCode !== component.componentCode) {
+        const comment = siblingTarget.alreadyAdvancedThisActivity
+          ? `Sibling component "${siblingTarget.componentCode}" already advanced from this same ` +
+            `activity; activity did not advance component "${component.componentCode}".`
+          : `Sibling component "${siblingTarget.componentCode}" is this tracker's current pending ` +
+            `slot; activity did not advance component "${component.componentCode}".`;
+        await this.markProcessed(transaction, row, 'processed', comment);
+        return;
+      }
+
       const outcome = this.ruleEvaluator.evaluate(row, ruleRefs);
 
       if (!outcome.passed) {
@@ -310,6 +369,81 @@ export class RuleEvaluationRowHandler implements ActivityLogRowHandler {
       }
       return false;
     });
+  }
+
+  /**
+   * T-INT-060. `tracker.components` (the raw, unfiltered cache payload — `resolveTrackerContext`'s
+   * own header documents why `cached.raw` is read directly) may hold several **active** siblings
+   * of `component`, under the same `tracker`, bound to the identical `activityId` — the "buy N
+   * times" streak shape this task fixes. Returns the `componentCode` of the one sibling (possibly
+   * `component` itself) that is this tracker's current pending slot: the lowest-`sequenceOrder`
+   * sibling whose own latest-cycle progress row is not yet `is_completed`, read via
+   * `TrackerComponentProgressRepository.isLatestCycleComplete` — inside the same transaction/
+   * advisory-lock scope `handle()` already opened, so this is always a read of committed state as
+   * of the moment *this* row is actually handled, never a stale snapshot from fan-out time and
+   * never dependent on which sibling row was claimed first (two sibling rows for the same
+   * customer+campaign can never run this concurrently — the advisory lock serializes them).
+   *
+   * A component with no such siblings (the common case — most trackers bind distinct activities to
+   * distinct components) short-circuits (`{ componentCode: component.componentCode, alreadyAdvancedThisActivity: false }`),
+   * a pure no-op.
+   *
+   * Two checks, in order — see this file's own header for the full "why":
+   *  1. `findSiblingAdvancedByDedupKey`: has *this exact* real-world activity submission (shared
+   *     `dedup_key` across every fanned-out sibling row) already advanced a different sibling? If
+   *     so, that sibling is the target, `alreadyAdvancedThisActivity: true` — never recomputed from
+   *     `sequence_order`, because doing so would let every later sibling row of the *same*
+   *     submission cascade through right behind the one that already advanced.
+   *  2. Otherwise, the lowest-`sequenceOrder` sibling whose latest-cycle progress is not yet
+   *     `is_completed` (`isLatestCycleComplete`) — a *different*, later submission's own "which slot
+   *     is next" computation. If every sibling's latest cycle is already complete (e.g. a repeatable
+   *     tracker that has already finished one full pass), falls back to the lowest-`sequenceOrder`
+   *     sibling — the same "start the next cycle" behavior
+   *     `TrackerComponentProgressRepository.upsertOnPassingActivity` already applies to a single,
+   *     non-sibling component (its own `insertNewCycle` branch); this task's own test cases don't
+   *     exercise a second full pass, so this is a documented, reasonable extrapolation rather than a
+   *     directly-specified case — flagged in the completion report.
+   */
+  private async resolveSiblingTarget(
+    transaction: Transaction,
+    row: ActivityLogRow,
+    tracker: TrackerProto,
+    component: TrackerComponentProto,
+  ): Promise<SiblingTargetResolution> {
+    const siblings = (tracker.components ?? []).filter(
+      (candidate) => candidate.status === 'active' && candidate.activityId === component.activityId,
+    );
+    if (siblings.length <= 1) {
+      return { componentCode: component.componentCode, alreadyAdvancedThisActivity: false };
+    }
+    const bySequence = [...siblings].sort((a, b) => a.sequenceOrder - b.sequenceOrder);
+    const siblingComponentCodes = bySequence.map((candidate) => candidate.componentCode);
+
+    const advancedBy = await this.progressRepository.findSiblingAdvancedByDedupKey(transaction, {
+      tenantId: row.tenant_id,
+      customerIdHash: row.customer_id_hash,
+      campaignCode: row.campaign_code,
+      trackerCode: row.tracker_code,
+      siblingComponentCodes,
+      dedupKey: row.dedup_key,
+    });
+    if (advancedBy !== null) {
+      return { componentCode: advancedBy, alreadyAdvancedThisActivity: true };
+    }
+
+    for (const candidate of bySequence) {
+      const isComplete = await this.progressRepository.isLatestCycleComplete(transaction, {
+        tenantId: row.tenant_id,
+        customerIdHash: row.customer_id_hash,
+        campaignCode: row.campaign_code,
+        trackerCode: row.tracker_code,
+        trackerComponentCode: candidate.componentCode,
+      });
+      if (!isComplete) {
+        return { componentCode: candidate.componentCode, alreadyAdvancedThisActivity: false };
+      }
+    }
+    return { componentCode: bySequence[0].componentCode, alreadyAdvancedThisActivity: false };
   }
 
   /**

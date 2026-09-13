@@ -31,6 +31,27 @@ export interface UpsertProgressInput {
   activityLogId: string;
 }
 
+/** T-INT-060: the identifying tuple `isLatestCycleComplete` needs, without the write-only fields
+ * (`requiredCount`/`activityLogId`) a pure lookup has no use for. */
+export type ProgressLookupInput = Omit<UpsertProgressInput, 'requiredCount' | 'activityLogId'>;
+
+/** T-INT-060: the tuple `findSiblingAdvancedByDedupKey` needs to answer "has this exact real-world
+ * activity submission already consumed its one allowed sibling-slot advance". */
+export interface SiblingAdvancedLookupInput {
+  tenantId: number;
+  customerIdHash: string;
+  campaignCode: string;
+  trackerCode: string;
+  /** Every active sibling under this tracker bound to the same `activityId` — including the
+   * caller's own component, so a single-sibling-set query covers every candidate. */
+  siblingComponentCodes: readonly string[];
+  /** `activity_logs.dedup_key` of the row currently being handled — identical, by construction,
+   * across every row one real-world activity submission fanned out to
+   * (`activity-ingestion.service.ts`'s own header: computed once per inbound activity, reused
+   * verbatim for every matched row), and different from any other submission's own dedup_key. */
+  dedupKey: string;
+}
+
 export interface UpsertProgressResult {
   row: CustomerTrackerComponentProgressRow;
   /** `true` only when *this* write is what flipped `is_completed` from `false` to `true` (or
@@ -93,6 +114,99 @@ export class TrackerComponentProgressRepository {
       return this.insertNewCycle(transaction, input, existing.completion_cycle + 1);
     }
     return this.incrementExisting(transaction, existing, input);
+  }
+
+  /**
+   * T-INT-060: read-only — whether the latest `completion_cycle` row for this (tenant, customer,
+   * campaign, tracker, component) tuple is already `is_completed`, or `false` when no row exists
+   * yet. No `FOR UPDATE`: used only to decide which of several sibling components bound to the
+   * same activity (`rule-evaluation-row-handler.service.ts`'s own `resolveSiblingTarget`) is this
+   * tracker's current pending slot, never to drive a write of its own — the actual write when that
+   * target's rule passes still goes through `upsertOnPassingActivity`'s own `SELECT ... FOR
+   * UPDATE` above. Read-after-write consistency across the several sibling rows for one
+   * customer+campaign, processed one at a time, is guaranteed by the
+   * `acquireCustomerCampaignAdvisoryLock` the caller already holds for the whole transaction
+   * (`advisory-lock.util.ts`), not by a row lock here.
+   */
+  async isLatestCycleComplete(
+    transaction: Transaction,
+    input: ProgressLookupInput,
+  ): Promise<boolean> {
+    const rows = await this.sequelize.query<CustomerTrackerComponentProgressRow>(
+      `SELECT * FROM realtime_activity_processing.customer_tracker_component_progress
+        WHERE tenant_id = :tenantId
+          AND customer_id_hash = :customerIdHash
+          AND campaign_code = :campaignCode
+          AND tracker_code = :trackerCode
+          AND tracker_component_code = :trackerComponentCode
+        ORDER BY completion_cycle DESC
+        LIMIT 1`,
+      {
+        type: QueryTypes.SELECT,
+        transaction,
+        replacements: {
+          tenantId: input.tenantId,
+          customerIdHash: input.customerIdHash,
+          campaignCode: input.campaignCode,
+          trackerCode: input.trackerCode,
+          trackerComponentCode: input.trackerComponentCode,
+        },
+      },
+    );
+    return rows[0]?.is_completed ?? false;
+  }
+
+  /**
+   * T-INT-060: has ANY of `siblingComponentCodes` (for this tenant/customer/campaign/tracker)
+   * already been written to by a progress upsert whose own `activityLogId` was fanned out from
+   * *this exact* real-world activity submission (`dedupKey` match)? The advisory lock the caller
+   * already holds for the whole transaction serializes every write for this customer+campaign, so
+   * "the most recent write to any sibling's progress" (`last_activity_log_id`, updated on every
+   * insert *and* every increment — `upsertOnPassingActivity`'s own two write paths) is always
+   * exactly the write this same batch itself just made, if it made one at all; no historical-cycle
+   * scan is needed.
+   *
+   * Returns the advancing sibling's own `componentCode`, or `null` if this submission has not yet
+   * advanced any sibling — the caller (`resolveSiblingTarget`) uses `null` to fall through to the
+   * ordinary lowest-`sequenceOrder`-not-yet-completed computation, and a non-null result to gate
+   * every *other* row from the same submission, even one whose own component would otherwise look
+   * like the next eligible slot (`is_completed` having just flipped `true` by this same submission's
+   * own earlier sibling row) — without this check, each sibling row would legitimately re-qualify
+   * as "the new lowest incomplete slot" right after the previous one committed, cascading through
+   * every sibling from a single real activity exactly the bug this task fixes.
+   */
+  async findSiblingAdvancedByDedupKey(
+    transaction: Transaction,
+    input: SiblingAdvancedLookupInput,
+  ): Promise<string | null> {
+    if (input.siblingComponentCodes.length === 0) {
+      return null;
+    }
+    const rows = await this.sequelize.query<{ tracker_component_code: string }>(
+      `SELECT p.tracker_component_code
+         FROM realtime_activity_processing.customer_tracker_component_progress p
+         JOIN realtime_activity_processing.activity_logs al ON al.id = p.last_activity_log_id
+        WHERE p.tenant_id = :tenantId
+          AND p.customer_id_hash = :customerIdHash
+          AND p.campaign_code = :campaignCode
+          AND p.tracker_code = :trackerCode
+          AND p.tracker_component_code IN (:siblingComponentCodes)
+          AND al.dedup_key = :dedupKey
+        LIMIT 1`,
+      {
+        type: QueryTypes.SELECT,
+        transaction,
+        replacements: {
+          tenantId: input.tenantId,
+          customerIdHash: input.customerIdHash,
+          campaignCode: input.campaignCode,
+          trackerCode: input.trackerCode,
+          siblingComponentCodes: [...input.siblingComponentCodes],
+          dedupKey: input.dedupKey,
+        },
+      },
+    );
+    return rows[0]?.tracker_component_code ?? null;
   }
 
   private async insertNewCycle(

@@ -217,7 +217,12 @@ describe('Tracker completion aggregation (real Postgres, rap_app role)', () => {
       componentId,
       componentCode,
       name: componentCode,
-      activityId: 701,
+      // T-INT-060: distinct per component (was a shared `701` for every component in this file,
+      // before T-INT-060's `RuleEvaluationRowHandler.resolveSiblingTarget` started treating
+      // same-tracker components with an identical `activityId` as fan-out siblings of one another
+      // — this file's own components are deliberately independent, never siblings of one real
+      // activity, so each needs its own `activityId` to avoid being misclassified as a sibling set).
+      activityId: componentId,
       sequenceOrder: 1,
       isMandatory: true,
       status: 'active',
